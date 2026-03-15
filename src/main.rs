@@ -1,32 +1,78 @@
-use std::fs::{File};
+use std::cell::RefCell;
+use std::fs::{self, File};
 use ropey::Rope;
+use std::rc::Rc;
+use std::path::PathBuf;
 use std::{env, io};
-use std::io::{BufReader, Write};
+use std::io::{Write};
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use termion::event::Key;
 
-struct View{
+struct Buffer{
+    flags: u64,
+    file: Option<PathBuf>,
     buf: Rope,
+}
+impl Buffer{
+    const READ_ONLY:       u64 = 1 << 0;
+    const SCRATCH:         u64 = 1 << 1;
+    const DIRTY:           u64 = 1 << 2;
+    const NEW_FILE:        u64 = 1 << 3;
+    const NON_NAVIGATABLE: u64 = 1 << 4;
+    fn new(path: Option<PathBuf>, flags: Option<u64>)->std::io::Result<Buffer>{
+        let mut f = flags.unwrap_or(0);
+        let data = if let Some(ref path) = path {
+            if path.exists(){
+                let cont = fs::read_to_string(path)?;
+                if fs::metadata(path)?.permissions().readonly(){
+                    f |= Self::READ_ONLY;
+                }
+                Rope::from_str(&cont)
+            }else{
+                f |= Self::NEW_FILE;
+                Rope::new()
+            }
+        }else{
+            f |= Self::SCRATCH;
+            Rope::new()
+        };
+        Ok(Buffer{
+            flags: f,
+            buf: data,
+            file: path,
+        })
+    }
+    fn set_flag(&mut self, flag: u64){
+        self.flags |= flag
+    }
+    fn clear_flag(&mut self, flag: u64){
+        self.flags &= !flag
+    }
+    fn check_flag(&self, flag: u64)->bool{
+        self.flags & flag != 0
+    }
+}
+
+struct View{
+    buf: Rc<RefCell<Buffer>>,
     y: usize,
     x: usize,
+    prefered_x: usize,
     off: usize,
 }
 
 impl View{
-    fn init()->Self{
+    fn new(buffer: Rc<RefCell<Buffer>>)->Self{
         Self{
-            buf: Rope::new(),
-            y: 0,
+            buf: buffer,
             x: 0,
+            prefered_x: 0,
+            y: 0,
             off: 0,
         }
     }
-    fn open_file(&mut self, filename: &str)->io::Result<()>{
-        let file = File::open(filename)?;
-        self.buf = Rope::from_reader(BufReader::new(file))?;
-        Ok(())
-    }
+    
     fn draw(&self) -> io::Result<()> {
         let (_, term_height) = termion::terminal_size()?;
         let mut out = io::stdout().lock();
@@ -35,15 +81,14 @@ impl View{
 
         let height = term_height as usize - 1; // account for 1-indexed terminal
         let start = self.off;
-        let end = usize::min(self.off + height, self.buf.len_lines());
+        let buffer = self.buf.borrow();
+        let end = usize::min(self.off + height, buffer.buf.len_lines());
 
-        let line_number_width = ((self.buf.len_lines() as f32).log10().ceil() as usize).max(1) + 1;
+        let line_number_width = ((buffer.buf.len_lines() as f32).log10().ceil() as usize).max(1) + 1;
 
         for i in start..end {
-            let line = self.buf.line(i);
             write!(out, "{:>width$} ", i + 1, width = line_number_width)?;
-            // print line content (Ropey lines include '\n')
-            write!(out, "{line}\r")?;
+            write!(out, "{}\r", buffer.buf.line(i))?;
         }
 
     // draw cursor, offset by line number column
@@ -71,51 +116,70 @@ impl View{
             Key::Backspace => self.backspace(),
             Key::Up => {
                 self.y = self.y.saturating_sub(1);
+                if let Some(line) = self.buf.borrow().buf.get_line(self.y){
+                    self.x = self.prefered_x.min(line.len_chars());
+                }
             }
             Key::Down => {
-                if self.buf.len_lines() > 0{
-                    self.y = usize::min(self.y+1, self.buf.len_lines()-1);
+                if self.buf.borrow().buf.len_lines() > 0{
+                    self.y = usize::min(self.y+1, self.buf.borrow().buf.len_lines()-1);
+                }
+                if let Some(line) = self.buf.borrow().buf.get_line(self.y){
+                    self.x = self.prefered_x.min(line.len_chars());
                 }
             }
             Key::Left => {
                 self.x = self.x.saturating_sub(1);
+                self.prefered_x = self.x;
             }
-            Key::Right => self.x = self.x + 1,
+            Key::Right => {
+                self.x = self.x + 1;
+                if let Some(line) = self.buf.borrow().buf.get_line(self.y){
+                    self.x = self.x.min(line.len_chars());
+                }
+                self.prefered_x = self.x;
+            }
             _ => {}
         }
 
         let (_, height) = termion::terminal_size().unwrap();
         let height = height as usize;
+        let buffer = self.buf.borrow();
 
         if self.y < self.off{
             self.off = self.y;
         } else if self.y >= self.off + height{
             self.off = self.y - height + 1;
         }
-        if let Some(line) = self.buf.get_line(self.y){
+        if let Some(line) = buffer.buf.get_line(self.y){
             if line.len_chars() > 0 {
-                self.x = usize::min(self.x, line.len_chars()-1);
+                self.x = usize::min(self.x, line.len_chars());
             }else{
-                self.x = 0;
+                self.x = 1;
             }
         }else{
-            self.x = 0;
+            self.x = 1;
         }
     }
     fn insert_char(&mut self, c: char){
-        self.buf.insert_char(self.cursor_char(), c);
+        let mut buffer = self.buf.borrow_mut();
+        let cursor_char = self.cursor_char(&buffer).saturating_sub(1);
+        buffer.buf.insert_char(cursor_char, c);
         self.x += 1;
+        self.prefered_x = self.x;
     }
     fn backspace(&mut self){
+        let mut buffer = self.buf.borrow_mut();
         if self.x != 0 || self.y != 0{
-            let idx = self.cursor_char();
+            let idx = self.cursor_char(&buffer);
             if idx > 0 {
-                self.buf.remove(idx - 1..idx);
+                buffer.buf.remove(idx - 1..idx);
                 if self.x > 0{
                     self.x -= 1;
+                    self.prefered_x = self.x;
                 }else{
                     self.y -= 1;
-                    if let Some(line) = self.buf.get_line(self.y){
+                    if let Some(line) = buffer.buf.get_line(self.y){
                         self.x = line.len_chars();
                     }
                 }
@@ -123,39 +187,45 @@ impl View{
         }
     }
     fn new_line(&mut self){
-        self.buf.insert_char(self.cursor_char(), '\n');
+        let mut buffer = self.buf.borrow_mut();
+        let cursor_char = self.cursor_char(&buffer);
+        buffer.buf.insert_char(cursor_char, '\n');
         self.y += 1;
         self.x = 0;
     }
-    fn cursor_char(&self)->usize{
-        self.buf.line_to_char(self.y)+self.x
+    fn cursor_char(&self, buffer: &Buffer) -> usize {
+        buffer.buf.line_to_char(self.y) + self.x
     }
-    fn save_file(&self, filename: &str)-> io::Result<()>{
-        let mut file = File::create(filename)?;
-        self.buf.write_to(&mut file)?;
+    fn save_file(&self)-> io::Result<()>{
+        let buffer = self.buf.borrow(); 
+        if let Some(path) = &buffer.file{
+            let mut file = File::create(path)?;
+            buffer.buf.write_to(&mut file)?;
+        }
         Ok(())
     }
 }
 
-fn main()->io::Result<()> {
-    let filename = env::args().nth(1).expect("invalid filepath");
-    let mut editor = View::init();
-    editor.open_file(&filename)?;
+fn main()->io::Result<()>{
+    let filename: Option<String> = env::args().nth(1);
+    let filename: Option<PathBuf> = filename.map(PathBuf::from);
+    let file = Rc::new(RefCell::new(Buffer::new(filename, None)?));
+    let mut view = View::new(Rc::clone(&file));
     let input = io::stdin();
     let mut out = io::stdout().into_raw_mode()?;
     write!(out, "{}",termion::cursor::Show)?;
-    editor.draw()?;
+    view.draw()?;
     for key in input.keys(){
         match key?{
             Key::Ctrl('q')=> break,
-            Key::Ctrl('w')=> editor.save_file(&filename)?,
+            Key::Ctrl('w')=> view.save_file()?,
             Key::Ctrl('x')=> {
-                editor.save_file(&filename)?;
+                view.save_file()?;
                 break
-            } 
-            k => editor.process_key(k),
+            }
+            k => view.process_key(k),
         }
-        editor.draw()?;
+        view.draw()?;
     }
     write!(out,"{}",termion::cursor::Show)?;
     Ok(())
