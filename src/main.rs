@@ -30,7 +30,7 @@ impl Buffer{
                 }
                 Rope::from_str(&cont)
             }else{
-                f |= Self::NEW_FILE;
+               f |= Self::NEW_FILE;
                 Rope::new()
             }
         }else{
@@ -94,7 +94,7 @@ impl View{
             let line_index = start + row;
             if let Some(line) = buffer.buf.get_line(line_index){
                 let end = usize::min(self.width as usize, line.len_chars());
-                let slice = line.slice(..end);
+                let slice = line.slice(..end.saturating_sub(1));//off by one if not -1 totally didnt spend 2 days trying to find it
                 write!(out, "{}",slice)?;
             }
             write!(out, "{}", termion::clear::UntilNewline)?;
@@ -122,10 +122,10 @@ impl View{
             }
             Key::Down => {
                 if self.buf.borrow().buf.len_lines() > 0{
-                    self.y = usize::min(self.y+1, self.buf.borrow().buf.len_lines()-1);
+                    self.y = usize::min(self.y+1, self.buf.borrow().buf.len_lines().saturating_sub(1));
                 }
                 if let Some(line) = self.buf.borrow().buf.get_line(self.y){
-                    self.x = self.prefered_x.min(line.len_chars());
+                    self.x = self.prefered_x.min(line.len_chars().saturating_sub(1));
                 }
             }
             Key::Left => {
@@ -135,7 +135,7 @@ impl View{
             Key::Right => {
                 self.x = self.x + 1;
                 if let Some(line) = self.buf.borrow().buf.get_line(self.y){
-                    self.x = self.x.min(line.len_chars()-1);
+                    self.x = self.x.min(line.len_chars().saturating_sub(1));
                 }
                 self.prefered_x = self.x;
             }
@@ -151,7 +151,7 @@ impl View{
         }
         if let Some(line) = buffer.buf.get_line(self.y){
             if line.len_chars() > 0 {
-                self.x = usize::min(self.x, line.len_chars()-1);
+                self.x = usize::min(self.x, line.len_chars().saturating_sub(1));
             }else{
                 self.x = 0;
             }
@@ -223,13 +223,13 @@ fn main()->io::Result<()>{
             0,
         ));
     }
-    let active = views.len()-1;
+    let mut active = views.len()-1;
 
     let input = io::stdin();
     let mut out = io::stdout().into_raw_mode()?;
     write!(out, "{}",termion::clear::All)?;
-    for _ in views.iter().enumerate(){
-        views[active].draw()?;
+    for i in 0..views.len(){
+        views[i].draw()?;
     }
     for key in input.keys(){
         match key?{
@@ -239,6 +239,7 @@ fn main()->io::Result<()>{
                 views[active].save_file()?;
                 break
             }
+            Key::CtrlRight=> active = (active.saturating_add(1)) % views.len(),
             k => views[active].process_key(k),
         }
         views[active].draw()?;
