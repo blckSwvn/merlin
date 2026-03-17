@@ -1,7 +1,5 @@
-use std::cell::RefCell;
 use std::fs::{self, File};
 use ropey::Rope;
-use std::rc::Rc;
 use std::path::PathBuf;
 use std::{env, io};
 use std::io::{Write};
@@ -19,31 +17,7 @@ impl Buffer{
     const SCRATCH:         u64 = 1 << 1;
     const DIRTY:           u64 = 1 << 2;
     const NEW_FILE:        u64 = 1 << 3;
-    const NON_NAVIGATABLE: u64 = 1 << 4;
-    fn new(path: Option<PathBuf>, flags: Option<u64>)->std::io::Result<Buffer>{
-        let mut f = flags.unwrap_or(0);
-        let data = if let Some(ref path) = path {
-            if path.exists(){
-                let cont = fs::read_to_string(path)?;
-                if fs::metadata(path)?.permissions().readonly(){
-                    f |= Self::READ_ONLY;
-                }
-                Rope::from_str(&cont)
-            }else{
-               f |= Self::NEW_FILE;
-                Rope::new()
-            }
-        }else{
-            f |= Self::SCRATCH;
-            Rope::new()
-        };
-        Ok(Buffer{
-            flags: f,
-            buf: data,
-            file: path,
-        })
-    }
-    fn set_flag(&mut self, flag: u64){
+    fn set_flagaa(&mut self, flag: u64){
         self.flags |= flag
     }
     fn clear_flag(&mut self, flag: u64){
@@ -52,10 +26,34 @@ impl Buffer{
     fn check_flag(&self, flag: u64)->bool{
         self.flags & flag != 0
     }
+    fn new(path: Option<&str>, flags: u64)->std::io::Result<Buffer>{
+        let mut f = flags;
+        let buf = if let Some(p) = path {
+            let path = PathBuf::from(p);
+            if path.exists(){
+                let cont = fs::read_to_string(&path)?;
+                if fs::metadata(&path)?.permissions().readonly(){
+                    f |= Self::READ_ONLY;
+                }
+                Rope::from_str(&cont)
+            }else{
+                f |= Self::NEW_FILE;
+                Rope::new()
+            }
+        }else{
+            f |= Self::SCRATCH;
+            Rope::new()
+        };
+        Ok(Buffer{
+            flags: f,
+            buf: buf,
+            file: path.map(PathBuf::from),
+        })
+    }
 }
 
 struct View{
-    buf: Rc<RefCell<Buffer>>,
+    buf: usize,
     y: usize,
     x: usize,
     prefered_x: usize,
@@ -68,9 +66,11 @@ struct View{
 }
 
 impl View{
-    fn new(buffer: Rc<RefCell<Buffer>>, pos_x: u16, pos_y: u16, width: u16, height: u16, flags:u16)->Self{
+    const NON_NAVIGATABLE: u16 = 1 << 0;
+    const FLOATING:        u16 = 1 << 1;
+    fn new(buf_index: usize, pos_x: u16, pos_y: u16, width: u16, height: u16, flags:u16)->Self{
         Self{
-            buf: buffer,
+            buf: buf_index,
             x: 0,
             prefered_x: 0,
             y: 0,
@@ -82,10 +82,9 @@ impl View{
             flags,
         }
     }
-    
-    fn draw(&self) -> io::Result<()>{
+
+    fn draw(&self, buffer: &Buffer) -> io::Result<()>{
         let mut out = io::stdout().lock();
-        let buffer = self.buf.borrow();
         let start = self.off;
         let end = usize::min(start + self.height as usize, buffer.buf.len_lines());
 
@@ -102,29 +101,29 @@ impl View{
         let screen_y = self.pos_y + self.y.saturating_sub(self.off) as u16;
         let screen_x = self.pos_x + self.x as u16;
         write!(out, "{}", termion::cursor::Goto(screen_x+1, screen_y+1))?;
-    out.flush()?;
-    Ok(())
-}
-    fn process_key(&mut self, key: Key){
+        out.flush()?;
+        Ok(())
+    }
+    fn process_key(&mut self, buffer: &mut Buffer, key: Key){
         match key{
-            Key::Char('\n')=> self.new_line(),
+            Key::Char('\n')=> self.new_line(buffer),
             Key::Char(c) => {
                 if !c.is_control(){
-                    self.insert_char(c);
+                    self.insert_char(buffer, c);
                 }
             }
-            Key::Backspace => self.backspace(),
+            Key::Backspace => self.backspace(buffer),
             Key::Up => {
                 self.y = self.y.saturating_sub(1);
-                if let Some(line) = self.buf.borrow().buf.get_line(self.y){
+                if let Some(line) = buffer.buf.get_line(self.y){
                     self.x = self.prefered_x.min(line.len_chars());
                 }
             }
             Key::Down => {
-                if self.buf.borrow().buf.len_lines() > 0{
-                    self.y = usize::min(self.y+1, self.buf.borrow().buf.len_lines().saturating_sub(1));
+                if buffer.buf.len_lines() > 0{
+                    self.y = usize::min(self.y+1, buffer.buf.len_lines().saturating_sub(1));
                 }
-                if let Some(line) = self.buf.borrow().buf.get_line(self.y){
+                if let Some(line) = buffer.buf.get_line(self.y){
                     self.x = self.prefered_x.min(line.len_chars().saturating_sub(1));
                 }
             }
@@ -134,15 +133,13 @@ impl View{
             }
             Key::Right => {
                 self.x = self.x + 1;
-                if let Some(line) = self.buf.borrow().buf.get_line(self.y){
+                if let Some(line) = buffer.buf.get_line(self.y){
                     self.x = self.x.min(line.len_chars().saturating_sub(1));
                 }
                 self.prefered_x = self.x;
             }
             _ => {}
         }
-
-        let buffer = self.buf.borrow();
 
         if self.y < self.off{
             self.off = self.y;
@@ -159,15 +156,13 @@ impl View{
             self.x = 0;
         }
     }
-    fn insert_char(&mut self, c: char){
-        let mut buffer = self.buf.borrow_mut();
+    fn insert_char(&mut self, buffer: &mut Buffer, c: char){
         let cursor_char = self.cursor_char(&buffer);
         buffer.buf.insert_char(cursor_char, c);
         self.x += 1;
         self.prefered_x = self.x;
     }
-    fn backspace(&mut self){
-        let mut buffer = self.buf.borrow_mut();
+    fn backspace(&mut self, buffer: &mut Buffer){
         if self.x != 0 || self.y != 0{
             let idx = self.cursor_char(&buffer);
             if idx > 0 {
@@ -184,8 +179,7 @@ impl View{
             }
         }
     }
-    fn new_line(&mut self){
-        let mut buffer = self.buf.borrow_mut();
+    fn new_line(&mut self, buffer: &mut Buffer){
         let cursor_char = self.cursor_char(&buffer);
         buffer.buf.insert_char(cursor_char, '\n');
         self.y += 1;
@@ -194,8 +188,7 @@ impl View{
     fn cursor_char(&self, buffer: &Buffer) -> usize {
         buffer.buf.line_to_char(self.y) + self.x
     }
-    fn save_file(&self)-> io::Result<()>{
-        let buffer = self.buf.borrow(); 
+    fn save_file(&self, buffer: &Buffer)-> io::Result<()>{
         if let Some(path) = &buffer.file{
             let mut file = File::create(path)?;
             buffer.buf.write_to(&mut file)?;
@@ -206,43 +199,45 @@ impl View{
 
 fn main()->io::Result<()>{
     let mut views = vec![];
-    let (width, height) = termion::terminal_size().unwrap();
-    let height = height - 1;//terminal is 1 indexed
-    let args: Vec<String> = env::args().skip(1).collect();
-    let view_count = args.len().max(1);
-    let view_width = width/view_count as u16;
-    for (i, filename) in args.iter().enumerate(){
-        let pos_x = i as u16 * view_width;
-        let file = Rc::new(RefCell::new(Buffer::new(Some(PathBuf::from(filename)), None)?));
-        views.push(View::new(
-            Rc::clone(&file),
-            pos_x,
-            0,
-            view_width,
-            height,
-            0,
-        ));
+    let mut buffers = vec![];
+    {
+        let (width, height) = termion::terminal_size().unwrap();
+        let height = height - 1;//terminal is 1 indexed
+        let args: Vec<String> = env::args().skip(1).collect();
+        if args.is_empty(){
+            buffers.push(Buffer::new(None, 0).unwrap());
+            views.push(View::new(buffers.len(),0,0,width,height,0));
+        }else{
+            let view_count = args.len().max(1);
+            let view_width = width / view_count as u16;
+            for (i, filename) in args.iter().enumerate(){
+                let pos_x = i as u16 * view_width;
+                buffers.push(Buffer::new(Some(filename), 0).unwrap());
+                views.push(View::new(buffers.len().saturating_sub(1), pos_x, 0, view_width, height, 0));
+            }
+        }
     }
-    let mut active = views.len()-1;
+    let mut active = views.len().saturating_sub(1);
 
     let input = io::stdin();
     let mut out = io::stdout().into_raw_mode()?;
     write!(out, "{}",termion::clear::All)?;
     for i in 0..views.len(){
-        views[i].draw()?;
+        views[i].draw(&buffers[views[i].buf])?;
     }
     for key in input.keys(){
+        let buffer = &mut buffers[views[active].buf];
         match key?{
             Key::Ctrl('q')=> break,
-            Key::Ctrl('w')=> views[active].save_file()?,
+            Key::Ctrl('w')=> views[active].save_file(buffer)?,
             Key::Ctrl('x')=> {
-                views[active].save_file()?;
+                views[active].save_file(buffer)?;
                 break
             }
             Key::CtrlRight=> active = (active.saturating_add(1)) % views.len(),
-            k => views[active].process_key(k),
+            k => views[active].process_key(buffer, k),
         }
-        views[active].draw()?;
+        views[active].draw(&buffers[views[active].buf])?;
     }
     Ok(())
 }
