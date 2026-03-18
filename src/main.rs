@@ -17,7 +17,7 @@ impl Buffer{
     const SCRATCH:         u64 = 1 << 1;
     const DIRTY:           u64 = 1 << 2;
     const NEW_FILE:        u64 = 1 << 3;
-    fn set_flagaa(&mut self, flag: u64){
+    fn set_flag(&mut self, flag: u64){
         self.flags |= flag
     }
     fn clear_flag(&mut self, flag: u64){
@@ -68,6 +68,10 @@ struct View{
 impl View{
     const NON_NAVIGATABLE: u16 = 1 << 0;
     const FLOATING:        u16 = 1 << 1;
+    const LINE_NUMBER:     u16 = 1 << 2;
+    fn check_flag(&self, flag: u16)->bool{
+        self.flags & flag != 0
+    }
     fn new(buf_index: usize, pos_x: u16, pos_y: u16, width: u16, height: u16, flags:u16)->Self{
         Self{
             buf: buf_index,
@@ -82,6 +86,22 @@ impl View{
             flags,
         }
     }
+    fn draw_line_numbers(&self) -> io::Result<()> {
+        let mut out = io::stdout().lock();
+
+        let start = self.off;
+        let height = self.height as usize;
+        let width = self.width as usize;
+
+        for row in 0..height {
+            let screen_y = self.pos_y + row as u16 + 1;
+            let line_num = start + row + 1;
+
+            write!( out, "{}", termion::cursor::Goto(self.pos_x + 1, screen_y))?;
+            write!(out, "{:>width$} ", line_num, width = width.saturating_sub(1))?;
+        }
+        Ok(())
+    }
 
     fn draw(&self, buffer: &Buffer) -> io::Result<()>{
         let mut out = io::stdout().lock();
@@ -95,8 +115,15 @@ impl View{
                 let end = usize::min(self.width as usize, line.len_chars());
                 let slice = line.slice(..end.saturating_sub(1));//off by one if not -1 totally didnt spend 2 days trying to find it
                 write!(out, "{}",slice)?;
+                let remaining = self.width as usize - slice.len_chars();
+                for _ in 0..remaining{
+                    write!(out, " ")?;
+                }
+            }else{
+                for _ in 0..self.width{
+                    write!(out, " ")?;
+                }
             }
-            write!(out, "{}", termion::clear::UntilNewline)?;
         }
         let screen_y = self.pos_y + self.y.saturating_sub(self.off) as u16;
         let screen_x = self.pos_x + self.x as u16;
@@ -197,16 +224,54 @@ impl View{
     }
 }
 
+struct ViewGroup{
+    parent: usize,
+    children: Vec<usize>,
+}
+
+impl ViewGroup{
+    fn new(buffers: &mut Vec<Buffer>, views: &mut Vec<View>, parent_view: usize, children_flags:u16)->Self{
+        let parent_pos_x = views[parent_view].pos_x;
+        let parent_pos_y = views[parent_view].pos_y;
+        let parent_height = views[parent_view].height;
+        let mut children = vec![];
+        if children_flags & View::LINE_NUMBER != 0 {
+            buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
+            views.push(View::new(buffers.len().saturating_sub(1), parent_pos_x, parent_pos_y, 5, parent_height, View::NON_NAVIGATABLE | View::LINE_NUMBER));
+            children.push(views.len().saturating_sub(1));
+            views[parent_view].pos_x = views[parent_view].pos_x.saturating_add(5);
+            views[parent_view].width = views[parent_view].width.saturating_sub(5);
+        }
+        Self{
+            parent: parent_view,
+            children,
+        }
+    }
+        fn sync(&self, views: &mut Vec<View>){
+        let (y, off) = {
+            let parent = &views[self.parent];
+            (parent.y, parent.off)
+        };
+        for &child in &self.children{
+            let child = &mut views[child];
+            child.y = y;
+            child.off = off;
+        }
+    }
+}
+
 fn main()->io::Result<()>{
     let mut views = vec![];
     let mut buffers = vec![];
+    let mut groups = vec![];
     {
         let (width, height) = termion::terminal_size().unwrap();
-        let height = height - 1;//terminal is 1 indexed
         let args: Vec<String> = env::args().skip(1).collect();
         if args.is_empty(){
-            buffers.push(Buffer::new(None, 0).unwrap());
-            views.push(View::new(buffers.len(),0,0,width,height,0));
+            buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
+            views.push(View::new(buffers.len(),0,0,width,height,View::NON_NAVIGATABLE));
+            let parent = views.len().saturating_sub(1);
+            groups.push(ViewGroup::new(&mut buffers, &mut views, parent, View::LINE_NUMBER));
         }else{
             let view_count = args.len().max(1);
             let view_width = width / view_count as u16;
@@ -214,31 +279,51 @@ fn main()->io::Result<()>{
                 let pos_x = i as u16 * view_width;
                 buffers.push(Buffer::new(Some(filename), 0).unwrap());
                 views.push(View::new(buffers.len().saturating_sub(1), pos_x, 0, view_width, height, 0));
+                let parent = buffers.len().saturating_sub(1);
+                groups.push(ViewGroup::new(&mut buffers, &mut views, parent, View::LINE_NUMBER));
             }
         }
     }
-    let mut active = views.len().saturating_sub(1);
+    let mut active_parent = groups[groups.len().saturating_sub(1)].parent;
 
     let input = io::stdin();
     let mut out = io::stdout().into_raw_mode()?;
     write!(out, "{}",termion::clear::All)?;
     for i in 0..views.len(){
-        views[i].draw(&buffers[views[i].buf])?;
+        if views[i].check_flag(View::LINE_NUMBER){
+            views[i].draw_line_numbers()?;
+        }else{
+            views[i].draw(&buffers[views[i].buf])?;
+        }
     }
     for key in input.keys(){
-        let buffer = &mut buffers[views[active].buf];
+        let buffer = &mut buffers[views[active_parent].buf];
         match key?{
             Key::Ctrl('q')=> break,
-            Key::Ctrl('w')=> views[active].save_file(buffer)?,
+            Key::Ctrl('w')=> views[active_parent].save_file(buffer)?,
             Key::Ctrl('x')=> {
-                views[active].save_file(buffer)?;
+                views[active_parent].save_file(buffer)?;
                 break
             }
-            Key::CtrlRight=> active = (active.saturating_add(1)) % views.len(),
-            k => views[active].process_key(buffer, k),
+            Key::CtrlRight=> {
+                active_parent = (active_parent.saturating_add(1)) % views.len();
+                    while views[active_parent].check_flag(View::NON_NAVIGATABLE){
+                        active_parent = (active_parent.saturating_add(1)) % views.len();
+                    }
+            },
+            k => views[active_parent].process_key(buffer, k),
         }
-        views[active].draw(&buffers[views[active].buf])?;
+        for group in &groups{
+            group.sync(&mut views);
+        }
+        for i in 0..views.len(){
+            if views[i].check_flag(View::LINE_NUMBER){
+                views[i].draw_line_numbers()?;
+            }else{
+                views[i].draw(&buffers[views[i].buf])?;
+            }
+        }
+        views[active_parent].draw(&buffers[views[active_parent].buf])?;
     }
     Ok(())
 }
-

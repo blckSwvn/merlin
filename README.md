@@ -1,3 +1,3 @@
-# Jay a simple editor
+# Jay a simple text editor
 
 ---

@@ -2,7 +2,6 @@
 
 ---
 
-line numbers
 status bar
 commands
 undo/redo
