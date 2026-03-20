@@ -1,0 +1,18 @@
+2026-03-19 18:33:22 - [main.c:282] Found config * for output eDP-1 (Lenovo Group Limited 0x41B5)
+2026-03-19 18:33:22 - [main.c:282] Found config * for output HDMI-A-1 (Acer Technologies KG242Y P 0x05113D3D)
+libva info: VA-API version 1.22.0
+libva info: Trying to open /run/opengl-driver/lib/dri/radeonsi_drv_video.so
+libva info: Found init function __vaDriverInit_1_22
+libva info: va_openDriver() returns 0
+Crash Annotation GraphicsCriticalError: |[0][GFX1-]: Wayland protocol error: Compositor (mango) crashed, proxy: WP:E WP:CA WP:CR WP:CPCA WP:CPCF  (t=398.237) [GFX1-]: Wayland protocol error: Compositor (mango) crashed, proxy: WP:E WP:CA WP:CR WP:CPCA WP:CPCF 
+Exiting due to channel error.
+Exiting due to channel error.
+Exiting due to channel error.
+Exiting due to channel error.
+Exiting due to channel error.
+Exiting due to channel error.
+Exiting due to channel error.
+Exiting due to channel error.
+Exiting due to channel error.
+2026-03-19 18:41:13 - [main.c:282] Found config * for output eDP-1 (Lenovo Group Limited 0x41B5)
+2026-03-19 18:41:13 - [main.c:282] Found config * for output HDMI-A-1 (Acer Technologies KG242Y P 0x05113D3D)

@@ -50,6 +50,21 @@ impl Buffer{
             file: path.map(PathBuf::from),
         })
     }
+    fn insert(&mut self, view: &mut View, c: char){
+        let cursor_char = view.cursor_char(self);
+        self.buf.insert_char(cursor_char, c);
+    }
+    fn save(&self)->io::Result<()>{
+        if let Some(path) = &self.file{
+            let file = File::create(path)?;
+            self.buf.write_to(file)?;
+        }
+        Ok(())
+    }
+    fn remove_char(&mut self, view: &View){
+        let idx = view.cursor_char(self);
+        self.buf.remove(idx - 1..idx);
+    }
 }
 
 struct View{
@@ -184,43 +199,31 @@ impl View{
         }
     }
     fn insert_char(&mut self, buffer: &mut Buffer, c: char){
-        let cursor_char = self.cursor_char(&buffer);
-        buffer.buf.insert_char(cursor_char, c);
+        buffer.insert(self, c);
         self.x += 1;
         self.prefered_x = self.x;
     }
     fn backspace(&mut self, buffer: &mut Buffer){
-        if self.x != 0 || self.y != 0{
-            let idx = self.cursor_char(&buffer);
-            if idx > 0 {
-                buffer.buf.remove(idx - 1..idx);
-                if self.x > 0{
-                    self.x -= 1;
-                    self.prefered_x = self.x;
-                }else{
-                    self.y -= 1;
-                    if let Some(line) = buffer.buf.get_line(self.y){
-                        self.x = line.len_chars();
-                    }
-                }
+        if self.x != 0 && self.y != 0 {
+            buffer.remove_char(self);
+            if self.x > 0{
+                self.x -= 1;
+                self.prefered_x = self.x;
+            }
+        }else{
+            self.y = self.y.saturating_sub(1);
+            if let Some(line) = buffer.buf.get_line(self.y){
+                self.x = line.len_chars();
             }
         }
     }
     fn new_line(&mut self, buffer: &mut Buffer){
-        let cursor_char = self.cursor_char(&buffer);
-        buffer.buf.insert_char(cursor_char, '\n');
+        buffer.insert(self, '\n');
         self.y += 1;
         self.x = 0;
     }
     fn cursor_char(&self, buffer: &Buffer) -> usize {
         buffer.buf.line_to_char(self.y) + self.x
-    }
-    fn save_file(&self, buffer: &Buffer)-> io::Result<()>{
-        if let Some(path) = &buffer.file{
-            let mut file = File::create(path)?;
-            buffer.buf.write_to(&mut file)?;
-        }
-        Ok(())
     }
 }
 
@@ -284,7 +287,7 @@ fn main()->io::Result<()>{
             }
         }
     }
-    let mut active_parent = groups[groups.len().saturating_sub(1)].parent;
+    let mut active_group = groups.len().saturating_sub(1);
 
     let input = io::stdin();
     let mut out = io::stdout().into_raw_mode()?;
@@ -297,33 +300,32 @@ fn main()->io::Result<()>{
         }
     }
     for key in input.keys(){
-        let buffer = &mut buffers[views[active_parent].buf];
+        let mut parent_view = groups[active_group].parent;
         match key?{
             Key::Ctrl('q')=> break,
-            Key::Ctrl('w')=> views[active_parent].save_file(buffer)?,
+            Key::Ctrl('w')=> buffers[views[parent_view].buf].save()?,
             Key::Ctrl('x')=> {
-                views[active_parent].save_file(buffer)?;
+                buffers[views[parent_view].buf].save()?;
                 break
             }
             Key::CtrlRight=> {
-                active_parent = (active_parent.saturating_add(1)) % views.len();
-                    while views[active_parent].check_flag(View::NON_NAVIGATABLE){
-                        active_parent = (active_parent.saturating_add(1)) % views.len();
-                    }
+                active_group = (active_group.saturating_add(1))& groups.len().saturating_sub(1);
+                parent_view = groups[active_group].parent;
             },
-            k => views[active_parent].process_key(buffer, k),
+            k => {
+                let parent_buffer = &mut buffers[views[parent_view].buf];
+                views[parent_view].process_key(parent_buffer, k)
+            },
         }
         for group in &groups{
             group.sync(&mut views);
         }
-        for i in 0..views.len(){
+        for i in 0..groups[active_group].children.len(){
             if views[i].check_flag(View::LINE_NUMBER){
                 views[i].draw_line_numbers()?;
-            }else{
-                views[i].draw(&buffers[views[i].buf])?;
             }
         }
-        views[active_parent].draw(&buffers[views[active_parent].buf])?;
+        views[parent_view].draw(&buffers[views[parent_view].buf])?;
     }
     Ok(())
 }
