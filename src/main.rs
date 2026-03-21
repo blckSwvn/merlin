@@ -1,4 +1,5 @@
 use std::fs::{self, File};
+use std::process::exit;
 use ropey::Rope;
 use std::path::PathBuf;
 use std::{env, io};
@@ -84,6 +85,7 @@ impl View{
     const NON_NAVIGATABLE: u16 = 1 << 0;
     const FLOATING:        u16 = 1 << 1;
     const LINE_NUMBER:     u16 = 1 << 2;
+    const STATUS_BAR:      u16 = 1 << 3;
     fn check_flag(&self, flag: u16)->bool{
         self.flags & flag != 0
     }
@@ -100,6 +102,25 @@ impl View{
             height,
             flags,
         }
+    }
+    fn draw_status_bar(&self, buffer: &Buffer, mode: Mode)->io::Result<()>{
+        let mut out = io::stdout().lock();
+        write!(out, "{}", termion::cursor::Goto(self.pos_x+1, self.pos_y+1))?;
+        let mut path = "SCRATCH";
+        if !buffer.check_flag(Buffer::SCRATCH){
+            if let Some(p) = &buffer.file{
+                path = p.to_str().unwrap_or("IDK");
+            }else{
+                path = "NEW_FILE";
+            }
+        }
+        let mode_str = match mode{
+            Mode::Command => "CMD",
+            Mode::Insert  => "INS",
+            _ => "NOR",
+        };
+        write!(out, "{mode_str} {path} {}",self.pos_x)?;
+        Ok(())
     }
     fn draw_line_numbers(&self) -> io::Result<()> {
         let mut out = io::stdout().lock();
@@ -146,43 +167,7 @@ impl View{
         out.flush()?;
         Ok(())
     }
-    fn process_key(&mut self, buffer: &mut Buffer, key: Key){
-        match key{
-            Key::Char('\n')=> self.new_line(buffer),
-            Key::Char(c) => {
-                if !c.is_control(){
-                    self.insert_char(buffer, c);
-                }
-            }
-            Key::Backspace => self.backspace(buffer),
-            Key::Up => {
-                self.y = self.y.saturating_sub(1);
-                if let Some(line) = buffer.buf.get_line(self.y){
-                    self.x = self.prefered_x.min(line.len_chars());
-                }
-            }
-            Key::Down => {
-                if buffer.buf.len_lines() > 0{
-                    self.y = usize::min(self.y+1, buffer.buf.len_lines().saturating_sub(1));
-                }
-                if let Some(line) = buffer.buf.get_line(self.y){
-                    self.x = self.prefered_x.min(line.len_chars().saturating_sub(1));
-                }
-            }
-            Key::Left => {
-                self.x = self.x.saturating_sub(1);
-                self.prefered_x = self.x;
-            }
-            Key::Right => {
-                self.x = self.x + 1;
-                if let Some(line) = buffer.buf.get_line(self.y){
-                    self.x = self.x.min(line.len_chars().saturating_sub(1));
-                }
-                self.prefered_x = self.x;
-            }
-            _ => {}
-        }
-
+    fn scroll(&mut self, buffer: &mut Buffer){
         if self.y < self.off{
             self.off = self.y;
         } else if self.y >= self.off + self.height as usize{
@@ -198,30 +183,6 @@ impl View{
             self.x = 0;
         }
     }
-    fn insert_char(&mut self, buffer: &mut Buffer, c: char){
-        buffer.insert(self, c);
-        self.x += 1;
-        self.prefered_x = self.x;
-    }
-    fn backspace(&mut self, buffer: &mut Buffer){
-        if self.x != 0 && self.y != 0 {
-            buffer.remove_char(self);
-            if self.x > 0{
-                self.x -= 1;
-                self.prefered_x = self.x;
-            }
-        }else{
-            self.y = self.y.saturating_sub(1);
-            if let Some(line) = buffer.buf.get_line(self.y){
-                self.x = line.len_chars();
-            }
-        }
-    }
-    fn new_line(&mut self, buffer: &mut Buffer){
-        buffer.insert(self, '\n');
-        self.y += 1;
-        self.x = 0;
-    }
     fn cursor_char(&self, buffer: &Buffer) -> usize {
         buffer.buf.line_to_char(self.y) + self.x
     }
@@ -236,8 +197,16 @@ impl ViewGroup{
     fn new(buffers: &mut Vec<Buffer>, views: &mut Vec<View>, parent_view: usize, children_flags:u16)->Self{
         let parent_pos_x = views[parent_view].pos_x;
         let parent_pos_y = views[parent_view].pos_y;
-        let parent_height = views[parent_view].height;
+        let mut parent_height = views[parent_view].height;
+        let parent_width = views[parent_view].width;
         let mut children = vec![];
+        if children_flags & View::STATUS_BAR != 0 {
+            buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
+            views.push(View::new(buffers.len().saturating_sub(1), parent_pos_x, parent_height - parent_pos_y, parent_width, 1, View::NON_NAVIGATABLE | View::STATUS_BAR));
+            children.push(views.len().saturating_sub(1));
+            views[parent_view].height -= 1;
+            parent_height -= 1;
+        }
         if children_flags & View::LINE_NUMBER != 0 {
             buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
             views.push(View::new(buffers.len().saturating_sub(1), parent_pos_x, parent_pos_y, 5, parent_height, View::NON_NAVIGATABLE | View::LINE_NUMBER));
@@ -256,25 +225,180 @@ impl ViewGroup{
             (parent.y, parent.off)
         };
         for &child in &self.children{
-            let child = &mut views[child];
-            child.y = y;
-            child.off = off;
+            if !views[child].check_flag(View::STATUS_BAR){
+                let child = &mut views[child];
+                child.y = y;
+                child.off = off;
+            }
         }
     }
 }
+
+#[derive(Clone, Copy)]
+enum Mode{
+    Normal,
+    Insert,
+    Command,
+}
+
+enum Cmd{
+    InsertChar(char),
+    NewLine,
+    Backspace,
+    MoveUp,
+    MoveDown,
+    MoveRight,
+    MoveLeft,
+    Save,
+    Quit,
+    SwitchNextView,
+    SwitchPrevView,
+    EnterModeInsert,
+    EnterModeNormal,
+    EnterModeCommand,
+    NoOp,
+}
+
+fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
+    match key{
+        Key::Esc => Cmd::EnterModeNormal,
+        Key::CtrlLeft  => Cmd::SwitchNextView,
+        Key::CtrlRight => Cmd::SwitchPrevView,
+        _ => {
+            match mode{
+                Mode::Normal=>{
+                    match key{
+                        Key::Char('i') => Cmd::EnterModeInsert,
+                        Key::Char(':') => Cmd::EnterModeCommand,
+                        Key::Char('k') => Cmd::MoveUp,
+                        Key::Char('j') => Cmd::MoveDown,
+                        Key::Char('h') => Cmd::MoveLeft,
+                        Key::Char('l') => Cmd::MoveRight,
+                        Key::Up    => Cmd::MoveUp,
+                        Key::Down  => Cmd::MoveDown,
+                        Key::Left  => Cmd::MoveLeft,
+                        Key::Right => Cmd::MoveRight,
+                        _ => Cmd::NoOp,
+                    }
+                },
+                Mode::Insert=>{
+                    match key{
+                        Key::Up    => Cmd::MoveUp,
+                        Key::Down  => Cmd::MoveDown,
+                        Key::Left  => Cmd::MoveLeft,
+                        Key::Right => Cmd::MoveRight,
+                        Key::Char('\n') => Cmd::NewLine,
+                        Key::Char(c) if !c.is_control() => Cmd::InsertChar(c),
+                        Key::Backspace => Cmd::Backspace,
+                        _ => Cmd::NoOp,
+                    }
+                },
+                Mode::Command=>{
+                    match key{
+                        Key::Char('w') => Cmd::Save,
+                        Key::Char('q') => Cmd::Quit,
+                        _ => Cmd::NoOp,
+                    }
+                },
+            }
+        }
+    }
+}
+
+fn exec_cmd(view: &mut View, buffer: &mut Buffer, cmd: Cmd, mode: &mut Mode){
+    match cmd{
+        Cmd::EnterModeInsert  => *mode = Mode::Insert,
+        Cmd::EnterModeNormal  => *mode = Mode::Normal,
+        Cmd::EnterModeCommand => *mode = Mode::Command,
+        Cmd::InsertChar(c)=>{
+            buffer.insert(view, c);
+            view.x += 1;
+            view.prefered_x = view.x;
+            View::scroll(view, buffer);
+        },
+        Cmd::NewLine=>{
+            buffer.insert(view, '\n');
+            view.y += 1;
+            view.x = 0;
+            View::scroll(view, buffer);
+        },
+        Cmd::Backspace=>{
+            if view.x != 0 && view.y != 0 {
+                buffer.remove_char(view);
+                if view.x > 0{
+                    view.x -= 1;
+                    view.prefered_x = view.x;
+                }
+            }else{
+                view.y = view.y.saturating_sub(1);
+                if let Some(line) = buffer.buf.get_line(view.y){
+                    view.x = line.len_chars();
+                }
+            }
+            View::scroll(view, buffer);
+        },
+        Cmd::MoveUp=>{
+            view.y = view.y.saturating_sub(1);
+            if let Some(line) = buffer.buf.get_line(view.y){
+                view.x = view.prefered_x.min(line.len_chars());
+            }
+            View::scroll(view, buffer);
+        },
+        Cmd::MoveDown=>{
+            if buffer.buf.len_lines() > 0{
+                view.y = usize::min(view.y+1, buffer.buf.len_lines().saturating_sub(1));
+            }
+            if let Some(line) = buffer.buf.get_line(view.y){
+                view.x = view.prefered_x.min(line.len_chars().saturating_sub(1));
+            }
+            View::scroll(view, buffer);
+        },
+        Cmd::MoveRight=>{
+            view.x = view.x + 1;
+            if let Some(line) = buffer.buf.get_line(view.y){
+                view.x = view.x.min(line.len_chars().saturating_sub(1));
+            }
+            view.prefered_x = view.x;
+
+        },
+        Cmd::MoveLeft=>{
+            view.x = view.x.saturating_sub(1);
+            view.prefered_x = view.x;
+        },
+         Cmd::SwitchNextView=>{
+        },
+        Cmd::SwitchPrevView=>{
+        },
+        Cmd::Save=>{
+            buffer.save().expect("buffer.save failed");
+        },
+        Cmd::Quit=>{
+            exit(1);
+        },
+        Cmd::NoOp=>{
+        },
+    }
+}
+
 
 fn main()->io::Result<()>{
     let mut views = vec![];
     let mut buffers = vec![];
     let mut groups = vec![];
+    let mut mode = Mode::Normal;
+    let mut cmd_line = 0;
     {
         let (width, height) = termion::terminal_size().unwrap();
+        buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
+        cmd_line = buffers.len().saturating_sub(1);
+        views.push(View::new(cmd_line, 0, 0, height, width, View::NON_NAVIGATABLE));
+        let height = height -2;
         let args: Vec<String> = env::args().skip(1).collect();
         if args.is_empty(){
             buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
             views.push(View::new(buffers.len(),0,0,width,height,View::NON_NAVIGATABLE));
             let parent = views.len().saturating_sub(1);
-            groups.push(ViewGroup::new(&mut buffers, &mut views, parent, View::LINE_NUMBER));
+            groups.push(ViewGroup::new(&mut buffers, &mut views, parent, View::LINE_NUMBER | View::STATUS_BAR));
         }else{
             let view_count = args.len().max(1);
             let view_width = width / view_count as u16;
@@ -283,7 +407,7 @@ fn main()->io::Result<()>{
                 buffers.push(Buffer::new(Some(filename), 0).unwrap());
                 views.push(View::new(buffers.len().saturating_sub(1), pos_x, 0, view_width, height, 0));
                 let parent = buffers.len().saturating_sub(1);
-                groups.push(ViewGroup::new(&mut buffers, &mut views, parent, View::LINE_NUMBER));
+                groups.push(ViewGroup::new(&mut buffers, &mut views, parent, View::LINE_NUMBER | View::STATUS_BAR));
             }
         }
     }
@@ -301,30 +425,31 @@ fn main()->io::Result<()>{
     }
     for key in input.keys(){
         let mut parent_view = groups[active_group].parent;
-        match key?{
-            Key::Ctrl('q')=> break,
-            Key::Ctrl('w')=> buffers[views[parent_view].buf].save()?,
-            Key::Ctrl('x')=> {
-                buffers[views[parent_view].buf].save()?;
-                break
-            }
-            Key::CtrlRight=> {
-                active_group = (active_group.saturating_add(1))& groups.len().saturating_sub(1);
+        let parent_buffer = views[parent_view].buf;
+        let cmd = key_to_cmd(key?, &mode);
+        match cmd{
+            Cmd::SwitchNextView=>{
+                active_group = (active_group.saturating_add(1))%groups.len();
                 parent_view = groups[active_group].parent;
             },
-            k => {
-                let parent_buffer = &mut buffers[views[parent_view].buf];
-                views[parent_view].process_key(parent_buffer, k)
+            Cmd::SwitchPrevView=>{
+                active_group = (active_group.saturating_sub(1))%groups.len();
+                parent_view = groups[active_group].parent;
             },
+        _ => exec_cmd(&mut views[parent_view], &mut buffers[parent_buffer], cmd, &mut mode),
         }
         for group in &groups{
             group.sync(&mut views);
         }
-        for i in 0..groups[active_group].children.len(){
-            if views[i].check_flag(View::LINE_NUMBER){
-                views[i].draw_line_numbers()?;
+        for &child_idx in &groups[active_group].children {
+            let child_view = &views[child_idx];
+            if child_view.check_flag(View::LINE_NUMBER){
+                child_view.draw_line_numbers()?;
+            } else if child_view.check_flag(View::STATUS_BAR){
+                child_view.draw_status_bar(&buffers[views[parent_view].buf], mode)?;
             }
         }
+        views[cmd_line].draw(&buffers[views[cmd_line].buf])?;
         views[parent_view].draw(&buffers[views[parent_view].buf])?;
     }
     Ok(())
