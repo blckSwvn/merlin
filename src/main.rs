@@ -13,11 +13,22 @@ struct Buffer{
     file: Option<PathBuf>,
     buf: Rope,
 }
+
+impl Default for Buffer {
+    fn default() -> Self {
+        Self {
+            flags: Buffer::EMPTY,
+            file: None,
+            buf: Rope::new(),
+        }
+    }
+}
 impl Buffer{
     const READ_ONLY:       u64 = 1 << 0;
     const SCRATCH:         u64 = 1 << 1;
     const DIRTY:           u64 = 1 << 2;
     const NEW_FILE:        u64 = 1 << 3;
+    const EMPTY:           u64 = 1 << 4;
     fn set_flag(&mut self, flag: u64){
         self.flags |= flag
     }
@@ -62,9 +73,48 @@ impl Buffer{
         }
         Ok(())
     }
-    fn remove_char(&mut self, view: &View){
-        let idx = view.cursor_char(self);
-        self.buf.remove(idx - 1..idx);
+    // fn remove_char(&mut self, idx: usize){
+    //     self.buf.remove(idx);
+    // }
+}
+
+struct CmdLine{
+    input: String,
+    pos_y: u16,
+    cursor: usize,
+}
+impl CmdLine{
+    fn new(height: u16)->Self{
+        Self{
+            input: String::new(),
+            pos_y: height,
+            cursor: 0,
+        }
+    }
+    fn insert(&mut self, c: char){
+        self.input.insert(self.cursor, c);
+        self.cursor += 1;
+    }
+    fn backspace(&mut self){
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            self.input.remove(self.cursor);
+        }
+    }
+    fn draw_error(&self, s: &str)->io::Result<()>{
+        let mut out = io::stdout().lock();
+        write!(out, "{}{}",termion::cursor::Goto(1, self.pos_y+1), s)?;
+        Ok(())
+    }
+    fn draw(&self)->io::Result<()>{
+        let mut out = io::stdout().lock();
+        if !self.input.is_empty(){
+            write!(out, "{}{}",termion::cursor::Goto(1, self.pos_y+1), termion::clear::CurrentLine)?;
+            write!(out, "{}:{}", termion::cursor::Goto(1, self.pos_y+1), self.input)?;
+        }else{
+            write!(out, "{}{}",termion::cursor::Goto(1, self.pos_y+1), termion::clear::CurrentLine)?;
+        }
+        out.flush()
     }
 }
 
@@ -81,11 +131,28 @@ struct View{
     flags: u16,
 }
 
+impl Default for View{
+    fn default() -> Self {
+        Self {
+            buf: 0,
+            y: 0,
+            x: 0,
+            prefered_x: 0,
+            off: 0,
+            width: 0,
+            height: 0,
+            pos_x: 0,
+            pos_y: 0,
+            flags: View::EMPTY,
+        }
+    }
+}
 impl View{
     const NON_NAVIGATABLE: u16 = 1 << 0;
     const FLOATING:        u16 = 1 << 1;
     const LINE_NUMBER:     u16 = 1 << 2;
     const STATUS_BAR:      u16 = 1 << 3;
+    const EMPTY:           u16 = 1 << 4;
     fn check_flag(&self, flag: u16)->bool{
         self.flags & flag != 0
     }
@@ -102,6 +169,11 @@ impl View{
             height,
             flags,
         }
+    }
+    fn redraw(&self)->io::Result<()>{
+        let mut out = io::stdout().lock();
+        write!(out, "{}",termion::clear::All)?;
+        Ok(())
     }
     fn draw_status_bar(&self, buffer: &Buffer, mode: Mode)->io::Result<()>{
         let mut out = io::stdout().lock();
@@ -138,8 +210,7 @@ impl View{
         }
         Ok(())
     }
-
-    fn draw(&self, buffer: &Buffer) -> io::Result<()>{
+    fn draw_text(&self, buffer: &Buffer) -> io::Result<()>{
         let mut out = io::stdout().lock();
         let start = self.off;
         let end = usize::min(start + self.height as usize, buffer.buf.len_lines());
@@ -189,10 +260,20 @@ impl View{
 }
 
 struct ViewGroup{
+    empty: bool,
     parent: usize,
     children: Vec<usize>,
 }
 
+impl Default for ViewGroup{
+    fn default() -> Self {
+        Self { 
+            empty: true,
+            parent: 0,
+            children: vec![],
+        }
+    }
+}
 impl ViewGroup{
     fn new(buffers: &mut Vec<Buffer>, views: &mut Vec<View>, parent_view: usize, children_flags:u16)->Self{
         let parent_pos_x = views[parent_view].pos_x;
@@ -215,6 +296,7 @@ impl ViewGroup{
             views[parent_view].width = views[parent_view].width.saturating_sub(5);
         }
         Self{
+            empty: false,
             parent: parent_view,
             children,
         }
@@ -242,6 +324,10 @@ enum Mode{
 }
 
 enum Cmd{
+    CmdInsert(char),
+    CmdBackspace,
+    CmdMoveLeft,
+    CmdMoveRight,
     InsertChar(char),
     NewLine,
     Backspace,
@@ -249,8 +335,12 @@ enum Cmd{
     MoveDown,
     MoveRight,
     MoveLeft,
+    Open(String),
+    Close,
     Save,
     Quit,
+    split,
+    splitv,
     SwitchNextView,
     SwitchPrevView,
     EnterModeInsert,
@@ -261,7 +351,7 @@ enum Cmd{
 
 fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
     match key{
-        Key::Esc => Cmd::EnterModeNormal,
+        Key::Esc       => Cmd::EnterModeNormal,
         Key::CtrlLeft  => Cmd::SwitchNextView,
         Key::CtrlRight => Cmd::SwitchPrevView,
         _ => {
@@ -270,14 +360,10 @@ fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
                     match key{
                         Key::Char('i') => Cmd::EnterModeInsert,
                         Key::Char(':') => Cmd::EnterModeCommand,
-                        Key::Char('k') => Cmd::MoveUp,
-                        Key::Char('j') => Cmd::MoveDown,
-                        Key::Char('h') => Cmd::MoveLeft,
-                        Key::Char('l') => Cmd::MoveRight,
-                        Key::Up    => Cmd::MoveUp,
-                        Key::Down  => Cmd::MoveDown,
-                        Key::Left  => Cmd::MoveLeft,
-                        Key::Right => Cmd::MoveRight,
+                        Key::Char('k') | Key::Up => Cmd::MoveUp,
+                        Key::Char('j') | Key::Down => Cmd::MoveDown,
+                        Key::Char('h') | Key::Left => Cmd::MoveLeft,
+                        Key::Char('l') | Key::Right => Cmd::MoveRight,
                         _ => Cmd::NoOp,
                     }
                 },
@@ -295,108 +381,191 @@ fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
                 },
                 Mode::Command=>{
                     match key{
-                        Key::Char('w') => Cmd::Save,
-                        Key::Char('q') => Cmd::Quit,
-                        _ => Cmd::NoOp,
+                        Key::Left => Cmd::CmdMoveLeft,
+                        Key::Right => Cmd::CmdMoveRight,
+                        Key::Backspace => Cmd::CmdBackspace,
+                        Key::Char(c) => Cmd::CmdInsert(c),
+                        _ => Cmd::NoOp
                     }
-                },
+                }
             }
         }
     }
 }
 
-fn exec_cmd(view: &mut View, buffer: &mut Buffer, cmd: Cmd, mode: &mut Mode){
+fn exec_cmd(cmd_line: &mut CmdLine, view: usize, views: &mut Vec<View>, buffer: usize, buffers: &mut Vec<Buffer>, groups: &mut Vec<ViewGroup>, cmd: Cmd, mode: &mut Mode){
+    let curr_view = &mut views[view];
+    let curr_buffer = &mut buffers[buffer];
     match cmd{
-        Cmd::EnterModeInsert  => *mode = Mode::Insert,
-        Cmd::EnterModeNormal  => *mode = Mode::Normal,
+        Cmd::EnterModeInsert => {
+            cmd_line.input.clear();
+            cmd_line.cursor = 0;
+            *mode = Mode::Insert;
+        }
+        Cmd::EnterModeNormal  => {
+            cmd_line.input.clear();
+            cmd_line.cursor = 0;
+            *mode = Mode::Normal;
+        }
         Cmd::EnterModeCommand => *mode = Mode::Command,
         Cmd::InsertChar(c)=>{
-            buffer.insert(view, c);
-            view.x += 1;
-            view.prefered_x = view.x;
-            View::scroll(view, buffer);
+            curr_buffer.insert(curr_view, c);
+            curr_view.x += 1;
+            curr_view.prefered_x = curr_view.x;
+            View::scroll(curr_view, curr_buffer);
         },
         Cmd::NewLine=>{
-            buffer.insert(view, '\n');
-            view.y += 1;
-            view.x = 0;
-            View::scroll(view, buffer);
+            curr_buffer.insert(curr_view, '\n');
+            curr_view.y += 1;
+            curr_view.x = 0;
+            View::scroll(curr_view, curr_buffer);
         },
         Cmd::Backspace=>{
-            if view.x != 0 && view.y != 0 {
-                buffer.remove_char(view);
-                if view.x > 0{
-                    view.x -= 1;
-                    view.prefered_x = view.x;
+            let idx = curr_view.cursor_char(curr_buffer);
+            if idx != 0{
+                curr_buffer.buf.remove(idx - 1..idx);
+                if curr_view.x > 0{
+                    curr_view.x -= 1;
+                    curr_view.prefered_x = curr_view.x;
+                }else{
+                    curr_view.y = curr_view.y.saturating_sub(1);
+                    if let Some(line) = curr_buffer.buf.get_line(curr_view.y){
+                        curr_view.x = line.len_chars();
+                    }
                 }
-            }else{
-                view.y = view.y.saturating_sub(1);
-                if let Some(line) = buffer.buf.get_line(view.y){
-                    view.x = line.len_chars();
-                }
+                View::scroll(curr_view, curr_buffer);
             }
-            View::scroll(view, buffer);
         },
         Cmd::MoveUp=>{
-            view.y = view.y.saturating_sub(1);
-            if let Some(line) = buffer.buf.get_line(view.y){
-                view.x = view.prefered_x.min(line.len_chars());
+            curr_view.y = curr_view.y.saturating_sub(1);
+            if let Some(line) = curr_buffer.buf.get_line(curr_view.y){
+                curr_view.x = curr_view.prefered_x.min(line.len_chars());
             }
-            View::scroll(view, buffer);
+            View::scroll(curr_view, curr_buffer);
         },
         Cmd::MoveDown=>{
-            if buffer.buf.len_lines() > 0{
-                view.y = usize::min(view.y+1, buffer.buf.len_lines().saturating_sub(1));
+            if curr_buffer.buf.len_lines() > 0{
+                curr_view.y = usize::min(curr_view.y+1, curr_buffer.buf.len_lines().saturating_sub(1));
             }
-            if let Some(line) = buffer.buf.get_line(view.y){
-                view.x = view.prefered_x.min(line.len_chars().saturating_sub(1));
+            if let Some(line) = curr_buffer.buf.get_line(curr_view.y){
+                curr_view.x = curr_view.prefered_x.min(line.len_chars().saturating_sub(1));
             }
-            View::scroll(view, buffer);
+            View::scroll(curr_view, curr_buffer);
         },
         Cmd::MoveRight=>{
-            view.x = view.x + 1;
-            if let Some(line) = buffer.buf.get_line(view.y){
-                view.x = view.x.min(line.len_chars().saturating_sub(1));
+            curr_view.x = curr_view.x + 1;
+            if let Some(line) = curr_buffer.buf.get_line(curr_view.y){
+                curr_view.x = curr_view.x.min(line.len_chars().saturating_sub(1));
             }
-            view.prefered_x = view.x;
+            curr_view.prefered_x = curr_view.x;
 
         },
         Cmd::MoveLeft=>{
-            view.x = view.x.saturating_sub(1);
-            view.prefered_x = view.x;
+            curr_view.x = curr_view.x.saturating_sub(1);
+            curr_view.prefered_x = curr_view.x;
         },
-         Cmd::SwitchNextView=>{
+        Cmd::CmdInsert(c) => {
+            if c != '\n' {
+                cmd_line.insert(c)
+            }else{
+                let input = cmd_line.input.clone();
+                match parse_cmd(input){
+                    Ok(parsed_cmd) => exec_cmd(cmd_line, view, views, buffer, buffers, groups, parsed_cmd, mode),
+                    Err(msg) => { 
+                        cmd_line.draw_error(&msg).unwrap();
+                    },
+                }
+            }
+        },
+        Cmd::CmdBackspace=>{
+            cmd_line.backspace();
+        },
+        Cmd::CmdMoveLeft=>{
+            cmd_line.cursor = cmd_line.cursor.saturating_sub(1);
+        }
+        Cmd::CmdMoveRight=>{
+            cmd_line.cursor = cmd_line.cursor.saturating_add(1);
+        }
+        Cmd::SwitchNextView=>{
         },
         Cmd::SwitchPrevView=>{
         },
         Cmd::Save=>{
-            buffer.save().expect("buffer.save failed");
+            match curr_buffer.save(){
+                Err(error)=>cmd_line.draw_error(&error.to_string()).unwrap(),
+                Ok(_)=>{}
+            }
+            cmd_line.input.clear();
+            cmd_line.cursor = 0;
+            *mode = Mode::Normal;
         },
+        Cmd::Close=>{
+            for g in groups.iter(){
+                if views[g.parent].buf == buffer{
+                    for &child in &g.children{
+                        views[child] = View::default();
+                    }
+                }
+            }
+            buffers[buffer] = Buffer::default();
+            for g in groups.iter_mut(){
+                if views[g.parent].buf == buffer{
+                    *g = ViewGroup::default();
+                }
+            }
+            for v in views.iter_mut(){
+                if v.buf == buffer{
+                    *v = View::default();
+                }
+            }
+        }
         Cmd::Quit=>{
             exit(1);
         },
+        Cmd::Open(file_arg) => {
+            curr_view.redraw().unwrap();
+            buffers.push(Buffer::new(Some(&file_arg), 0).unwrap());
+            curr_view.buf = buffers.len().saturating_sub(1);
+            cmd_line.input.clear();
+            cmd_line.cursor = 0;
+            *mode = Mode::Normal;
+        }
         Cmd::NoOp=>{
         },
+        _ =>{}
     }
 }
 
+fn parse_cmd(s: String)->Result<Cmd, String>{
+    let mut parts = s.trim().split_whitespace();
+    let cmd = parts.next().ok_or("empty command")?;
+    match cmd{
+        "q" => Ok(Cmd::Quit),
+        "w" => Ok(Cmd::Save),
+        "open" => {
+            let file = parts.next().ok_or("missing file name")?;
+            Ok(Cmd::Open(file.to_string()))
+        }
+        "close" => {
+            Ok(Cmd::Close)
+        }
+        _ => Err(format!("unknown command: {}", cmd))
+    }
+}
 
 fn main()->io::Result<()>{
     let mut views = vec![];
     let mut buffers = vec![];
     let mut groups = vec![];
+    let (width, height) = termion::terminal_size().unwrap();
+    let mut cmd_line = CmdLine::new(height);
+    let height = height -2;
     let mut mode = Mode::Normal;
-    let mut cmd_line = 0;
     {
-        let (width, height) = termion::terminal_size().unwrap();
-        buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
-        cmd_line = buffers.len().saturating_sub(1);
-        views.push(View::new(cmd_line, 0, 0, height, width, View::NON_NAVIGATABLE));
-        let height = height -2;
         let args: Vec<String> = env::args().skip(1).collect();
         if args.is_empty(){
             buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
-            views.push(View::new(buffers.len(),0,0,width,height,View::NON_NAVIGATABLE));
+            views.push(View::new(buffers.len().saturating_sub(1),0,0,width,height,View::NON_NAVIGATABLE));
             let parent = views.len().saturating_sub(1);
             groups.push(ViewGroup::new(&mut buffers, &mut views, parent, View::LINE_NUMBER | View::STATUS_BAR));
         }else{
@@ -416,17 +585,23 @@ fn main()->io::Result<()>{
     let input = io::stdin();
     let mut out = io::stdout().into_raw_mode()?;
     write!(out, "{}",termion::clear::All)?;
-    for i in 0..views.len(){
-        if views[i].check_flag(View::LINE_NUMBER){
-            views[i].draw_line_numbers()?;
-        }else{
-            views[i].draw(&buffers[views[i].buf])?;
+    let mut parent_view = groups[active_group].parent;
+    let mut parent_buffer = views[parent_view].buf;
+    for &child_idx in &groups[active_group].children {
+        let child_view = &views[child_idx];
+        if child_view.check_flag(View::LINE_NUMBER){
+            child_view.draw_line_numbers()?;
+        }else if child_view.check_flag(View::STATUS_BAR){
+            child_view.draw_status_bar(&buffers[views[parent_view].buf], mode)?;
         }
     }
+    cmd_line.draw()?;
+    views[parent_view].draw_text(&buffers[views[parent_view].buf])?;
     for key in input.keys(){
-        let mut parent_view = groups[active_group].parent;
-        let parent_buffer = views[parent_view].buf;
-        let cmd = key_to_cmd(key?, &mode);
+        parent_view = groups[active_group].parent;
+        parent_buffer = views[parent_view].buf;
+        let mode_copy = mode;
+        let cmd = key_to_cmd(key?, &mode_copy);
         match cmd{
             Cmd::SwitchNextView=>{
                 active_group = (active_group.saturating_add(1))%groups.len();
@@ -436,7 +611,7 @@ fn main()->io::Result<()>{
                 active_group = (active_group.saturating_sub(1))%groups.len();
                 parent_view = groups[active_group].parent;
             },
-        _ => exec_cmd(&mut views[parent_view], &mut buffers[parent_buffer], cmd, &mut mode),
+        _ => exec_cmd(&mut cmd_line, parent_view, &mut views, parent_buffer, &mut buffers, &mut groups, cmd, &mut mode),
         }
         for group in &groups{
             group.sync(&mut views);
@@ -449,8 +624,8 @@ fn main()->io::Result<()>{
                 child_view.draw_status_bar(&buffers[views[parent_view].buf], mode)?;
             }
         }
-        views[cmd_line].draw(&buffers[views[cmd_line].buf])?;
-        views[parent_view].draw(&buffers[views[parent_view].buf])?;
+        cmd_line.draw()?;
+        views[parent_view].draw_text(&buffers[views[parent_view].buf])?;
     }
     Ok(())
 }
