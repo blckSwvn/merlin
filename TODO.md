@@ -2,7 +2,6 @@
 
 ---
 
-make draw_error actually work
 add split/splitv
 be able to resize views,
 resize views automatically if :close

@@ -111,7 +111,7 @@ impl CmdLine{
         if !self.input.is_empty(){
             write!(out, "{}{}",termion::cursor::Goto(1, self.pos_y+1), termion::clear::CurrentLine)?;
             write!(out, "{}:{}", termion::cursor::Goto(1, self.pos_y+1), self.input)?;
-        }else{
+        }else {
             write!(out, "{}{}",termion::cursor::Goto(1, self.pos_y+1), termion::clear::CurrentLine)?;
         }
         out.flush()
@@ -399,15 +399,21 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: usize, views: &mut Vec<View>, buffer: 
     match cmd{
         Cmd::EnterModeInsert => {
             cmd_line.input.clear();
+            cmd_line.draw().unwrap();
             cmd_line.cursor = 0;
             *mode = Mode::Insert;
         }
         Cmd::EnterModeNormal  => {
             cmd_line.input.clear();
+            cmd_line.draw().unwrap();
             cmd_line.cursor = 0;
             *mode = Mode::Normal;
         }
-        Cmd::EnterModeCommand => *mode = Mode::Command,
+        Cmd::EnterModeCommand => {
+            *mode = Mode::Command;
+            cmd_line.input.clear();
+            cmd_line.draw().unwrap();
+        }
         Cmd::InsertChar(c)=>{
             curr_buffer.insert(curr_view, c);
             curr_view.x += 1;
@@ -466,12 +472,16 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: usize, views: &mut Vec<View>, buffer: 
         },
         Cmd::CmdInsert(c) => {
             if c != '\n' {
-                cmd_line.insert(c)
+                cmd_line.insert(c);
+                    cmd_line.draw().unwrap()
             }else{
                 let input = cmd_line.input.clone();
                 match parse_cmd(input){
                     Ok(parsed_cmd) => exec_cmd(cmd_line, view, views, buffer, buffers, groups, parsed_cmd, mode),
                     Err(msg) => { 
+                        cmd_line.input.clear();
+                        cmd_line.cursor = 0;
+                        *mode = Mode::Normal;
                         cmd_line.draw_error(&msg).unwrap();
                     },
                 }
@@ -479,6 +489,7 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: usize, views: &mut Vec<View>, buffer: 
         },
         Cmd::CmdBackspace=>{
             cmd_line.backspace();
+            cmd_line.draw().unwrap()
         },
         Cmd::CmdMoveLeft=>{
             cmd_line.cursor = cmd_line.cursor.saturating_sub(1);
@@ -624,8 +635,14 @@ fn main()->io::Result<()>{
                 child_view.draw_status_bar(&buffers[views[parent_view].buf], mode)?;
             }
         }
-        cmd_line.draw()?;
-        views[parent_view].draw_text(&buffers[views[parent_view].buf])?;
+        match mode{
+            Mode::Command =>{
+                cmd_line.draw()?;
+            }
+            _ => {
+                views[parent_view].draw_text(&buffers[views[parent_view].buf])?;
+            }
+        }
     }
     Ok(())
 }
