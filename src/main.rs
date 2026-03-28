@@ -2,14 +2,20 @@ use std::fs::{self, File};
 use std::process::{exit};
 use ropey::Rope;
 use std::path::PathBuf;
-use std::{env, io, string};
+use std::{env, io};
 use std::io::{Write};
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use termion::event::Key;
 
-#[derive(Clone, Copy)]
-struct Buffer_idx{idx:usize}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BufferIdx(usize);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ViewIdx(usize);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GroupIdx(usize);
+
+#[derive(Clone)]
 struct Buffer{
     flags: u64,
     file: Option<PathBuf>,
@@ -23,6 +29,78 @@ impl Default for Buffer {
             file: None,
             buf: Rope::new(),
         }
+    }
+}
+struct Buffers(Vec<Buffer>);
+impl Buffers{
+    fn new()->Self {Self(Vec::new())}
+    fn get(&self, idx: BufferIdx)->&Buffer{
+        &self.0[idx.0]
+    }
+    fn get_mut(&mut self, idx: BufferIdx)->&mut Buffer{
+        &mut self.0[idx.0]
+    }
+    fn push(&mut self, buf: Buffer) -> BufferIdx {
+        let idx = BufferIdx(self.0.len());
+        self.0.push(buf);
+        idx
+    }
+    fn len(&self)->usize{
+        self.0.len()
+    }
+    fn iter(&self)->impl Iterator<Item = &Buffer>{
+        self.0.iter()
+    }
+    fn iter_mut(&mut self)->impl Iterator<Item = &mut Buffer>{
+        self.0.iter_mut()
+    }
+}
+struct Views(Vec<View>);
+impl Views{
+    fn new()->Self {Self(Vec::new())}
+    fn get(&self, idx: ViewIdx)->&View{
+        &self.0[idx.0]
+    }
+    fn get_mut(&mut self, idx: ViewIdx)->&mut View{
+        &mut self.0[idx.0]
+    }
+    fn push(&mut self, view: View) -> ViewIdx{
+        let idx = ViewIdx(self.0.len());
+        self.0.push(view);
+        idx
+    }
+    fn len(&self)->usize{
+        self.0.len()
+    }
+    fn iter(&self)->impl Iterator<Item = &View>{
+        self.0.iter()
+    }
+    fn iter_mut(&mut self)->impl Iterator<Item = &mut View>{
+        self.0.iter_mut()
+    }
+}
+struct Groups(Vec<Group>);
+impl Groups{
+    fn new()->Self {Self(Vec::new())}
+    fn get(&self, idx:GroupIdx)->&Group{
+        &self.0[idx.0]
+    }
+    fn get_mut(&mut self, idx: GroupIdx)->&mut Group{
+        &mut self.0[idx.0]
+    }
+    fn push(&mut self, group: Group) -> GroupIdx{
+        let idx = GroupIdx(self.0.len());
+        self.0.push(group);
+        idx
+    }
+    fn len(&self)->usize{
+        self.0.len()
+    }
+    fn iter(&self)->impl Iterator<Item = &Group>{
+        self.0.iter()
+    }
+    fn iter_mut(&mut self)->impl Iterator<Item = &mut Group>{
+        self.0.iter_mut()
     }
 }
 impl Buffer{
@@ -64,7 +142,7 @@ impl Buffer{
             file: path.map(PathBuf::from),
         })
     }
-    fn insert(&mut self, view: &mut View, c: char){
+    fn insert(&mut self, view: &View, c: char){
         let cursor_char = view.cursor_char(self);
         self.buf.insert_char(cursor_char, c);
     }
@@ -114,19 +192,12 @@ impl CmdLine{
             }
             Mode::Normal | Mode::Insert => write!{out, "{}{}",termion::cursor::Goto(1, self.pos_y+1), termion::clear::CurrentLine}?,
         }
-        // if !self.input.is_empty(){
-        //     write!(out, "{}{}",termion::cursor::Goto(1, self.pos_y+1), termion::clear::CurrentLine)?;
-        //     write!(out, "{}:{}", termion::cursor::Goto(1, self.pos_y+1), self.input)?;
-        // }else {
-        //     write!(out, "{}{}",termion::cursor::Goto(1, self.pos_y+1), termion::clear::CurrentLine)?;
-        // }
         out.flush()
     }
 }
 
-struct ViewIdx{idx:usize}
 struct View{
-    buf: Buffer_idx,
+    buf: BufferIdx,
     y: usize,
     x: usize,
     prefered_x: usize,
@@ -141,7 +212,7 @@ struct View{
 impl Default for View{
     fn default() -> Self {
         Self {
-            buf: Buffer_idx {idx: 0},
+            buf: BufferIdx(0),
             y: 0,
             x: 0,
             prefered_x: 0,
@@ -150,7 +221,7 @@ impl Default for View{
             height: 0,
             pos_x: 0,
             pos_y: 0,
-            flags: View::EMPTY,
+            flags: 0,
         }
     }
 }
@@ -159,11 +230,11 @@ impl View{
     // const FLOATING:        u16 = 1 << 1;
     const LINE_NUMBER:     u16 = 1 << 2;
     const STATUS_BAR:      u16 = 1 << 3;
-    const EMPTY:           u16 = 1 << 4;
+    // const EMPTY:           u16 = 1 << 4;
     fn check_flag(&self, flag: u16)->bool{
         self.flags & flag != 0
     }
-    fn new(buf: Buffer_idx, pos_x: u16, pos_y: u16, width: u16, height: u16, flags:u16)->Self{
+    fn new(buf: BufferIdx, pos_x: u16, pos_y: u16, width: u16, height: u16, flags:u16)->Self{
         Self{
             buf,
             x: 0,
@@ -182,13 +253,13 @@ impl View{
         write!(out, "{}",termion::clear::All)?;
         Ok(())
     }
-    fn draw(&self, buffers: &Vec<Buffer>, mode: Mode)->io::Result<()>{
+    fn draw(&self, buffers: &Buffers, mode: Mode)->io::Result<()>{
         if self.check_flag(View::LINE_NUMBER){
             self.draw_line_numbers()?;
         }else if self.check_flag(View::STATUS_BAR){
-            self.draw_status_bar(&buffers[self.buf.idx], mode)?;
+            self.draw_status_bar(buffers.get(self.buf), mode)?;
         }else{
-            self.draw_text(&buffers[self.buf.idx])?;
+            self.draw_text(buffers.get(self.buf))?;
         }
         Ok(())
     }
@@ -276,63 +347,60 @@ impl View{
     }
 }
 
-struct ViewGroup{
-    empty: bool,
-    parent: usize,
-    children: Vec<usize>,
+struct Group{
+    parent: ViewIdx,
+    children: Vec<ViewIdx>,
 }
 
-impl Default for ViewGroup{
+impl Default for Group{
     fn default() -> Self {
         Self { 
-            empty: true,
-            parent: 0,
+            parent: ViewIdx(0),
             children: vec![],
         }
     }
 }
-impl ViewGroup{
-    fn new(buffers: &mut Vec<Buffer>, views: &mut Vec<View>, parent_view: usize, children_flags:u16)->Self{
-        let parent_pos_x = views[parent_view].pos_x;
-        let parent_pos_y = views[parent_view].pos_y;
-        let mut parent_height = views[parent_view].height;
-        let parent_width = views[parent_view].width;
+impl Group{
+    fn new(buffers: &mut Buffers, views: &mut Views, parent: ViewIdx, children_flags:u16)->Self{
+        let parent_pos_x = views.get(parent).pos_x;
+        let parent_pos_y = views.get(parent).pos_y;
+        let mut parent_height = views.get(parent).height;
+        let parent_width = views.get(parent).width;
         let mut children = vec![];
         if children_flags & View::STATUS_BAR != 0 {
             buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
             views.push(View::new(
-                Buffer_idx {idx:buffers.len().saturating_sub(1)}, parent_pos_x,
+                BufferIdx(buffers.len().saturating_sub(1)), parent_pos_x,
                 parent_height - parent_pos_y, parent_width,
                 1, View::NON_NAVIGATABLE | View::STATUS_BAR));
-            children.push(views.len().saturating_sub(1));
-            views[parent_view].height -= 1;
+            children.push(ViewIdx(views.len().saturating_sub(1)));
+            views.get_mut(parent).height -= 1;
             parent_height -= 1;
         }
         if children_flags & View::LINE_NUMBER != 0 {
             buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
             views.push(View::new(
-                Buffer_idx {idx:buffers.len().saturating_sub(1)}, parent_pos_x,
+                BufferIdx(buffers.len().saturating_sub(1)), parent_pos_x,
                 parent_pos_y, 5,
                 parent_height, View::NON_NAVIGATABLE | View::LINE_NUMBER)
             );
-            children.push(views.len().saturating_sub(1));
-            views[parent_view].pos_x = views[parent_view].pos_x.saturating_add(5);
-            views[parent_view].width = views[parent_view].width.saturating_sub(5);
+            children.push(ViewIdx(views.len().saturating_sub(1)));
+            views.get_mut(parent).pos_x = views.get(parent).pos_x.saturating_add(5);
+            views.get_mut(parent).width = views.get(parent).width.saturating_sub(5);
         }
         Self{
-            empty: false,
-            parent: parent_view,
+            parent,
             children,
         }
     }
-        fn sync(&self, views: &mut Vec<View>){
+        fn sync(&self, views: &mut Views){
         let (y, off) = {
-            let parent = &views[self.parent];
+            let parent = &views.get(self.parent);
             (parent.y, parent.off)
         };
         for &child in &self.children{
-            if !views[child].check_flag(View::STATUS_BAR){
-                let child = &mut views[child];
+            if !views.get(child).check_flag(View::STATUS_BAR){
+                let child = &mut views.get_mut(child);
                 child.y = y;
                 child.off = off;
             }
@@ -415,9 +483,9 @@ fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
     }
 }
 
-fn exec_cmd(cmd_line: &mut CmdLine, view: usize, views: &mut Vec<View>, buffer: usize, buffers: &mut Vec<Buffer>, groups: &mut Vec<ViewGroup>, cmd: Cmd, mode: &mut Mode){
-    let curr_view = &mut views[view];
-    let curr_buffer = &mut buffers[buffer];
+fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffer: BufferIdx, buffers: &mut Buffers, groups: &mut Groups, cmd: Cmd, mode: &mut Mode){
+    let mut curr_view = views.get_mut(view);
+    let mut curr_buffer = &mut buffers.get_mut(buffer);
     match cmd{
         Cmd::EnterModeInsert => {
             *mode = Mode::Insert;
@@ -437,16 +505,17 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: usize, views: &mut Vec<View>, buffer: 
             cmd_line.draw(*mode).unwrap();
         }
         Cmd::InsertChar(c)=>{
-            curr_buffer.insert(curr_view, c);
+            curr_buffer.insert(views.get(view), c);
+            let mut curr_view = views.get_mut(view);
             curr_view.x += 1;
             curr_view.prefered_x = curr_view.x;
-            View::scroll(curr_view, curr_buffer);
+            View::scroll(&mut curr_view, &mut curr_buffer);
         },
         Cmd::NewLine=>{
-            curr_buffer.insert(curr_view, '\n');
+            curr_buffer.insert(&mut curr_view, '\n');
             curr_view.y += 1;
             curr_view.x = 0;
-            View::scroll(curr_view, curr_buffer);
+            View::scroll(&mut curr_view, &mut curr_buffer);
         },
         Cmd::Backspace=>{
             let idx = curr_view.cursor_char(curr_buffer);
@@ -461,7 +530,7 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: usize, views: &mut Vec<View>, buffer: 
                         curr_view.x = line.len_chars();
                     }
                 }
-                View::scroll(curr_view, curr_buffer);
+                View::scroll(&mut curr_view, &mut curr_buffer);
             }
         },
         Cmd::MoveUp=>{
@@ -469,7 +538,7 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: usize, views: &mut Vec<View>, buffer: 
             if let Some(line) = curr_buffer.buf.get_line(curr_view.y){
                 curr_view.x = curr_view.prefered_x.min(line.len_chars());
             }
-            View::scroll(curr_view, curr_buffer);
+            View::scroll(&mut curr_view, &mut curr_buffer);
         },
         Cmd::MoveDown=>{
             if curr_buffer.buf.len_lines() > 0{
@@ -478,7 +547,7 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: usize, views: &mut Vec<View>, buffer: 
             if let Some(line) = curr_buffer.buf.get_line(curr_view.y){
                 curr_view.x = curr_view.prefered_x.min(line.len_chars().saturating_sub(1));
             }
-            View::scroll(curr_view, curr_buffer);
+            View::scroll(&mut curr_view, &mut curr_buffer);
         },
         Cmd::MoveRight=>{
             curr_view.x = curr_view.x + 1;
@@ -530,20 +599,20 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: usize, views: &mut Vec<View>, buffer: 
         },
         Cmd::Close=>{
             for g in groups.iter(){
-                if views[g.parent].buf.idx == buffer{
+                if views.get(g.parent).buf == buffer{
                     for &child in &g.children{
-                        views[child] = View::default();
+                        *views.get_mut(child) = View::default();
                     }
                 }
             }
-            buffers[buffer] = Buffer::default();
+            *buffers.get_mut(buffer) = Buffer::default();
             for g in groups.iter_mut(){
-                if views[g.parent].buf.idx == buffer{
-                    *g = ViewGroup::default();
+                if views.get(g.parent).buf == buffer{
+                    *g = Group::default();
                 }
             }
             for v in views.iter_mut(){
-                if v.buf.idx == buffer{
+                if v.buf == buffer{
                     *v = View::default();
                 }
             }
@@ -556,13 +625,14 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: usize, views: &mut Vec<View>, buffer: 
             if !PathBuf::from(&file_arg).exists(){
                 cmd_line.draw_error(&format!("{file_arg} does not exist").to_string()).unwrap();
                 *mode = Mode::Normal;
+                cmd_line.cursor = 0;
             }else{
                 buffers.push(Buffer::new(Some(&file_arg), 0).unwrap());
                 curr_view.off = 0;
                 curr_view.x = 0;
                 curr_view.y = 0;
                 curr_view.prefered_x = 0;
-                curr_view.buf.idx = buffers.len().saturating_sub(1);
+                curr_view.buf = BufferIdx(buffers.len().saturating_sub(1));
                 cmd_line.input.clear();
                 cmd_line.cursor = 0;
                 *mode = Mode::Normal;
@@ -592,9 +662,9 @@ fn parse_cmd(s: String)->Result<Cmd, String>{
 }
 
 fn main()->io::Result<()>{
-    let mut views = vec![];
-    let mut buffers = vec![];
-    let mut groups:Vec<ViewGroup> = Vec::with_capacity(1);
+    let mut views = Views::new();
+    let mut buffers = Buffers::new();
+    let mut groups = Groups::new();
     let (width, height) = termion::terminal_size().unwrap();
     let mut cmd_line = CmdLine::new(height);
     let height = height -2;
@@ -603,14 +673,14 @@ fn main()->io::Result<()>{
         let args: Vec<String> = env::args().skip(1).collect();
         if args.is_empty(){
             buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
-            views.push(View::new(Buffer_idx {idx:buffers.len().saturating_sub(1)},0,0,width,height,0));
-            let parent = views.len().saturating_sub(1);
-            groups.push(ViewGroup::new(&mut buffers, &mut views, parent, View::LINE_NUMBER | View::STATUS_BAR));
+            views.push(View::new(BufferIdx(buffers.len().saturating_sub(1)),0,0,width,height,0));
+            let parent = ViewIdx(views.len().saturating_sub(1));
+            groups.push(Group::new(&mut buffers, &mut views, parent, View::LINE_NUMBER | View::STATUS_BAR));
         }else{
             buffers.push(Buffer::new(Some(&args[0]), 0).unwrap());
-            views.push(View::new(Buffer_idx{idx:buffers.len().saturating_sub(1)}, 0, 0, width, height, 0));
-            let parent = buffers.len().saturating_sub(1);
-            groups.push(ViewGroup::new(&mut buffers, &mut views, parent, View::LINE_NUMBER | View::STATUS_BAR));
+            views.push(View::new(BufferIdx(buffers.len().saturating_sub(1)), 0, 0, width, height, 0));
+            let parent = ViewIdx(buffers.len().saturating_sub(1));
+            groups.push(Group::new(&mut buffers, &mut views, parent, View::LINE_NUMBER | View::STATUS_BAR));
         }
     }
     let input = io::stdin();
@@ -618,30 +688,32 @@ fn main()->io::Result<()>{
     write!(out, "{}",termion::clear::All)?;
 
     //inital draw
-    for c in &groups[groups.len().saturating_sub(1)].children{
-        views[*c].draw(&buffers, mode)?;
+    let group = groups.get(GroupIdx(groups.len().saturating_sub(1)));
+    for c in &group.children{
+        let view = views.get(*c);
+        view.draw(&buffers, mode)?;
     }
     cmd_line.draw(mode)?;
-    views[groups[groups.len().saturating_sub(1)].parent].draw(&buffers, mode)?;
+    views.get(groups.get(GroupIdx(groups.len().saturating_sub(1))).parent).draw(&buffers, mode)?;
 
     for key in input.keys(){
         let cmd = key_to_cmd(key?, &mode);
-        let group = groups.len().saturating_sub(1);
-        let view = groups[group].parent;
-        let buffer = views[group].buf;
-        exec_cmd(&mut cmd_line, view, &mut views, buffer.idx, &mut buffers, &mut groups, cmd, &mut mode);
+        let view = groups.get(GroupIdx(groups.len().saturating_sub(1))).parent;
+        let buffer = views.get(view).buf;
+        exec_cmd(&mut cmd_line, view, &mut views, buffer, &mut buffers, &mut groups, cmd, &mut mode);
+        let group = groups.get(GroupIdx(groups.len().saturating_sub(1)));
 
         match mode {
             Mode::Normal | Mode::Insert => {
-                groups[group].sync(&mut views);
-                for c in &groups[group].children{
-                    views[*c].draw(&buffers, mode)?;
+                group.sync(&mut views);
+                for c in &group.children{
+                    views.get(*c).draw(&buffers, mode)?;
                 }
-                views[groups[group].parent].draw(&buffers, mode)?;
+                views.get(group.parent).draw(&buffers, mode)?;
             }
             Mode::Command =>{
-                for c in &groups[group].children{
-                    views[*c].draw(&buffers, mode)?;
+                for c in &group.children{
+                    views.get(*c).draw(&buffers, mode)?;
                 }
                 cmd_line.draw(mode)?
             } 
