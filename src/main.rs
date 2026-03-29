@@ -15,22 +15,6 @@ struct ViewIdx(usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GroupIdx(usize);
 
-#[derive(Clone)]
-struct Buffer{
-    flags: u64,
-    file: Option<PathBuf>,
-    buf: Rope,
-}
-
-impl Default for Buffer {
-    fn default() -> Self {
-        Self {
-            flags: Buffer::EMPTY,
-            file: None,
-            buf: Rope::new(),
-        }
-    }
-}
 struct Buffers(Vec<Buffer>);
 impl Buffers{
     fn new()->Self {Self(Vec::new())}
@@ -103,6 +87,23 @@ impl Groups{
         self.0.iter_mut()
     }
 }
+
+#[derive(Clone)]
+struct Buffer{
+    flags: u64,
+    file: Option<PathBuf>,
+    buf: Rope,
+}
+
+impl Default for Buffer {
+    fn default() -> Self {
+        Self {
+            flags: Buffer::EMPTY,
+            file: None,
+            buf: Rope::new(),
+        }
+    }
+}
 impl Buffer{
     const READ_ONLY:       u64 = 1 << 0;
     const SCRATCH:         u64 = 1 << 1;
@@ -133,8 +134,8 @@ impl Buffer{
                 Rope::new()
             }
         }else{
-            f |= Self::SCRATCH;
-            Rope::new()
+                f |= Self::NEW_FILE;
+                Rope::new()
         };
         Ok(Buffer{
             flags: f,
@@ -146,10 +147,15 @@ impl Buffer{
         let cursor_char = view.cursor_char(self);
         self.buf.insert_char(cursor_char, c);
     }
-    fn save(&self)->io::Result<()>{
-        if let Some(path) = &self.file{
-            let file = File::create(path)?;
+    fn save(&self, new: Option<String>)->io::Result<()>{
+        if let Some(new) = new{
+            let file = File::create(new)?;
             self.buf.write_to(file)?;
+        }else{
+            if let Some(path) = &self.file{
+                let file = File::create(path)?;
+                self.buf.write_to(file)?;
+            }
         }
         Ok(())
     }
@@ -251,16 +257,6 @@ impl View{
     fn redraw(&self)->io::Result<()>{
         let mut out = io::stdout().lock();
         write!(out, "{}",termion::clear::All)?;
-        Ok(())
-    }
-    fn draw(&self, buffers: &Buffers, mode: Mode)->io::Result<()>{
-        if self.check_flag(View::LINE_NUMBER){
-            self.draw_line_numbers()?;
-        }else if self.check_flag(View::STATUS_BAR){
-            self.draw_status_bar(buffers.get(self.buf), mode)?;
-        }else{
-            self.draw_text(buffers.get(self.buf))?;
-        }
         Ok(())
     }
     fn draw_status_bar(&self, buffer: &Buffer, mode: Mode)->io::Result<()>{
@@ -406,6 +402,20 @@ impl Group{
             }
         }
     }
+    fn draw_group(&self, mode: Mode, views: &Views, buffers: &Buffers)->io::Result<()>{
+        for c in self.children.iter(){
+            let curr = views.get(*c);
+            if curr.check_flag(View::STATUS_BAR){
+                curr.draw_status_bar(buffers.get(views.get(self.parent).buf), mode)?;
+            }else if curr.check_flag(View::LINE_NUMBER){
+                curr.draw_line_numbers()?;
+            }else{
+                curr.draw_text(buffers.get(curr.buf))?;
+            }
+        }
+        views.get(self.parent).draw_text(buffers.get(views.get(self.parent).buf))?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -427,9 +437,9 @@ enum Cmd{
     MoveDown,
     MoveRight,
     MoveLeft,
-    Open(String),
     Close,
-    Save,
+    Open(Option<String>),
+    Save(Option<String>),
     Quit,
     SwitchNextView,
     SwitchPrevView,
@@ -483,7 +493,8 @@ fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
     }
 }
 
-fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffer: BufferIdx, buffers: &mut Buffers, groups: &mut Groups, cmd: Cmd, mode: &mut Mode){
+fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &mut Buffers, groups: &mut Groups, cmd: Cmd, mode: &mut Mode){
+    let buffer = views.get(view).buf;
     let mut curr_view = views.get_mut(view);
     let mut curr_buffer = &mut buffers.get_mut(buffer);
     match cmd{
@@ -564,11 +575,11 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffer: Bu
         Cmd::CmdInsert(c) => {
             if c != '\n' {
                 cmd_line.insert(c);
-                    cmd_line.draw(*mode).unwrap()
+                cmd_line.draw(*mode).unwrap()
             }else{
                 let input = cmd_line.input.clone();
                 match parse_cmd(input){
-                    Ok(parsed_cmd) => exec_cmd(cmd_line, view, views, buffer, buffers, groups, parsed_cmd, mode),
+                    Ok(parsed_cmd) => exec_cmd(cmd_line, view, views, buffers, groups, parsed_cmd, mode),
                     Err(msg) => { 
                         cmd_line.input.clear();
                         cmd_line.cursor = 0;
@@ -588,10 +599,25 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffer: Bu
         Cmd::CmdMoveRight=>{
             cmd_line.cursor = cmd_line.cursor.saturating_add(1);
         }
-        Cmd::Save=>{
-            match curr_buffer.save(){
-                Err(error)=>cmd_line.draw_error(&error.to_string()).unwrap(),
-                Ok(_)=>{}
+        Cmd::Save(f)=>{
+            if curr_buffer.check_flag(Buffer::SCRATCH){
+                cmd_line.draw_error("cannot save Scratch buffer").unwrap();
+                cmd_line.input.clear();
+                cmd_line.cursor = 0;
+                *mode = Mode::Normal;
+                return
+            }
+            if let Some(new) = f{
+                curr_buffer.save(Some(new)).unwrap();
+            }else{
+                if let Some(_) = &curr_buffer.file{
+                    match curr_buffer.save(None){
+                        Err(error)=>cmd_line.draw_error(&error.to_string()).unwrap(),
+                        Ok(_)=>{},
+                    }
+                }else{
+                    cmd_line.draw_error("new file needs name").unwrap();
+                }
             }
             cmd_line.input.clear();
             cmd_line.cursor = 0;
@@ -620,23 +646,21 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffer: Bu
         Cmd::Quit=>{
             exit(1);
         },
-        Cmd::Open(file_arg) => {
+        Cmd::Open(file)=>{
             curr_view.redraw().unwrap();
-            if !PathBuf::from(&file_arg).exists(){
-                cmd_line.draw_error(&format!("{file_arg} does not exist").to_string()).unwrap();
-                *mode = Mode::Normal;
-                cmd_line.cursor = 0;
+            if let Some(f) = file{
+                buffers.push(Buffer::new(Some(&f), 0).unwrap());
             }else{
-                buffers.push(Buffer::new(Some(&file_arg), 0).unwrap());
-                curr_view.off = 0;
-                curr_view.x = 0;
-                curr_view.y = 0;
-                curr_view.prefered_x = 0;
-                curr_view.buf = BufferIdx(buffers.len().saturating_sub(1));
-                cmd_line.input.clear();
-                cmd_line.cursor = 0;
-                *mode = Mode::Normal;
+                buffers.push(Buffer::new(None, 0).unwrap());
             }
+            curr_view.off = 0;
+            curr_view.x = 0;
+            curr_view.y = 0;
+            curr_view.prefered_x = 0;
+            curr_view.buf = BufferIdx(buffers.len().saturating_sub(1));
+            cmd_line.input.clear();
+            cmd_line.cursor = 0;
+            *mode = Mode::Normal;
         }
         Cmd::NoOp=>{
         },
@@ -649,14 +673,23 @@ fn parse_cmd(s: String)->Result<Cmd, String>{
     let cmd = parts.next().ok_or("empty command")?;
     match cmd{
         "q" => Ok(Cmd::Quit),
-        "w" => Ok(Cmd::Save),
+        "w" =>{
+            let file = parts.next();
+            if let Some(f) = file{
+                Ok(Cmd::Save(Some(f.to_string())))
+            }else{
+                Ok(Cmd::Save(None))
+            }
+        } 
         "open" => {
-            let file = parts.next().ok_or("missing file name")?;
-            Ok(Cmd::Open(file.to_string()))
+            let file = parts.next();
+            if let Some(f) = file{
+                Ok(Cmd::Open(Some(f.to_string())))
+            }else{
+                Ok(Cmd::Open(None))
+            }
         }
-        "close" => {
-            Ok(Cmd::Close)
-        }
+        "close" => Ok(Cmd::Close),
         _ => Err(format!("unknown command: {}", cmd))
     }
 }
@@ -688,33 +721,22 @@ fn main()->io::Result<()>{
     write!(out, "{}",termion::clear::All)?;
 
     //inital draw
-    let group = groups.get(GroupIdx(groups.len().saturating_sub(1)));
-    for c in &group.children{
-        let view = views.get(*c);
-        view.draw(&buffers, mode)?;
-    }
+    groups.get(GroupIdx(groups.len().saturating_sub(1))).draw_group(mode, &views, &buffers)?;
     cmd_line.draw(mode)?;
-    views.get(groups.get(GroupIdx(groups.len().saturating_sub(1))).parent).draw(&buffers, mode)?;
 
     for key in input.keys(){
         let cmd = key_to_cmd(key?, &mode);
         let view = groups.get(GroupIdx(groups.len().saturating_sub(1))).parent;
-        let buffer = views.get(view).buf;
-        exec_cmd(&mut cmd_line, view, &mut views, buffer, &mut buffers, &mut groups, cmd, &mut mode);
+        exec_cmd(&mut cmd_line, view, &mut views, &mut buffers, &mut groups, cmd, &mut mode);
         let group = groups.get(GroupIdx(groups.len().saturating_sub(1)));
 
-        match mode {
+        match mode{
             Mode::Normal | Mode::Insert => {
                 group.sync(&mut views);
-                for c in &group.children{
-                    views.get(*c).draw(&buffers, mode)?;
-                }
-                views.get(group.parent).draw(&buffers, mode)?;
+                group.draw_group(mode, &views, &buffers)?;
             }
             Mode::Command =>{
-                for c in &group.children{
-                    views.get(*c).draw(&buffers, mode)?;
-                }
+                group.draw_group(mode, &views, &buffers)?;
                 cmd_line.draw(mode)?
             } 
         }
