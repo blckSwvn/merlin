@@ -51,9 +51,9 @@ impl Buffers{
         self.0.iter_mut()
     }
 }
-struct Views(Vec<View>);
+struct Views(Vec<View>, VecDeque<ViewIdx>);
 impl Views{
-    fn new()->Self {Self(Vec::new())}
+    fn new()->Self {Self(Vec::new(), VecDeque::new())}
     fn get(&self, idx: ViewIdx)->&View{
         &self.0[idx.0]
     }
@@ -61,9 +61,20 @@ impl Views{
         &mut self.0[idx.0]
     }
     fn push(&mut self, view: View) -> ViewIdx{
-        let idx = ViewIdx(self.0.len());
-        self.0.push(view);
-        idx
+        if self.1.is_empty(){
+            let idx = ViewIdx(self.0.len());
+            self.0.push(view);
+            idx
+        }else{
+            let idx = self.1.pop_front().unwrap();
+            let element = self.get_mut(idx);
+            *element = view;
+            idx
+        }
+    }
+    fn remove(&mut self, idx: ViewIdx){
+        self.0[idx.0] = View::default();
+        self.1.push_back(idx);
     }
     fn len(&self)->usize{
         self.0.len()
@@ -75,9 +86,9 @@ impl Views{
         self.0.iter_mut()
     }
 }
-struct Groups(Vec<Group>);
+struct Groups(Vec<Group>, VecDeque<GroupIdx>);
 impl Groups{
-    fn new()->Self {Self(Vec::new())}
+    fn new()->Self {Self(Vec::new(), VecDeque::new())}
     fn get(&self, idx:GroupIdx)->&Group{
         &self.0[idx.0]
     }
@@ -85,9 +96,16 @@ impl Groups{
         &mut self.0[idx.0]
     }
     fn push(&mut self, group: Group) -> GroupIdx{
-        let idx = GroupIdx(self.0.len());
-        self.0.push(group);
-        idx
+        if self.1.is_empty(){
+            let idx = GroupIdx(self.0.len());
+            self.0.push(group);
+            idx
+        }else{
+            let idx = self.1.pop_front().unwrap();
+            let element = self.get_mut(idx);
+            *element = group;
+            idx
+        }
     }
     fn len(&self)->usize{
         self.0.len()
@@ -729,8 +747,8 @@ fn main()->io::Result<()>{
     write!(out, "{}",termion::clear::All)?;
 
     //inital draw
-    cmd_line.draw(mode)?;
     groups.get(GroupIdx(groups.len().saturating_sub(1))).draw_group(mode, &views, &buffers)?;
+    cmd_line.draw(mode)?;
 
     for key in input.keys(){
         let cmd = key_to_cmd(key?, &mode);
