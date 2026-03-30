@@ -1,10 +1,9 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::process::{exit};
-use ropey::Rope;
+use std::process::{exit};use ropey::Rope;
 use std::path::PathBuf;
 use std::{env, io};
-use std::io::{Write};
+use std::io::{BufReader, Write};
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use termion::event::Key;
@@ -38,7 +37,7 @@ impl Buffers{
         }
     }
     fn remove(&mut self, idx: BufferIdx){
-        self.0[idx.0] = Buffer::default();
+        self.0[idx.0].partial_reset();
         self.1.push_back(idx);
     }
     fn len(&self)->usize{
@@ -107,27 +106,23 @@ struct Buffer{
     buf: Rope,
 }
 
-impl Default for Buffer {
-    fn default() -> Self {
-        Self {
-            flags: Buffer::EMPTY,
-            file: None,
-            buf: Rope::new(),
-        }
-    }
-}
 impl Buffer{
     const READ_ONLY:       u64 = 1 << 0;
     const SCRATCH:         u64 = 1 << 1;
-    // const DIRTY:           u64 = 1 << 2;
+    const DIRTY:           u64 = 1 << 2;
     const NEW_FILE:        u64 = 1 << 3;
-    const EMPTY:           u64 = 1 << 4;
-    // fn set_flag(&mut self, flag: u64){
-    //     self.flags |= flag
-    // }
-    // fn clear_flag(&mut self, flag: u64){
-    //     self.flags &= !flag
-    // }
+    const NON_NAVIGATABLE: u64 = 1 << 4;
+    // const EMPTY:           u64 = 1 << 5;
+    fn partial_reset(&mut self){
+        self.buf = Rope::new();
+        //does not reset flags or pathbuf
+    }
+    fn set_flag(&mut self, flag: u64){
+        self.flags |= flag
+    }
+    fn clear_flag(&mut self, flag: u64){
+        self.flags &= !flag
+    }
     fn check_flag(&self, flag: u64)->bool{
         self.flags & flag != 0
     }
@@ -158,8 +153,9 @@ impl Buffer{
     fn insert(&mut self, view: &View, c: char){
         let cursor_char = view.cursor_char(self);
         self.buf.insert_char(cursor_char, c);
+        self.set_flag(Buffer::DIRTY);
     }
-    fn save(&self, new: Option<String>)->io::Result<()>{
+    fn save(&mut self, new: Option<String>)->io::Result<()>{
         if let Some(new) = new{
             let file = File::create(new)?;
             self.buf.write_to(file)?;
@@ -169,6 +165,7 @@ impl Buffer{
                 self.buf.write_to(file)?;
             }
         }
+        self.clear_flag(Buffer::DIRTY);
         Ok(())
     }
 }
@@ -377,7 +374,7 @@ impl Group{
         let parent_width = views.get(parent).width;
         let mut children = vec![];
         if children_flags & View::STATUS_BAR != 0 {
-            buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
+            buffers.push(Buffer::new(None, Buffer::NON_NAVIGATABLE | Buffer::SCRATCH).unwrap());
             views.push(View::new(
                 BufferIdx(buffers.len().saturating_sub(1)), parent_pos_x,
                 parent_height - parent_pos_y, parent_width,
@@ -387,7 +384,7 @@ impl Group{
             parent_height -= 1;
         }
         if children_flags & View::LINE_NUMBER != 0 {
-            buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
+            buffers.push(Buffer::new(None, Buffer::NON_NAVIGATABLE | Buffer::SCRATCH).unwrap());
             views.push(View::new(
                 BufferIdx(buffers.len().saturating_sub(1)), parent_pos_x,
                 parent_pos_y, 5,
@@ -450,12 +447,12 @@ enum Cmd{
     MoveDown,
     MoveRight,
     MoveLeft,
-    Close,
+    ListBuffers,
+    Close(Option<BufferIdx>, bool),
     Open(Option<String>),
     Save(Option<String>),
-    Quit,
-    SwitchNextView,
-    SwitchPrevView,
+    Quit(bool),
+    SwitchBuffer(BufferIdx),
     EnterModeInsert,
     EnterModeNormal,
     EnterModeCommand,
@@ -464,9 +461,7 @@ enum Cmd{
 
 fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
     match key{
-        Key::Esc       => Cmd::EnterModeNormal,
-        Key::CtrlLeft  => Cmd::SwitchNextView,
-        Key::CtrlRight => Cmd::SwitchPrevView,
+        Key::Esc => Cmd::EnterModeNormal,
         _ => {
             match mode{
                 Mode::Normal=>{
@@ -613,6 +608,13 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
             cmd_line.cursor = cmd_line.cursor.saturating_add(1);
         }
         Cmd::Save(f)=>{
+            if curr_buffer.check_flag(Buffer::READ_ONLY){
+                cmd_line.draw_error("cannot save read only").unwrap();
+                cmd_line.input.clear();
+                cmd_line.cursor = 0;
+                *mode = Mode::Normal;
+                return
+            }
             if curr_buffer.check_flag(Buffer::SCRATCH){
                 cmd_line.draw_error("cannot save Scratch buffer").unwrap();
                 cmd_line.input.clear();
@@ -636,25 +638,90 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
             cmd_line.cursor = 0;
             *mode = Mode::Normal;
         },
-        Cmd::Close=>{
-            if curr_view.buf != BufferIdx(0){
-                buffers.remove(curr_view.buf);
-                curr_view.buf = BufferIdx(0);
-                cmd_line.input.clear();
-                curr_view.redraw().unwrap();
+        Cmd::Close(buffer_idx, force)=>{
+            let idx = {
+                if let Some(idx) = buffer_idx{
+                    idx
+                }else{
+                    curr_view.buf
+                }
+            };
+            let curr_buffer = buffers.get(idx);
+            if idx != BufferIdx(0){
+                if curr_buffer.check_flag(Buffer::READ_ONLY){
+                    cmd_line.draw_error("cannot save read only").unwrap();
+                    return;
+                }
+                if curr_buffer.check_flag(Buffer::DIRTY) && force == false{
+                    cmd_line.draw_error("cannot close due to unsaved changes").unwrap();
+                }else{
+                    buffers.remove(idx);
+                    if curr_view.buf == idx{
+                        curr_view.buf = BufferIdx(0);
+                        cmd_line.input.clear();
+                        curr_view.redraw().unwrap();
+                        curr_view.off = 0;
+                        curr_view.x = 0;
+                        curr_view.y = 0;
+                        curr_view.prefered_x = 0;
+                    }
+                }
             }else{
                 cmd_line.draw_error("will not close special buffer: 0").unwrap();
             }
-            curr_view.off = 0;
-            curr_view.x = 0;
-            curr_view.y = 0;
-            curr_view.prefered_x = 0;
             cmd_line.cursor = 0;
             *mode = Mode::Normal;
         }
-        Cmd::Quit=>{
+        Cmd::Quit(force)=>{
+            if !force{
+                let dirty: Vec<_> = buffers.iter()
+                    .enumerate()
+                    .filter(|(i, b)| b.check_flag(Buffer::DIRTY) && *i != 0)//buffer 0 is special
+                    .map(|(i, _)| i)
+                    .collect();
+                if !dirty.is_empty(){
+                    cmd_line.draw_error(&format!("cant quit dirty buffers: {:?}",dirty)).unwrap();
+                    cmd_line.input.clear();
+                    cmd_line.cursor = 0;
+                    *mode = Mode::Normal;
+                    return;
+                }
+            }
             exit(1);
         },
+        Cmd::SwitchBuffer(idx)=>{
+            if idx.0 < buffers.len(){
+                if buffers.get(idx).check_flag(Buffer::NON_NAVIGATABLE){
+                    cmd_line.draw_error(&format!("buffer {} is non navigatable", idx.0)).unwrap();
+                    cmd_line.input.clear();
+                    cmd_line.cursor = 0;
+                    *mode = Mode::Normal;
+                    return;
+                }
+                let buffer = buffers.get_mut(idx);
+                if buffer.buf.len_chars() == 0{
+                    if let Some(p) = &buffer.file{
+                        let file = File::open(p).unwrap();
+                        let reader = BufReader::new(file);
+                        buffer.buf = Rope::from_reader(reader).unwrap();
+                    }
+                }
+                curr_view.buf = idx;
+                curr_view.y = 0;
+                curr_view.x = 0;
+                curr_view.off = 0;
+                curr_view.prefered_x = 0;
+                cmd_line.input.clear();
+                cmd_line.cursor = 0;
+                *mode = Mode::Normal;
+                curr_view.redraw().unwrap();
+            }else{
+                cmd_line.draw_error(&format!("buffer {} does not exist", idx.0)).unwrap();
+                cmd_line.input.clear();
+                cmd_line.cursor = 0;
+                *mode = Mode::Normal;
+            }
+        }
         Cmd::Open(file)=>{
             curr_view.redraw().unwrap();
             if let Some(f) = file{
@@ -673,32 +740,83 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
         }
         Cmd::NoOp=>{
         },
-        _ =>{}
+        _ =>{},
     }
 }
 
-fn parse_cmd(s: String)->Result<Cmd, String>{
-    let mut parts = s.trim().split_whitespace();
-    let cmd = parts.next().ok_or("empty command")?;
-    match cmd{
-        "q" => Ok(Cmd::Quit),
-        "w" =>{
-            let file = parts.next();
-            if let Some(f) = file{
-                Ok(Cmd::Save(Some(f.to_string())))
-            }else{
-                Ok(Cmd::Save(None))
+fn parse_args(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+
+    for c in s.chars() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            ' ' if !in_quotes => {
+                if !current.is_empty() {
+                    args.push(current.clone());
+                    current.clear();
+                }
             }
-        } 
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
+fn parse_cmd(s: String)->Result<Cmd, String>{
+    let s = s.trim();
+    let mut parts = s.splitn(2, ' ');
+    let cmd = parts.next().ok_or("empty command")?;
+    let rest = parts.next().unwrap_or("");
+    match cmd{
+        "q" => Ok(Cmd::Quit(false)),
+        "q!" => Ok(Cmd::Quit(true)),
+        "w" =>{
+            let args = parse_args(rest);
+            Ok(Cmd::Save(args.get(0).cloned()))
+        }
         "open" | "o" => {
-            let file = parts.next();
-            if let Some(f) = file{
-                Ok(Cmd::Open(Some(f.to_string())))
+            let args = parse_args(rest);
+            if let Some(arg) = args.get(0){
+                if let Ok(idx) = arg.parse::<usize>(){
+                    Ok(Cmd::SwitchBuffer(BufferIdx(idx)))
+                }else{
+                    Ok(Cmd::Open(Some(arg.clone())))
+                }
             }else{
                 Ok(Cmd::Open(None))
             }
         }
-        "close" | "c" => Ok(Cmd::Close),
+        "close" | "c" => {
+            let mut args = Vec::new();
+            args.push(rest);
+            if let Some(arg) = args.get(0){
+                if let Ok(idx) = arg.parse::<usize>(){
+                    Ok(Cmd::Close(Some(BufferIdx(idx)), false))
+                }else{
+                    Ok(Cmd::Close(None, false))
+                }
+            }else{
+                Ok(Cmd::Close(None, false))
+            }
+        } 
+        "close!"| "c!"=> {
+            let mut args = Vec::new();
+            args.push(rest);
+            if let Some(arg) = args.get(0){
+                if let Ok(idx) = arg.parse::<usize>(){
+                    Ok(Cmd::Close(Some(BufferIdx(idx)), true))
+                }else{
+                    Ok(Cmd::Close(None, true))
+                }
+            }else{
+                Ok(Cmd::Close(None, true))
+            }
+        }
         _ => Err(format!("unknown command: {}", cmd))
     }
 }

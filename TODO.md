@@ -3,7 +3,6 @@
 ---
 
 more polish and bug fixes
-handling of Dirty, Read only for buffer on save quit etc
 only redrawing dirty lines instead of whole view
 
 ---
