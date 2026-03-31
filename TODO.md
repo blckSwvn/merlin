@@ -2,16 +2,16 @@
 
 ---
 
-better error handling
 layout engine
-more polish and bug fixes
+undo/redo
 only redrawing dirty lines instead of whole view
 
 ---
 
 ### far future
-undo/redo
-copy paste, registers
+copy paste, visual mode
+registers,
+vim or helix like motions
 color highlighting
 
 marks
