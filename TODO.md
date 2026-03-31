@@ -2,7 +2,7 @@
 
 ---
 
-make view.buf hold Option<BufferIdx>
+better error handling
 layout engine
 more polish and bug fixes
 only redrawing dirty lines instead of whole view
