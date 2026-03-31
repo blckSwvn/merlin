@@ -9,36 +9,47 @@ use termion::raw::IntoRawMode;
 use termion::event::Key;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BufferIdx(usize);
+struct BufferIdx{
+    idx:usize,
+    generation:u64,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ViewIdx(usize);
+struct ViewIdx{
+    idx:usize,
+    generation:u64,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct GroupIdx(usize);
+struct GroupIdx{
+    idx:usize,
+    generation:u64,
+}
 
 struct Buffers( Vec<Buffer>, VecDeque<BufferIdx>);
 impl Buffers{
     fn new()->Self {Self(Vec::new(), VecDeque::new())}
     fn get(&self, idx: BufferIdx)->&Buffer{
-        &self.0[idx.0]
+        &self.0[idx.idx]
     }
     fn get_mut(&mut self, idx: BufferIdx)->&mut Buffer{
-        &mut self.0[idx.0]
+        &mut self.0[idx.idx]
     }
     fn push(&mut self, buf: Buffer) -> BufferIdx {
         if self.1.is_empty(){
-            let idx = BufferIdx(self.0.len());
+            let idx = BufferIdx{idx:self.0.len(), generation:0};
             self.0.push(buf);
             idx
         }else{
-            let idx = self.1.pop_front().unwrap();
+            let mut idx = self.1.pop_front().unwrap();
+            idx.generation += 1;
             let element = self.get_mut(idx);
             *element = buf;
             idx
         }
     }
-    fn remove(&mut self, idx: BufferIdx){
-        self.0[idx.0].partial_reset();
-        self.1.push_back(idx);
+    fn remove(&mut self, idx: &mut BufferIdx){
+        idx.generation += 1;
+        self.0[idx.idx].partial_reset();
+        self.1.push_back(*idx);
     }
     fn len(&self)->usize{
         self.0.len()
@@ -54,13 +65,13 @@ struct Views(Vec<View>);
 impl Views{
     fn new()->Self {Self(Vec::new())}
     fn get(&self, idx: ViewIdx)->&View{
-        &self.0[idx.0]
+        &self.0[idx.idx]
     }
     fn get_mut(&mut self, idx: ViewIdx)->&mut View{
-        &mut self.0[idx.0]
+        &mut self.0[idx.idx]
     }
     fn push(&mut self, view: View) -> ViewIdx{
-        let idx = ViewIdx(self.0.len());
+        let idx = ViewIdx{idx:self.0.len(), generation: 0};
         self.0.push(view);
         idx
     }
@@ -78,13 +89,14 @@ struct Groups(Vec<Group>);
 impl Groups{
     fn new()->Self {Self(Vec::new())}
     fn get(&self, idx:GroupIdx)->&Group{
-        &self.0[idx.0]
+        &self.0[idx.idx]
     }
     fn get_mut(&mut self, idx: GroupIdx)->&mut Group{
-        &mut self.0[idx.0]
+        &mut self.0[idx.idx]
     }
     fn push(&mut self, group: Group) -> GroupIdx{
-        let idx = GroupIdx(self.0.len());
+        // let idx = GroupIdx(self.0.len());
+        let idx = GroupIdx { idx:self.0.len(), generation: 0};
         self.0.push(group);
         idx
     }
@@ -224,22 +236,6 @@ struct View{
     flags: u16,
 }
 
-impl Default for View{
-    fn default() -> Self {
-        Self {
-            buf: BufferIdx(0),
-            y: 0,
-            x: 0,
-            prefered_x: 0,
-            off: 0,
-            width: 0,
-            height: 0,
-            pos_x: 0,
-            pos_y: 0,
-            flags: 0,
-        }
-    }
-}
 impl View{
     const NON_NAVIGATABLE: u16 = 1 << 0;
     // const FLOATING:        u16 = 1 << 1;
@@ -285,7 +281,7 @@ impl View{
             Mode::Insert  => "INS",
             _ => "NOR",
         };
-        write!(out, "{mode_str} {} {path}", idx.0)?;
+        write!(out, "{mode_str} {} {path}", idx.idx)?;
         Ok(())
     }
     fn draw_line_numbers(&self) -> io::Result<()> {
@@ -358,14 +354,6 @@ struct Group{
     children: Vec<ViewIdx>,
 }
 
-impl Default for Group{
-    fn default() -> Self {
-        Self { 
-            parent: ViewIdx(0),
-            children: vec![],
-        }
-    }
-}
 impl Group{
     fn new(buffers: &mut Buffers, views: &mut Views, parent: ViewIdx, children_flags:u16)->Self{
         let parent_pos_x = views.get(parent).pos_x;
@@ -374,23 +362,23 @@ impl Group{
         let parent_width = views.get(parent).width;
         let mut children = vec![];
         if children_flags & View::STATUS_BAR != 0 {
-            buffers.push(Buffer::new(None, Buffer::NON_NAVIGATABLE | Buffer::SCRATCH).unwrap());
-            views.push(View::new(
-                BufferIdx(buffers.len().saturating_sub(1)), parent_pos_x,
+            let buffer = buffers.push(Buffer::new(None, Buffer::NON_NAVIGATABLE | Buffer::SCRATCH).unwrap());
+            let view = views.push(View::new(
+                buffer, parent_pos_x,
                 parent_height - parent_pos_y, parent_width,
                 1, View::NON_NAVIGATABLE | View::STATUS_BAR));
-            children.push(ViewIdx(views.len().saturating_sub(1)));
+            children.push(view);
             views.get_mut(parent).height -= 1;
             parent_height -= 1;
         }
         if children_flags & View::LINE_NUMBER != 0 {
-            buffers.push(Buffer::new(None, Buffer::NON_NAVIGATABLE | Buffer::SCRATCH).unwrap());
-            views.push(View::new(
-                BufferIdx(buffers.len().saturating_sub(1)), parent_pos_x,
+            let buffer = buffers.push(Buffer::new(None, Buffer::NON_NAVIGATABLE | Buffer::SCRATCH).unwrap());
+            let view = views.push(View::new(
+                buffer, parent_pos_x,
                 parent_pos_y, 5,
                 parent_height, View::NON_NAVIGATABLE | View::LINE_NUMBER)
             );
-            children.push(ViewIdx(views.len().saturating_sub(1)));
+            children.push(view);
             views.get_mut(parent).pos_x = views.get(parent).pos_x.saturating_add(5);
             views.get_mut(parent).width = views.get(parent).width.saturating_sub(5);
         }
@@ -447,7 +435,6 @@ enum Cmd{
     MoveDown,
     MoveRight,
     MoveLeft,
-    ListBuffers,
     Close(Option<BufferIdx>, bool),
     Open(Option<String>),
     Save(Option<String>),
@@ -639,7 +626,7 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
             *mode = Mode::Normal;
         },
         Cmd::Close(buffer_idx, force)=>{
-            let idx = {
+            let mut idx = {
                 if let Some(idx) = buffer_idx{
                     idx
                 }else{
@@ -647,7 +634,7 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
                 }
             };
             let curr_buffer = buffers.get(idx);
-            if idx != BufferIdx(0){
+            if idx.idx != 0 {
                 if curr_buffer.check_flag(Buffer::READ_ONLY){
                     cmd_line.draw_error("cannot save read only").unwrap();
                     return;
@@ -655,16 +642,17 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
                 if curr_buffer.check_flag(Buffer::DIRTY) && force == false{
                     cmd_line.draw_error("cannot close due to unsaved changes").unwrap();
                 }else{
-                    buffers.remove(idx);
-                    if curr_view.buf == idx{
-                        curr_view.buf = BufferIdx(0);
+                    buffers.get_mut(idx).clear_flag(Buffer::DIRTY);
+                    buffers.remove(&mut idx);
+                    if curr_view.buf.idx == idx.idx{
+                        curr_view.buf = BufferIdx{idx: 0, generation: 0};
                         cmd_line.input.clear();
-                        curr_view.redraw().unwrap();
                         curr_view.off = 0;
                         curr_view.x = 0;
                         curr_view.y = 0;
                         curr_view.prefered_x = 0;
                     }
+                    curr_view.redraw().unwrap();
                 }
             }else{
                 cmd_line.draw_error("will not close special buffer: 0").unwrap();
@@ -690,9 +678,9 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
             exit(1);
         },
         Cmd::SwitchBuffer(idx)=>{
-            if idx.0 < buffers.len(){
+            if idx.idx < buffers.len(){
                 if buffers.get(idx).check_flag(Buffer::NON_NAVIGATABLE){
-                    cmd_line.draw_error(&format!("buffer {} is non navigatable", idx.0)).unwrap();
+                    cmd_line.draw_error(&format!("buffer {} is non navigatable", idx.idx)).unwrap();
                     cmd_line.input.clear();
                     cmd_line.cursor = 0;
                     *mode = Mode::Normal;
@@ -716,7 +704,7 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
                 *mode = Mode::Normal;
                 curr_view.redraw().unwrap();
             }else{
-                cmd_line.draw_error(&format!("buffer {} does not exist", idx.0)).unwrap();
+                cmd_line.draw_error(&format!("buffer {} does not exist", idx.idx)).unwrap();
                 cmd_line.input.clear();
                 cmd_line.cursor = 0;
                 *mode = Mode::Normal;
@@ -724,16 +712,16 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
         }
         Cmd::Open(file)=>{
             curr_view.redraw().unwrap();
-            if let Some(f) = file{
-                buffers.push(Buffer::new(Some(&f), 0).unwrap());
+            let buffer = if let Some(f) = file{
+                buffers.push(Buffer::new(Some(&f), 0).unwrap())
             }else{
-                buffers.push(Buffer::new(None, 0).unwrap());
-            }
+                buffers.push(Buffer::new(None, 0).unwrap())
+            };
             curr_view.off = 0;
             curr_view.x = 0;
             curr_view.y = 0;
             curr_view.prefered_x = 0;
-            curr_view.buf = BufferIdx(buffers.len().saturating_sub(1));
+            curr_view.buf = buffer;
             cmd_line.input.clear();
             cmd_line.cursor = 0;
             *mode = Mode::Normal;
@@ -783,7 +771,7 @@ fn parse_cmd(s: String)->Result<Cmd, String>{
             let args = parse_args(rest);
             if let Some(arg) = args.get(0){
                 if let Ok(idx) = arg.parse::<usize>(){
-                    Ok(Cmd::SwitchBuffer(BufferIdx(idx)))
+                    Ok(Cmd::SwitchBuffer(BufferIdx { idx, generation: 0}))
                 }else{
                     Ok(Cmd::Open(Some(arg.clone())))
                 }
@@ -796,7 +784,8 @@ fn parse_cmd(s: String)->Result<Cmd, String>{
             args.push(rest);
             if let Some(arg) = args.get(0){
                 if let Ok(idx) = arg.parse::<usize>(){
-                    Ok(Cmd::Close(Some(BufferIdx(idx)), false))
+                    // Ok(Cmd::Close(Some(BufferIdx(idx)), false))
+                    Ok(Cmd::Close(Some(BufferIdx {idx, generation:0}), false))
                 }else{
                     Ok(Cmd::Close(None, false))
                 }
@@ -809,7 +798,7 @@ fn parse_cmd(s: String)->Result<Cmd, String>{
             args.push(rest);
             if let Some(arg) = args.get(0){
                 if let Ok(idx) = arg.parse::<usize>(){
-                    Ok(Cmd::Close(Some(BufferIdx(idx)), true))
+                    Ok(Cmd::Close(Some(BufferIdx { idx, generation: 0}), true))
                 }else{
                     Ok(Cmd::Close(None, true))
                 }
@@ -831,15 +820,14 @@ fn main()->io::Result<()>{
     let mut mode = Mode::Normal;
     {
         let args: Vec<String> = env::args().skip(1).collect();
-        buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
-        views.push(View::new(BufferIdx(buffers.len().saturating_sub(1)),0,0,width,height,0));
-        let parent = ViewIdx(views.len().saturating_sub(1));
-        groups.push(Group::new(&mut buffers, &mut views, parent, View::LINE_NUMBER | View::STATUS_BAR));
+        let bidx = buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
+        let pidx = views.push(View::new(bidx,0,0,width,height,0));
+        // let parent = ViewIdx(views.len().saturating_sub(1));
+        groups.push(Group::new(&mut buffers, &mut views, pidx, View::LINE_NUMBER | View::STATUS_BAR));
         if !args.is_empty(){
-            buffers.push(Buffer::new(Some(&args[0]), 0).unwrap());
-            views.push(View::new(BufferIdx(buffers.len().saturating_sub(1)), 0, 0, width, height, 0));
-            let parent = ViewIdx(buffers.len().saturating_sub(1));
-            groups.push(Group::new(&mut buffers, &mut views, parent, View::LINE_NUMBER | View::STATUS_BAR));
+            let bidx = buffers.push(Buffer::new(Some(&args[0]), 0).unwrap());
+            let pidx = views.push(View::new(bidx, 0, 0, width, height, 0));
+            groups.push(Group::new(&mut buffers, &mut views, pidx, View::LINE_NUMBER | View::STATUS_BAR));
         }
     }
     let input = io::stdin();
@@ -848,13 +836,13 @@ fn main()->io::Result<()>{
 
     //inital draw
     cmd_line.draw(mode)?;
-    groups.get(GroupIdx(groups.len().saturating_sub(1))).draw_group(mode, &views, &buffers)?;
+    groups.get(GroupIdx{idx:groups.len().saturating_sub(1), generation: 0}).draw_group(mode, &views, &buffers)?;
 
     for key in input.keys(){
         let cmd = key_to_cmd(key?, &mode);
-        let view = groups.get(GroupIdx(groups.len().saturating_sub(1))).parent;
+        let view = groups.get(GroupIdx{idx:groups.len().saturating_sub(1), generation:0}).parent;
         exec_cmd(&mut cmd_line, view, &mut views, &mut buffers, &mut groups, cmd, &mut mode);
-        let group = groups.get(GroupIdx(groups.len().saturating_sub(1)));
+        let group = groups.get(GroupIdx{idx:groups.len().saturating_sub(1),generation:0});
 
         match mode{
             Mode::Normal | Mode::Insert => {
