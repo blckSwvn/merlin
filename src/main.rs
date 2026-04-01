@@ -1,7 +1,5 @@
 use std::collections::HashMap;
-use std::fs::canonicalize;
 use std::collections::VecDeque;
-use std::collections::hash_map;
 use std::fs::{self, File};
 use std::path::Path;
 use std::process::{exit};
@@ -63,18 +61,19 @@ impl Buffers{
         &mut self.data[idx.idx]
     }
     fn push(&mut self, buf: Buffer) -> BufferIdx {
+        let path = buf.file.clone();
         let idx = if self.free.is_empty(){
             let idx = BufferIdx{idx:self.data.len(), generation:0};
-            self.data.push(buf.clone());
+            self.data.push(buf);
             idx
         }else{
             let mut idx = self.free.pop_front().unwrap();
             idx.generation += 1;
             let element = self.get_mut(idx);
-            *element = buf.clone();
+            *element = buf;
             idx
         };
-        if let Some(p) = buf.file{
+        if let Some(p) = path{
             if let Ok(path) = p.canonicalize(){
                 self.path_map.insert(path, idx);
             }
@@ -157,12 +156,24 @@ impl Groups{
     }
 }
 
-#[derive(Clone)]
+enum Edit{
+    Insert{
+        idx:usize,
+        text:String,
+    },
+    Delete{
+        idx:usize,
+        text:String,
+    },
+}
+// #[derive(Clone)]
 struct Buffer{
     generation: u64,
     flags: u64,
     file: Option<PathBuf>,
     buf: Rope,
+    undo: Vec<Edit>,
+    // Redo: Vec<Edit>,
 }
 
 impl Buffer{
@@ -174,6 +185,7 @@ impl Buffer{
     // const EMPTY:           u64 = 1 << 5;
     fn partial_reset(&mut self){
         self.buf = Rope::new();
+        self.undo = Vec::new();
         //does not reset flags or pathbuf
     }
     fn set_flag(&mut self, flag: u64){
@@ -208,6 +220,7 @@ impl Buffer{
             flags: f,
             buf: buf,
             file: path.map(PathBuf::from),
+            undo: Vec::new(),
         })
     }
     fn insert(&mut self, view: &View, c: char){
@@ -444,7 +457,7 @@ impl Group{
             children,
         }
     }
-        fn sync(&self, views: &mut Views){
+    fn sync(&self, views: &mut Views){
         let (y, off) = {
             let parent = &views.get(self.parent);
             (parent.y, parent.off)
@@ -491,6 +504,8 @@ enum Cmd{
     InsertChar(char),
     NewLine,
     Backspace,
+    Undo,
+    // Redo, soon
     MoveUp,
     MoveDown,
     MoveRight,
@@ -515,6 +530,7 @@ fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
                     match key{
                         Key::Char('i') => Cmd::EnterModeInsert,
                         Key::Char(':') => Cmd::EnterModeCommand,
+                        Key::Char('u') => Cmd::Undo,
                         Key::Char('k') | Key::Up => Cmd::MoveUp,
                         Key::Char('j') | Key::Down => Cmd::MoveDown,
                         Key::Char('h') | Key::Left => Cmd::MoveLeft,
@@ -578,6 +594,23 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
             Ok(())
         }
         Cmd::InsertChar(c)=>{
+            let idx = views.get(view).cursor_char(buffer);
+            if let Some(edit) = buffer.undo.last_mut(){
+                match edit{
+                    Edit::Insert { idx: c_idx, text }=>{
+                        if *c_idx+text.chars().count() == idx {
+                            text.push(c);
+                        }else{
+                            buffer.undo.push(Edit::Insert { idx, text: c.into() });
+                        }
+                    }
+                    Edit::Delete {..}=>{
+                        buffer.undo.push(Edit::Insert { idx: idx, text: c.into() });
+                    }
+                }
+            }else{
+                buffer.undo.push(Edit::Insert { idx, text: c.into()});
+            }
             buffer.insert(views.get(view), c);
             let view = views.get_mut(view);
             view.x += 1;
@@ -586,6 +619,8 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
             Ok(())
         },
         Cmd::NewLine=>{
+            let idx = curr_view.cursor_char(buffer);
+            buffer.undo.push(Edit::Insert { idx, text: "\n".to_string()});
             buffer.insert(&mut curr_view, '\n');
             curr_view.y += 1;
             curr_view.x = 0;
@@ -595,6 +630,24 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
         Cmd::Backspace=>{
             let idx = curr_view.cursor_char(buffer);
             if idx != 0{
+                let del = buffer.buf.slice(idx-1..idx).to_string();
+                if let Some(edit) = buffer.undo.last_mut(){
+                    match edit{
+                        Edit::Insert {..}=>{
+                            buffer.undo.push(Edit::Delete { idx:idx-1, text: del });
+                        },
+                        Edit::Delete { idx: c_idx, text }=>{
+                            if *c_idx == idx{
+                                *c_idx -= 1;
+                                text.insert_str(0, &del);
+                            }else{
+                                buffer.undo.push(Edit::Delete { idx: idx - 1, text: del});
+                            }
+                        }
+                    }
+                }else{
+                    buffer.undo.push(Edit::Delete { idx: idx-1, text: del});
+                }
                 buffer.buf.remove(idx - 1..idx);
                 if curr_view.x > 0{
                     curr_view.x -= 1;
@@ -608,6 +661,26 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
                 View::scroll(&mut curr_view, buffer);
             }
             Ok(())
+        },
+        Cmd::Undo=>{
+            if let Some(edit) = buffer.undo.pop(){
+                match edit{
+                    Edit::Insert { idx, text }=>{
+                        //need to adjust cursor y
+                        buffer.buf.remove(idx..idx + text.chars().count());
+                        curr_view.x = curr_view.x.saturating_sub(text.chars().count());
+                        curr_view.prefered_x = curr_view.x;
+                    },
+                    Edit::Delete { idx, text }=>{
+                        //need to adjust cursor y
+                        buffer.buf.insert(idx, &text);
+                        curr_view.x = idx;
+                        curr_view.prefered_x = curr_view.x;
+                    },
+                }
+             return Ok(())
+            }
+            Err(EditorErr::Msg("undo stack is empty".to_string()))
         },
         Cmd::MoveUp=>{
             curr_view.y = curr_view.y.saturating_sub(1);
