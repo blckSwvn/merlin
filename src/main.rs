@@ -1,5 +1,9 @@
+use std::collections::HashMap;
+use std::fs::canonicalize;
 use std::collections::VecDeque;
+use std::collections::hash_map;
 use std::fs::{self, File};
+use std::path::Path;
 use std::process::{exit};
 use ropey::Rope;
 use std::path::PathBuf;
@@ -39,41 +43,69 @@ struct GroupIdx{
     generation:u64,
 }
 
-struct Buffers( Vec<Buffer>, VecDeque<BufferIdx>);
+struct Buffers{
+    data:Vec<Buffer>,
+    free:VecDeque<BufferIdx>,
+    path_map:HashMap<PathBuf, BufferIdx>,
+}
 impl Buffers{
-    fn new()->Self {Self(Vec::new(), VecDeque::new())}
-    fn get(&self, idx: BufferIdx)->&Buffer{
-        &self.0[idx.idx]
-    }
-    fn get_mut(&mut self, idx: BufferIdx)->&mut Buffer{
-        &mut self.0[idx.idx]
-    }
-    fn push(&mut self, buf: Buffer) -> BufferIdx {
-        if self.1.is_empty(){
-            let idx = BufferIdx{idx:self.0.len(), generation:0};
-            self.0.push(buf);
-            idx
-        }else{
-            let mut idx = self.1.pop_front().unwrap();
-            idx.generation += 1;
-            let element = self.get_mut(idx);
-            *element = buf;
-            idx
+    fn new()->Self{
+        Self{
+            data: Vec::new(),
+            free: VecDeque::new(),
+            path_map: HashMap::new(),
         }
     }
+    fn get(&self, idx: BufferIdx)->&Buffer{
+        &self.data[idx.idx]
+    }
+    fn get_mut(&mut self, idx: BufferIdx)->&mut Buffer{
+        &mut self.data[idx.idx]
+    }
+    fn push(&mut self, buf: Buffer) -> BufferIdx {
+        let idx = if self.free.is_empty(){
+            let idx = BufferIdx{idx:self.data.len(), generation:0};
+            self.data.push(buf.clone());
+            idx
+        }else{
+            let mut idx = self.free.pop_front().unwrap();
+            idx.generation += 1;
+            let element = self.get_mut(idx);
+            *element = buf.clone();
+            idx
+        };
+        if let Some(p) = buf.file{
+            if let Ok(path) = p.canonicalize(){
+                self.path_map.insert(path, idx);
+            }
+        }
+        idx
+    }
+    fn get_by_path(&self, path: &str)->Option<&BufferIdx>{
+        if let Ok(p) = Path::new(path).canonicalize(){
+            let buffer = self.path_map.get(&p);
+            if let Some(idx) = buffer{
+                if idx.generation == self.get(*idx).generation{
+                    return Some(idx)
+                }
+            }
+        }
+        None
+    }
     fn remove(&mut self, idx: &mut BufferIdx){
+        self.get_mut(*idx).generation += 1;
         idx.generation += 1;
-        self.0[idx.idx].partial_reset();
-        self.1.push_back(*idx);
+        self.data[idx.idx].partial_reset();
+        self.free.push_back(*idx);
     }
     fn len(&self)->usize{
-        self.0.len()
+        self.data.len()
     }
     fn iter(&self)->impl Iterator<Item = &Buffer>{
-        self.0.iter()
+        self.data.iter()
     }
     fn iter_mut(&mut self)->impl Iterator<Item = &mut Buffer>{
-        self.0.iter_mut()
+        self.data.iter_mut()
     }
 }
 struct Views(Vec<View>);
@@ -127,6 +159,7 @@ impl Groups{
 
 #[derive(Clone)]
 struct Buffer{
+    generation: u64,
     flags: u64,
     file: Option<PathBuf>,
     buf: Rope,
@@ -171,6 +204,7 @@ impl Buffer{
                 Rope::new()
         };
         Ok(Buffer{
+            generation: 0,
             flags: f,
             buf: buf,
             file: path.map(PathBuf::from),
@@ -210,12 +244,14 @@ impl CmdLine{
         }
     }
     fn insert(&mut self, c: char){
-        self.input.insert(self.cursor, c);
-        self.cursor += 1;
+        let byte_idx = self.cursor;
+        self.input.insert(byte_idx, c);
+        self.cursor += c.len_utf8();
     }
     fn backspace(&mut self){
         if self.cursor > 0 {
-            self.cursor -= 1;
+            let char_len = self.input[..self.cursor].chars().rev().next().unwrap().len_utf8();
+            self.cursor -= char_len as usize;
             self.input.remove(self.cursor);
         }
     }
@@ -368,7 +404,7 @@ impl View{
         }
     }
     fn cursor_char(&self, buffer: &Buffer) -> usize {
-        buffer.buf.line_to_char(self.y) + self.x
+        buffer.buf.line_to_char(self.y)+self.x
     }
 }
 
@@ -435,8 +471,7 @@ impl Group{
                 curr.draw_text(buffers)?;
             }
         }
-        views.get(self.parent).draw_text(buffers);
-        // views.get(self.parent).draw_text(buffers.get(views.get(self.parent).buf))?;
+        views.get(self.parent).draw_text(buffers)?;
         Ok(())
     }
 }
@@ -740,7 +775,11 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
         Cmd::Open(file)=>{
             curr_view.redraw()?;
             let buffer = if let Some(f) = file{
-                buffers.push(Buffer::new(Some(&f), 0)?)
+                if let Some(b) = buffers.get_by_path(&f){
+                    *b
+                }else{
+                    buffers.push(Buffer::new(Some(&f), 0)?)
+                }
             }else{
                 buffers.push(Buffer::new(None, 0)?)
             };
@@ -754,10 +793,8 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
             *mode = Mode::Normal;
             Ok(())
         }
-        Cmd::NoOp=>{
-            Ok(())
-        },
-        _ =>{Ok(())},
+        Cmd::NoOp=> Ok(()),
+        _ => Ok(()),
     }
 }
 
