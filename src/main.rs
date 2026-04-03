@@ -159,33 +159,37 @@ impl Groups{
 enum Edit{
     Insert{
         idx:usize,
+        cursor_x:usize,
+        cursor_y:usize,
         text:String,
     },
     Delete{
         idx:usize,
+        cursor_x:usize,
+        cursor_y:usize,
         text:String,
     },
 }
-// #[derive(Clone)]
 struct Buffer{
     generation: u64,
     flags: u64,
     file: Option<PathBuf>,
     buf: Rope,
     undo: Vec<Edit>,
-    // Redo: Vec<Edit>,
+    redo: Vec<Edit>,
 }
 
 impl Buffer{
     const READ_ONLY:       u64 = 1 << 0;
     const SCRATCH:         u64 = 1 << 1;
-    const DIRTY:           u64 = 1 << 2;
-    const NEW_FILE:        u64 = 1 << 3;
-    const NON_NAVIGATABLE: u64 = 1 << 4;
+    // const DIRTY:           u64 = 1 << 2;
+    const NEW_FILE:        u64 = 1 << 2;
+    const NON_NAVIGATABLE: u64 = 1 << 3;
     // const EMPTY:           u64 = 1 << 5;
     fn partial_reset(&mut self){
         self.buf = Rope::new();
         self.undo = Vec::new();
+        self.redo = Vec::new();
         //does not reset flags or pathbuf
     }
     fn set_flag(&mut self, flag: u64){
@@ -220,13 +224,14 @@ impl Buffer{
             flags: f,
             buf: buf,
             file: path.map(PathBuf::from),
+            redo: Vec::new(),
             undo: Vec::new(),
         })
     }
     fn insert(&mut self, view: &View, c: char){
         let cursor_char = view.cursor_char(self);
         self.buf.insert_char(cursor_char, c);
-        self.set_flag(Buffer::DIRTY);
+        // self.set_flag(Buffer::DIRTY);
     }
     fn save(&mut self, new: Option<String>)->io::Result<()>{
         if let Some(new) = new{
@@ -238,7 +243,7 @@ impl Buffer{
                 self.buf.write_to(file)?;
             }
         }
-        self.clear_flag(Buffer::DIRTY);
+        // self.clear_flag(Buffer::DIRTY);
         Ok(())
     }
 }
@@ -304,10 +309,8 @@ struct View{
 
 impl View{
     const NON_NAVIGATABLE: u16 = 1 << 0;
-    // const FLOATING:        u16 = 1 << 1;
-    const LINE_NUMBER:     u16 = 1 << 2;
-    const STATUS_BAR:      u16 = 1 << 3;
-    // const EMPTY:           u16 = 1 << 4;
+    const LINE_NUMBER:     u16 = 1 << 1;
+    const STATUS_BAR:      u16 = 1 << 2;
     fn check_flag(&self, flag: u16)->bool{
         self.flags & flag != 0
     }
@@ -505,7 +508,7 @@ enum Cmd{
     NewLine,
     Backspace,
     Undo,
-    // Redo, soon
+    Redo,
     MoveUp,
     MoveDown,
     MoveRight,
@@ -531,6 +534,7 @@ fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
                         Key::Char('i') => Cmd::EnterModeInsert,
                         Key::Char(':') => Cmd::EnterModeCommand,
                         Key::Char('u') => Cmd::Undo,
+                        Key::Char('U') => Cmd::Redo,
                         Key::Char('k') | Key::Up => Cmd::MoveUp,
                         Key::Char('j') | Key::Down => Cmd::MoveDown,
                         Key::Char('h') | Key::Left => Cmd::MoveLeft,
@@ -594,22 +598,25 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
             Ok(())
         }
         Cmd::InsertChar(c)=>{
-            let idx = views.get(view).cursor_char(buffer);
+            buffer.redo.clear();
+            let idx = curr_view.cursor_char(buffer);
+            let cursor_x = curr_view.x;
+            let cursor_y = curr_view.y;
             if let Some(edit) = buffer.undo.last_mut(){
                 match edit{
-                    Edit::Insert { idx: c_idx, text }=>{
-                        if *c_idx+text.chars().count() == idx {
-                            text.push(c);
+                    Edit::Insert {idx: c_idx, text, ..}=>{
+                        if *c_idx <= idx && idx <= *c_idx+text.chars().count(){
+                            text.insert(idx - *c_idx, c);
                         }else{
-                            buffer.undo.push(Edit::Insert { idx, text: c.into() });
+                            buffer.undo.push(Edit::Insert { idx, cursor_x, cursor_y, text: c.into() });
                         }
                     }
                     Edit::Delete {..}=>{
-                        buffer.undo.push(Edit::Insert { idx: idx, text: c.into() });
+                        buffer.undo.push(Edit::Insert { idx, cursor_x, cursor_y, text: c.into() });
                     }
                 }
             }else{
-                buffer.undo.push(Edit::Insert { idx, text: c.into()});
+                buffer.undo.push(Edit::Insert { idx, cursor_x, cursor_y, text: c.into()});
             }
             buffer.insert(views.get(view), c);
             let view = views.get_mut(view);
@@ -619,34 +626,36 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
             Ok(())
         },
         Cmd::NewLine=>{
+            buffer.redo.clear();
             let idx = curr_view.cursor_char(buffer);
-            buffer.undo.push(Edit::Insert { idx, text: "\n".to_string()});
             buffer.insert(&mut curr_view, '\n');
+            buffer.undo.push(Edit::Insert { idx, cursor_x: curr_view.x, cursor_y: curr_view.y, text: "\n".to_string()});
             curr_view.y += 1;
             curr_view.x = 0;
             View::scroll(&mut curr_view, buffer);
             Ok(())
         },
         Cmd::Backspace=>{
+            buffer.redo.clear();
             let idx = curr_view.cursor_char(buffer);
             if idx != 0{
                 let del = buffer.buf.slice(idx-1..idx).to_string();
                 if let Some(edit) = buffer.undo.last_mut(){
                     match edit{
                         Edit::Insert {..}=>{
-                            buffer.undo.push(Edit::Delete { idx:idx-1, text: del });
+                            buffer.undo.push(Edit::Delete { idx:idx-1, cursor_x: curr_view.x, cursor_y: curr_view.y, text: del });
                         },
-                        Edit::Delete { idx: c_idx, text }=>{
-                            if *c_idx == idx{
-                                *c_idx -= 1;
+                        Edit::Delete { idx: xidx, text, .. }=>{
+                            if *xidx == idx{
+                                *xidx -= 1;
                                 text.insert_str(0, &del);
                             }else{
-                                buffer.undo.push(Edit::Delete { idx: idx - 1, text: del});
+                                buffer.undo.push(Edit::Delete { idx: idx - 1, cursor_x: curr_view.x, cursor_y: curr_view.y, text: del});
                             }
                         }
                     }
                 }else{
-                    buffer.undo.push(Edit::Delete { idx: idx-1, text: del});
+                    buffer.undo.push(Edit::Delete { idx: idx-1, cursor_x: curr_view.x, cursor_y: curr_view.y, text: del});
                 }
                 buffer.buf.remove(idx - 1..idx);
                 if curr_view.x > 0{
@@ -665,22 +674,49 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
         Cmd::Undo=>{
             if let Some(edit) = buffer.undo.pop(){
                 match edit{
-                    Edit::Insert { idx, text }=>{
-                        //need to adjust cursor y
+                    Edit::Insert { idx, cursor_x, cursor_y, text, }=>{
+                        buffer.redo.push(Edit::Delete { idx, cursor_y, cursor_x, text: text.clone() });
                         buffer.buf.remove(idx..idx + text.chars().count());
-                        curr_view.x = curr_view.x.saturating_sub(text.chars().count());
+                        curr_view.y = cursor_y;
+                        curr_view.x = cursor_x;
+                        // curr_view.x -= curr_view.x.saturating_sub(text.chars().count());
+                        // curr_view.x = curr_view.x.saturating_sub(text.chars().count());
                         curr_view.prefered_x = curr_view.x;
                     },
-                    Edit::Delete { idx, text }=>{
-                        //need to adjust cursor y
+                    Edit::Delete { idx, cursor_x, cursor_y, text, }=>{
+                        buffer.redo.push(Edit::Insert {idx, cursor_x, cursor_y, text: text.clone()});
                         buffer.buf.insert(idx, &text);
-                        curr_view.x = idx;
+                        curr_view.y = cursor_y;
+                        curr_view.x = cursor_x;
                         curr_view.prefered_x = curr_view.x;
                     },
                 }
-             return Ok(())
+                return Ok(())
             }
             Err(EditorErr::Msg("undo stack is empty".to_string()))
+        },
+        Cmd::Redo => {
+            if let Some(edit) = buffer.redo.pop() {
+                match edit {
+                    Edit::Insert { idx, cursor_x, cursor_y, text } => {
+                        buffer.buf.remove(idx..idx + text.chars().count());
+                        curr_view.x = curr_view.x.saturating_sub(text.chars().count());
+                        curr_view.y = cursor_y;
+                        curr_view.prefered_x = curr_view.x;
+                        buffer.undo.push(Edit::Delete{ idx, cursor_x, cursor_y, text });
+                    }
+                    Edit::Delete { idx, cursor_x, cursor_y, text } => {
+                        buffer.buf.insert(idx, &text);
+                        curr_view.y = cursor_y;
+                        curr_view.x = cursor_x;
+                        curr_view.prefered_x = curr_view.x;
+                        buffer.undo.push(Edit::Insert{ idx, cursor_x, cursor_y, text });
+                    }
+                }
+                View::scroll(curr_view, buffer); // Make sure the view scrolls correctly
+                return Ok(());
+            }
+            Err(EditorErr::Msg("redo stack is empty".to_string()))
         },
         Cmd::MoveUp=>{
             curr_view.y = curr_view.y.saturating_sub(1);
@@ -783,10 +819,11 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
                 if curr_buffer.check_flag(Buffer::READ_ONLY){
                     return Err(EditorErr::ReadOnly(bidx));
                 }
-                if curr_buffer.check_flag(Buffer::DIRTY) && force == false{
+                if !curr_buffer.undo.is_empty() && force == false{
+                // if curr_buffer.check_flag(Buffer::DIRTY) && force == false{
                     return Err(EditorErr::Dirty(bidx));
                 }else{
-                    buffers.get_mut(idx).clear_flag(Buffer::DIRTY);
+                    // buffers.get_mut(idx).clear_flag(Buffer::DIRTY);
                     if curr_view.buf == Some(idx){
                         curr_view.buf = Some(BufferIdx{idx: 0, generation: 0});
                         cmd_line.input.clear();
@@ -809,7 +846,7 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
             if !force{
                 let dirty: Vec<_> = buffers.iter()
                     .enumerate()
-                    .filter(|(i, b)| b.check_flag(Buffer::DIRTY) && *i != 0)//buffer 0 is special
+                    .filter(|(i, b)| !b.undo.is_empty() && *i != 0)//buffer 0 is special
                     .map(|(i, _)| i)
                     .collect();
                 if !dirty.is_empty(){

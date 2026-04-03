@@ -3,8 +3,6 @@
 ---
 
 layout engine
-redo
-undo/redo polish
 only redrawing dirty lines instead of whole view
 
 ---
