@@ -41,6 +41,12 @@ struct GroupIdx{
     generation:u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NodeIdx{
+    idx:usize,
+    generation:u64,
+}
+
 struct Buffers{
     data:Vec<Buffer>,
     free:VecDeque<BufferIdx>,
@@ -182,10 +188,8 @@ struct Buffer{
 impl Buffer{
     const READ_ONLY:       u64 = 1 << 0;
     const SCRATCH:         u64 = 1 << 1;
-    // const DIRTY:           u64 = 1 << 2;
     const NEW_FILE:        u64 = 1 << 2;
     const NON_NAVIGATABLE: u64 = 1 << 3;
-    // const EMPTY:           u64 = 1 << 5;
     fn partial_reset(&mut self){
         self.buf = Rope::new();
         self.undo = Vec::new();
@@ -428,7 +432,6 @@ struct Group{
     parent: ViewIdx,
     children: Vec<ViewIdx>,
 }
-
 impl Group{
     fn new(views: &mut Views, parent: ViewIdx, children_flags:u16)->Self{
         let parent_pos_x = views.get(parent).pos_x;
@@ -491,6 +494,67 @@ impl Group{
         Ok(())
     }
 }
+
+struct Nodes{
+    data:Vec<Node>,
+    free:Vec<NodeIdx>
+}
+impl Nodes{
+    fn get(&self, idx: NodeIdx)->&Node{
+        &self.data[idx.idx]
+    }
+    fn get_mut(&mut self, idx:NodeIdx)->&mut Node{
+        &mut self.data[idx.idx]
+    }
+    fn push(&mut self, node: Node)->NodeIdx{
+        if self.free.is_empty(){
+            self.data.push(node);
+            NodeIdx {idx: self.data.len().saturating_sub(1), generation: 0}
+        }else{
+            let idx = self.free.last_mut().unwrap();
+            self.data[idx.idx] = node;
+            *idx
+        }
+    }
+    fn remove(&mut self, idx:NodeIdx){
+        self.free.push(idx);
+    }
+}
+enum Node{
+    Container{
+        children: Vec<NodeIdx>
+    },
+    Leaf{
+        gidx:GroupIdx
+    }
+}
+impl Node{
+    fn draw(&self, nodes: &Nodes, views: &Views, buffers: &Buffers, groups: &Groups, mode: Mode)->Result<(), EditorErr>{
+        match self{
+            Node::Leaf{gidx}=>groups.get(*gidx).draw_group(mode, views, buffers)?,
+            Node::Container {children}=>{
+                for c in children{
+                    nodes.get(*c).draw(nodes, views, buffers, groups, mode)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+fn add_leaf(container: NodeIdx, nodes: &mut Nodes, gidx: GroupIdx){
+    let node = nodes.push(Node::Leaf { gidx });
+    match nodes.get_mut(container){
+        Node::Container { children }=>{
+            children.push(node);
+        },
+        Node::Leaf {..}=>{},
+    }
+}
+// fn add_container(){
+// }
+// fn split_leaf(){
+// }
+
 
 #[derive(Clone, Copy)]
 enum Mode{
@@ -679,8 +743,6 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
                         buffer.buf.remove(idx..idx + text.chars().count());
                         curr_view.y = cursor_y;
                         curr_view.x = cursor_x;
-                        // curr_view.x -= curr_view.x.saturating_sub(text.chars().count());
-                        // curr_view.x = curr_view.x.saturating_sub(text.chars().count());
                         curr_view.prefered_x = curr_view.x;
                     },
                     Edit::Delete { idx, cursor_x, cursor_y, text, }=>{
@@ -908,6 +970,7 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
     }
 }
 
+fn parse_cmd(s: String)->Result<Cmd, EditorErr>{
 fn parse_args(s: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -930,8 +993,6 @@ fn parse_args(s: &str) -> Vec<String> {
     }
     args
 }
-
-fn parse_cmd(s: String)->Result<Cmd, EditorErr>{
     let s = s.trim();
     let mut parts = s.splitn(2, ' ');
     let cmd = parts.next().ok_or(EditorErr::Msg(format!("unknown command: {}",s)))?;
@@ -989,6 +1050,8 @@ fn main()->io::Result<()>{
     let mut views = Views::new();
     let mut buffers = Buffers::new();
     let mut groups = Groups::new();
+    let mut nodes = Nodes{data:vec![], free:vec![]};
+    let root = nodes.push(Node::Container { children:vec![]});
     let (width, height) = termion::terminal_size().unwrap();
     let mut cmd_line = CmdLine::new(height);
     let height = height -2;
@@ -997,11 +1060,13 @@ fn main()->io::Result<()>{
         let args: Vec<String> = env::args().skip(1).collect();
         let bidx = buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
         let pidx = views.push(View::new(Some(bidx),0,0,width,height,0));
-        groups.push(Group::new(&mut views, pidx, View::LINE_NUMBER | View::STATUS_BAR));
+        let gidx = groups.push(Group::new(&mut views, pidx, View::LINE_NUMBER | View::STATUS_BAR));
+        add_leaf(root, &mut nodes, gidx);
         if !args.is_empty(){
             let bidx = buffers.push(Buffer::new(Some(&args[0]), 0).unwrap());
             let pidx = views.push(View::new(Some(bidx), 0, 0, width, height, 0));
-            groups.push(Group::new(&mut views, pidx, View::LINE_NUMBER | View::STATUS_BAR));
+            let gidx = groups.push(Group::new(&mut views, pidx, View::LINE_NUMBER | View::STATUS_BAR));
+            add_leaf(root, &mut nodes, gidx);
         }
     }
     let input = io::stdin();
@@ -1024,14 +1089,13 @@ fn main()->io::Result<()>{
             Ok(_) => {},
         }
         let group = groups.get(GroupIdx{idx:groups.len().saturating_sub(1),generation:0});
-
         match mode{
             Mode::Normal | Mode::Insert => {
                 group.sync(&mut views);
-                group.draw_group(mode, &views, &buffers)?;
+                nodes.get(root).draw(&nodes, &views, &buffers, &groups, mode).unwrap();
             }
             Mode::Command =>{
-                group.draw_group(mode, &views, &buffers)?;
+                nodes.get(root).draw(&nodes, &views, &buffers, &groups, mode).unwrap();
                 cmd_line.draw(mode)?
             } 
         }
