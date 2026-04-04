@@ -235,7 +235,6 @@ impl Buffer{
     fn insert(&mut self, view: &View, c: char){
         let cursor_char = view.cursor_char(self);
         self.buf.insert_char(cursor_char, c);
-        // self.set_flag(Buffer::DIRTY);
     }
     fn save(&mut self, new: Option<String>)->io::Result<()>{
         if let Some(new) = new{
@@ -247,7 +246,6 @@ impl Buffer{
                 self.buf.write_to(file)?;
             }
         }
-        // self.clear_flag(Buffer::DIRTY);
         Ok(())
     }
 }
@@ -308,17 +306,16 @@ struct View{
     height: u16,
     pos_x: u16,
     pos_y: u16,
-    flags: u16,
+    kind: ViewKind,
 }
 
+enum ViewKind{
+    Text           = 1 << 0,
+    LineNumber     = 1 << 1,
+    StatusBar      = 1 << 2,
+}
 impl View{
-    const NON_NAVIGATABLE: u16 = 1 << 0;
-    const LINE_NUMBER:     u16 = 1 << 1;
-    const STATUS_BAR:      u16 = 1 << 2;
-    fn check_flag(&self, flag: u16)->bool{
-        self.flags & flag != 0
-    }
-    fn new(buf: Option<BufferIdx>, pos_x: u16, pos_y: u16, width: u16, height: u16, flags:u16)->Self{
+    fn new(buf: Option<BufferIdx>, pos_x: u16, pos_y: u16, width: u16, height: u16, kind: ViewKind)->Self{
         Self{
             buf,
             x: 0,
@@ -329,7 +326,7 @@ impl View{
             pos_y,
             width,
             height,
-            flags,
+            kind,
         }
     }
     fn redraw(&self)->io::Result<()>{
@@ -431,36 +428,44 @@ impl View{
 struct Group{
     parent: ViewIdx,
     children: Vec<ViewIdx>,
+    width: u16,
+    height: u16,
+    pos_x: u16,
+    pos_y: u16,
 }
 impl Group{
-    fn new(views: &mut Views, parent: ViewIdx, children_flags:u16)->Self{
-        let parent_pos_x = views.get(parent).pos_x;
-        let parent_pos_y = views.get(parent).pos_y;
-        let mut parent_height = views.get(parent).height;
-        let parent_width = views.get(parent).width;
+    fn new(height: u16, width: u16, pos_x: u16, pos_y: u16, views: &mut Views, parent: ViewIdx, flags: &[ViewKind])->Self{
         let mut children = vec![];
-        if children_flags & View::STATUS_BAR != 0 {
-            let view = views.push(View::new(
-                None, parent_pos_x,
-                parent_height - parent_pos_y, parent_width,
-                1, View::NON_NAVIGATABLE | View::STATUS_BAR));
-            children.push(view);
-            views.get_mut(parent).height -= 1;
-            parent_height -= 1;
-        }
-        if children_flags & View::LINE_NUMBER != 0 {
-            let view = views.push(View::new(
-                None, parent_pos_x,
-                parent_pos_y, 5,
-                parent_height, View::NON_NAVIGATABLE | View::LINE_NUMBER)
-            );
-            children.push(view);
-            views.get_mut(parent).pos_x = views.get(parent).pos_x.saturating_add(5);
-            views.get_mut(parent).width = views.get(parent).width.saturating_sub(5);
+        let mut height = height;
+        let mut width = width;
+        let mut pos_x = pos_x;
+        for child in flags{
+            match child{
+                ViewKind::StatusBar=>{
+                    let view = views.push(View::new(None, pos_x, height - pos_y, width, 1, ViewKind::StatusBar));
+                    children.push(view);
+                    height -= 1;
+                },
+                ViewKind::LineNumber=>{
+                    let view = views.push(View::new(None, pos_x, pos_y, 5, height, ViewKind::LineNumber));
+                    children.push(view);
+                    pos_x += 5;
+                    width -= 5;
+                },
+                _ => {},
+            }
+            let parent = views.get_mut(parent);
+            parent.pos_x = pos_x;
+            parent.height -= 1;
+            parent.width = width;
         }
         Self{
             parent,
             children,
+            height,
+            width,
+            pos_x,
+            pos_y,
         }
     }
     fn sync(&self, views: &mut Views){
@@ -469,25 +474,32 @@ impl Group{
             (parent.y, parent.off)
         };
         for &child in &self.children{
-            if !views.get(child).check_flag(View::STATUS_BAR){
-                let child = &mut views.get_mut(child);
-                child.y = y;
-                child.off = off;
+            let child = views.get_mut(child);
+            match child.kind{
+                ViewKind::LineNumber=>{
+                    child.y = y;
+                    child.off = off;
+                }
+                _ => {},
             }
         }
     }
     fn draw_group(&self, mode: Mode, views: &Views, buffers: &Buffers)->io::Result<()>{
         for c in self.children.iter(){
             let curr = views.get(*c);
-            if curr.check_flag(View::STATUS_BAR){
-                let parent = views.get(self.parent);
-                if let Some(b) = parent.buf{
-                    curr.draw_status_bar(b, buffers, mode)?
+            match curr.kind{
+                ViewKind::StatusBar=>{
+                    let parent = views.get(self.parent);
+                    if let Some(b) = parent.buf{
+                        curr.draw_status_bar(b, buffers, mode)?;
+                    }
+                },
+                ViewKind::LineNumber=>{
+                    curr.draw_line_numbers()?;
+                },
+                ViewKind::Text=>{
+                    curr.draw_text(buffers)?;
                 }
-            }else if curr.check_flag(View::LINE_NUMBER){
-                curr.draw_line_numbers()?;
-            }else{
-                curr.draw_text(buffers)?;
             }
         }
         views.get(self.parent).draw_text(buffers)?;
@@ -882,10 +894,8 @@ fn exec_cmd(cmd_line: &mut CmdLine, view: ViewIdx, views: &mut Views, buffers: &
                     return Err(EditorErr::ReadOnly(bidx));
                 }
                 if !curr_buffer.undo.is_empty() && force == false{
-                // if curr_buffer.check_flag(Buffer::DIRTY) && force == false{
                     return Err(EditorErr::Dirty(bidx));
                 }else{
-                    // buffers.get_mut(idx).clear_flag(Buffer::DIRTY);
                     if curr_view.buf == Some(idx){
                         curr_view.buf = Some(BufferIdx{idx: 0, generation: 0});
                         cmd_line.input.clear();
@@ -1059,13 +1069,13 @@ fn main()->io::Result<()>{
     {
         let args: Vec<String> = env::args().skip(1).collect();
         let bidx = buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
-        let pidx = views.push(View::new(Some(bidx),0,0,width,height,0));
-        let gidx = groups.push(Group::new(&mut views, pidx, View::LINE_NUMBER | View::STATUS_BAR));
+        let pidx = views.push(View::new(Some(bidx),0,0,width,height, ViewKind::Text));
+        let gidx = groups.push(Group::new(height, width, 0, 0, &mut views, pidx, &[ViewKind::LineNumber, ViewKind::StatusBar]));
         add_leaf(root, &mut nodes, gidx);
         if !args.is_empty(){
             let bidx = buffers.push(Buffer::new(Some(&args[0]), 0).unwrap());
-            let pidx = views.push(View::new(Some(bidx), 0, 0, width, height, 0));
-            let gidx = groups.push(Group::new(&mut views, pidx, View::LINE_NUMBER | View::STATUS_BAR));
+            let pidx = views.push(View::new(Some(bidx), 0, 0, width, height, ViewKind::Text));
+            let gidx = groups.push(Group::new(height, width, 0, 0, &mut views, pidx, &[ViewKind::LineNumber, ViewKind::StatusBar]));
             add_leaf(root, &mut nodes, gidx);
         }
     }
