@@ -441,6 +441,7 @@ impl Group{
         let mut pos_x = pos_x;
         for child in flags{
             match child{
+                // let idk = View::new(buf, pos_x, pos_y, width, height, kind)
                 ViewKind::StatusBar=>{
                     let view = views.push(View::new(None, pos_x, height - pos_y, width, 1, ViewKind::StatusBar));
                     children.push(view);
@@ -505,6 +506,38 @@ impl Group{
         views.get(self.parent).draw_text(buffers)?;
         Ok(())
     }
+    fn resize(&mut self, mut height: u16, mut width: u16, mut pos_x: u16, pos_y: u16, views: &mut Views){
+        self.height = height;
+        self.width = width;
+        self.pos_x = pos_x;
+        self.pos_y = pos_y;
+        for c in &self.children{
+            let c = views.get_mut(*c);
+            match c.kind{
+                ViewKind::StatusBar=>{
+                    c.pos_x = pos_x;
+                    c.pos_y = height + pos_y;
+                    c.width = width;
+                    c.height = 1;
+                    height -= 1;
+                },
+                ViewKind::LineNumber=>{
+                    c.pos_x = pos_x;
+                    c.pos_y = pos_y;
+                    c.width = 5;
+                    c.height = height;
+                    pos_x += 5;
+                    width -= 5;
+                }
+                _ =>{},
+            }
+            let p = views.get_mut(self.parent);
+            p.pos_x = pos_x;
+            p.pos_y = pos_y;
+            p.width = width;
+            p.height = height;
+        }
+    }
 }
 
 struct Nodes{
@@ -532,8 +565,17 @@ impl Nodes{
         self.free.push(idx);
     }
 }
+enum SplitDirection{
+    Horizontal,
+    Vertical,
+}
 enum Node{
     Container{
+        direction: SplitDirection,
+        pos_x:  u16,
+        pos_y:  u16,
+        width:  u16,
+        height: u16,
         children: Vec<NodeIdx>
     },
     Leaf{
@@ -544,7 +586,7 @@ impl Node{
     fn draw(&self, nodes: &Nodes, views: &Views, buffers: &Buffers, groups: &Groups, mode: Mode)->Result<(), EditorErr>{
         match self{
             Node::Leaf{gidx}=>groups.get(*gidx).draw_group(mode, views, buffers)?,
-            Node::Container {children}=>{
+            Node::Container {children, ..}=>{
                 for c in children{
                     nodes.get(*c).draw(nodes, views, buffers, groups, mode)?;
                 }
@@ -553,13 +595,39 @@ impl Node{
         Ok(())
     }
 }
-fn add_leaf(container: NodeIdx, nodes: &mut Nodes, gidx: GroupIdx){
-    let node = nodes.push(Node::Leaf { gidx });
-    match nodes.get_mut(container){
-        Node::Container { children }=>{
-            children.push(node);
-        },
-        Node::Leaf {..}=>{},
+fn add_leaf(container: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &mut Groups, gidx: GroupIdx){
+    let new = nodes.push(Node::Leaf { gidx });
+    if let Node::Container {children, ..} = nodes.get_mut(container){
+        children.push(new);
+    }
+    if let Node::Container { direction, pos_x, pos_y, width, height, children } = nodes.get(container){
+        let height = {
+            match direction{
+                SplitDirection::Horizontal=>*height as usize/children.len(),
+                SplitDirection::Vertical=>*height as usize,
+            }
+        };
+        let width = {
+            match direction {
+                SplitDirection::Vertical=>*width as usize/children.len(),
+                SplitDirection::Horizontal=>*width as usize,
+            }
+        };
+        let mut pos_x = *pos_x;
+        let mut pos_y = *pos_y;
+        for c in children{
+            let c = nodes.get(*c);
+            match c{
+                Node::Leaf {gidx}=>{
+                    groups.get_mut(*gidx).resize(height as u16, width as u16, pos_x, pos_y, views);
+                    match direction{
+                        SplitDirection::Vertical=>pos_x += width as u16,
+                        SplitDirection::Horizontal=>pos_y += height as u16,
+                    }
+                }
+                _ =>{},
+            }
+        }
     }
 }
 // fn add_container(){
@@ -1061,22 +1129,22 @@ fn main()->io::Result<()>{
     let mut buffers = Buffers::new();
     let mut groups = Groups::new();
     let mut nodes = Nodes{data:vec![], free:vec![]};
-    let root = nodes.push(Node::Container { children:vec![]});
     let (width, height) = termion::terminal_size().unwrap();
     let mut cmd_line = CmdLine::new(height);
     let height = height -2;
     let mut mode = Mode::Normal;
+    let root = nodes.push(Node::Container {direction: SplitDirection::Vertical, width: width, height: height, pos_x:0, pos_y:0, children:vec![]});
     {
         let args: Vec<String> = env::args().skip(1).collect();
         let bidx = buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
         let pidx = views.push(View::new(Some(bidx),0,0,width,height, ViewKind::Text));
         let gidx = groups.push(Group::new(height, width, 0, 0, &mut views, pidx, &[ViewKind::LineNumber, ViewKind::StatusBar]));
-        add_leaf(root, &mut nodes, gidx);
+        add_leaf(root, &mut nodes, &mut views, &mut groups, gidx);
         if !args.is_empty(){
             let bidx = buffers.push(Buffer::new(Some(&args[0]), 0).unwrap());
             let pidx = views.push(View::new(Some(bidx), 0, 0, width, height, ViewKind::Text));
             let gidx = groups.push(Group::new(height, width, 0, 0, &mut views, pidx, &[ViewKind::LineNumber, ViewKind::StatusBar]));
-            add_leaf(root, &mut nodes, gidx);
+            add_leaf(root, &mut nodes, &mut views, &mut groups, gidx);
         }
     }
     let input = io::stdin();
@@ -1085,7 +1153,8 @@ fn main()->io::Result<()>{
 
     //inital draw
     cmd_line.draw(mode)?;
-    groups.get(GroupIdx{idx:groups.len().saturating_sub(1), generation: 0}).draw_group(mode, &views, &buffers)?;
+    nodes.get(root).draw(&nodes, &views, &buffers, &groups, mode).unwrap();
+    // groups.get(GroupIdx{idx:groups.len().saturating_sub(1), generation: 0}).draw_group(mode, &views, &buffers)?;
 
     for key in input.keys(){
         let cmd = key_to_cmd(key?, &mode);
