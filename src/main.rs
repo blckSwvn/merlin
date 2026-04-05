@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs::{self, File};
+use std::num::Saturating;
 use std::path::Path;
 use std::process::{exit};
 use ropey::Rope;
@@ -600,7 +601,13 @@ fn add_leaf(container: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &m
     if let Node::Container {children, ..} = nodes.get_mut(container){
         children.push(new);
     }
-    if let Node::Container { direction, pos_x, pos_y, width, height, children } = nodes.get(container){
+    if let Node::Container { direction, pos_x, pos_y, width, height, children} = nodes.get(container){
+        let mut remainder = {
+            match direction {
+                SplitDirection::Vertical=>*height/children.len()as u16%*height,
+                SplitDirection::Horizontal=>*width/children.len()as u16%*width,
+            }
+        };
         let height = {
             match direction{
                 SplitDirection::Horizontal=>*height as usize/children.len(),
@@ -618,11 +625,26 @@ fn add_leaf(container: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &m
         for c in children{
             let c = nodes.get(*c);
             match c{
-                Node::Leaf {gidx}=>{
-                    groups.get_mut(*gidx).resize(height as u16, width as u16, pos_x, pos_y, views);
+                Node::Leaf{gidx}=>{
                     match direction{
-                        SplitDirection::Vertical=>pos_x += width as u16,
-                        SplitDirection::Horizontal=>pos_y += height as u16,
+                        SplitDirection::Horizontal=>{
+                            if remainder > 0{
+                                groups.get_mut(*gidx).resize(height as u16+1, width as u16, pos_x, pos_y, views);
+                                remainder -= 1;
+                            }else{
+                                groups.get_mut(*gidx).resize(height as u16, width as u16, pos_x, pos_y, views);
+                            }
+                            pos_y += height as u16;
+                        },
+                        SplitDirection::Vertical=>{
+                            if remainder > 0{
+                                groups.get_mut(*gidx).resize(height as u16, width as u16+1, pos_x, pos_y, views);
+                                remainder -= 1;
+                            }else{
+                                groups.get_mut(*gidx).resize(height as u16, width as u16, pos_x, pos_y, views);
+                            }
+                            pos_x += width as u16;
+                        }
                     }
                 }
                 _ =>{},
@@ -1133,7 +1155,7 @@ fn main()->io::Result<()>{
     let mut cmd_line = CmdLine::new(height);
     let height = height -2;
     let mut mode = Mode::Normal;
-    let root = nodes.push(Node::Container {direction: SplitDirection::Vertical, width: width, height: height, pos_x:0, pos_y:0, children:vec![]});
+    let root = nodes.push(Node::Container {direction: SplitDirection::Vertical, width, height, pos_x:0, pos_y:0, children:vec![]});
     {
         let args: Vec<String> = env::args().skip(1).collect();
         let bidx = buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
@@ -1154,7 +1176,6 @@ fn main()->io::Result<()>{
     //inital draw
     cmd_line.draw(mode)?;
     nodes.get(root).draw(&nodes, &views, &buffers, &groups, mode).unwrap();
-    // groups.get(GroupIdx{idx:groups.len().saturating_sub(1), generation: 0}).draw_group(mode, &views, &buffers)?;
 
     for key in input.keys(){
         let cmd = key_to_cmd(key?, &mode);
