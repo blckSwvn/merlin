@@ -4,6 +4,7 @@
 
 layout engine
 only redrawing dirty lines instead of whole view
+mode should be group specfic
 
 ---
 
