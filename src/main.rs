@@ -31,22 +31,6 @@ struct BufferIdx{
     idx:usize,
     generation:u64,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ViewIdx{
-    idx:usize,
-    generation:u64,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct GroupIdx{
-    idx:usize,
-    generation:u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct NodeIdx{
-    idx:usize
-}
-
 struct Buffers{
     data:Vec<Buffer>,
     free:VecDeque<BufferIdx>,
@@ -113,6 +97,12 @@ impl Buffers{
         self.data.iter_mut()
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ViewIdx{
+    idx:usize,
+    generation:u64,
+}
 struct Views(Vec<View>);
 impl Views{
     fn new()->Self {Self(Vec::new())}
@@ -136,6 +126,12 @@ impl Views{
     fn iter_mut(&mut self)->impl Iterator<Item = &mut View>{
         self.0.iter_mut()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GroupIdx{
+    idx:usize,
+    generation:u64,
 }
 struct Groups(Vec<Group>);
 impl Groups{
@@ -533,6 +529,10 @@ impl Group{
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NodeIdx{
+    idx:usize
+}
 struct Nodes{
     data:Vec<Node>,
     free:Vec<NodeIdx>
@@ -585,29 +585,16 @@ enum Node{
 }
 fn draw(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, buffers: &Buffers, groups: &mut Groups, mode: Mode)->Result<(), EditorErr>{
     match nodes.get(nidx).clone(){
-        Node::Leaf{gidx, parent}=>{
+        Node::Leaf{gidx, ..}=>{
             if gidx.generation == groups.get(gidx).generation{
                 groups.get(gidx).sync(views);
                 groups.get(gidx).draw_group(mode, views, buffers)?;
             }else{
-                Node::remove(nidx, parent, nodes);
-                // if let Node::Container {children, focus, ..} = nodes.get_mut(nidx){
-                //     *focus = (*focus + 1)%children.len();
-                // }
-                Node::recalc(parent, nodes, views, groups);
+                // Node::remove(nidx, parent, nodes);
+                // Node::recalc(parent, nodes, views, groups);
             }
         },
-        Node::Container{children, parent, focus: f, ..}=>{
-            if children.is_empty(){
-                Node::remove(nidx, parent, nodes);
-                Node::recalc(parent, nodes, views, groups);
-            }else{
-                let f = {
-                    match children.get(f){
-                        Some(_)=>f,
-                        None=>children.len().saturating_sub(1),
-                    }
-                };
+        Node::Container{children, focus: f, ..}=>{
                 for (idx, c) in children.iter().enumerate(){
                     if idx != f{
                         draw(*c, nodes, views, buffers, groups, mode)?;
@@ -616,7 +603,6 @@ fn draw(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, buffers: &Buffers, 
                 draw(*children.get(f).unwrap(), nodes, views, buffers, groups, mode)?;
             }
         }
-    }
     Ok(())
 }
 impl Node{
@@ -624,13 +610,13 @@ impl Node{
         if let Node::Container { direction, pos_x, pos_y, width, height, children, ..} = nodes.get(nidx){
             let mut remainder = {
                 match direction {
-                    SplitDirection::Vertical=>*height/children.len()as u16%*height,
+                    SplitDirection::Vertical=>(*height-1)/children.len()as u16%*height,
                     SplitDirection::Horizontal=>*width/children.len()as u16%*width,
                 }
             };
-            let mut height = {
+            let height = {
                 match direction{
-                    SplitDirection::Horizontal=>*height as usize/children.len(),
+                    SplitDirection::Horizontal=>(*height as usize-1)/children.len(),
                     SplitDirection::Vertical=>*height as usize,
                 }
             };
@@ -732,8 +718,10 @@ enum Cmd{
     Split,
     Vsplit,
     Hsplit,
-    FocusNext,
-    FocusPrev,
+    FocusUp,
+    FocusDown,
+    FocusRight,
+    FocusLeft,
     Close(Option<BufferIdx>, bool),
     Open(Option<String>),
     Save(Option<String>),
@@ -756,10 +744,14 @@ fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
                         Key::Char(':') => Cmd::EnterModeCommand,
                         Key::Char('u') => Cmd::Undo,
                         Key::Char('U') => Cmd::Redo,
-                        Key::Char('k') | Key::Up => Cmd::MoveUp,
-                        Key::Char('j') | Key::Down => Cmd::MoveDown,
                         Key::Char('h') | Key::Left => Cmd::MoveLeft,
+                        Key::Char('j') | Key::Down => Cmd::MoveDown,
+                        Key::Char('k') | Key::Up => Cmd::MoveUp,
                         Key::Char('l') | Key::Right => Cmd::MoveRight,
+                        Key::Ctrl('h') | Key::CtrlLeft => Cmd::FocusLeft,
+                        Key::Ctrl('j') | Key::CtrlDown=> Cmd::FocusDown,
+                        Key::Ctrl('k') | Key::CtrlUp => Cmd::FocusUp,
+                        Key::Ctrl('l') | Key::CtrlRight => Cmd::FocusRight,
                         _ => Cmd::NoOp,
                     }
                 },
@@ -790,8 +782,52 @@ fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
 }
 
 fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, views: &mut Views, buffers: &mut Buffers, groups: &mut Groups, cmd: Cmd, mode: &mut Mode)->Result<(), EditorErr>{
-    if let Node::Container{..}= nodes.get(*focus){
-        return Err(EditorErr::Msg("invalid nodes".to_string()));
+    fn enter_normal(cmd_line: &mut CmdLine, mode: &mut Mode){
+        cmd_line.cursor = 0;
+        *mode = Mode::Normal;
+    }
+    fn get_parent_idx(nodes: &Nodes, nidx: &NodeIdx)->NodeIdx{
+        match nodes.get(*nidx){
+            Node::Leaf { parent, ..}=>{
+                *parent
+            },
+            Node::Container {parent, ..}=>{
+                *parent
+            },
+        }
+    }
+    fn focus_next(nodes: &mut Nodes, focus: &mut NodeIdx){
+        let parent = get_parent_idx(nodes, focus);
+        if let Node::Container {children, focus: f, .. } = nodes.get_mut(parent){
+            *f = (*f+1)%children.len();
+            *focus = *children.get(*f).unwrap();
+        }
+    }
+    fn focus_prev(nodes: &mut Nodes, focus: &mut NodeIdx){
+        let parent = get_parent_idx(nodes, focus);
+        if let Node::Container {children, focus:f, ..} = nodes.get_mut(parent){
+            *f = ((*f+children.len())-1)%children.len();
+            *focus = *children.get(*f).unwrap();
+        }
+    }
+    fn focus_next_parent(nodes: &mut Nodes, focus: &mut NodeIdx){
+        let parent = get_parent_idx(nodes, focus);
+        let parent = get_parent_idx(nodes, &parent);
+        if let Node::Container {children, focus: f, ..} = nodes.get_mut(parent){
+            *f = (*f+1)%children.len();
+            *focus = *children.get(*f).unwrap();
+        }
+    }
+    fn focus_prev_parent(nodes: &mut Nodes, focus: &mut NodeIdx){
+        let parent = get_parent_idx(nodes, focus);
+        let parent = get_parent_idx(nodes, &parent);
+        if let Node::Container {children, focus: f, ..} = nodes.get_mut(parent){
+            *f = ((*f+children.len())-1)%children.len();
+            *focus = *children.get(*f).unwrap();
+        }
+    }
+    if let Node::Container{children, focus: f, ..}= nodes.get(*focus){
+        *focus = children[*f];
     };
     let group = {
         match nodes.get_mut(*focus) {
@@ -979,11 +1015,12 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             Ok(())
         },
         Cmd::Split=>{
-            let parent = views.push(View::new(Some(BufferIdx { idx:0,generation:0}), ViewKind::Text));
-            let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
-            Node::add_leaf(NodeIdx{idx:0}, nodes, views, groups, gidx);
+            let view = views.push(View::new(Some(BufferIdx { idx:0,generation:0}), ViewKind::Text));
+            let gidx = groups.push(Group::new(views, view, &[ViewKind::StatusBar, ViewKind::LineNumber]));
+            let parent = get_parent_idx(nodes, focus);
+            Node::add_leaf(parent, nodes, views, groups, gidx);
             write!(stdout().lock(), "{}", termion::clear::All)?;
-            exec_cmd(nodes, focus, cmd_line, views, buffers, groups, Cmd::FocusNext, mode)?;
+            focus_next(nodes, focus);
             cmd_line.cursor = 0;
             *mode = Mode::Normal;
             Ok(())
@@ -995,7 +1032,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             let parent = views.push(View::new(Some(BufferIdx { idx:0,generation:0}), ViewKind::Text));
             let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
             *focus = Node::add_leaf(*focus, nodes, views, groups, gidx);
-            exec_cmd(nodes, focus, cmd_line, views, buffers, groups, Cmd::FocusNext, mode)?;
+            focus_next(nodes, focus);
             cmd_line.cursor = 0;
             *mode = Mode::Normal;
             Ok(())
@@ -1007,37 +1044,61 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             let parent = views.push(View::new(Some(BufferIdx { idx: 0, generation: 0}), ViewKind::Text));
             let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
             *focus = Node::add_leaf(*focus, nodes, views, groups, gidx);
-            exec_cmd(nodes, focus, cmd_line, views, buffers, groups, Cmd::FocusNext, mode)?;
+            focus_next(nodes, focus);
             cmd_line.cursor = 0;
             *mode = Mode::Normal;
             Ok(())
         }
-        Cmd::FocusNext=>{
-            let parent = if let Node::Leaf { parent, ..} = nodes.get(*focus){
-                parent
-            }else{
-                return Err(EditorErr::Msg("invalid node".to_string()));
-            };
-            if let Node::Container {focus: f, children, ..} = nodes.get_mut(*parent){
-                *f = (*f+1)%children.len();
-                *focus = children[*f];
+        Cmd::FocusDown=>{
+            let parent = get_parent_idx(nodes, focus);
+            if let Node::Container { direction, ..} = nodes.get(parent){
+                match direction{
+                    SplitDirection::Vertical=>focus_next_parent(nodes, focus),
+                    SplitDirection::Horizontal=>focus_next(nodes, focus),
+                }
             }
-            cmd_line.cursor = 0;
-            *mode = Mode::Normal;
+            enter_normal(cmd_line, mode);
             Ok(())
         }
-        Cmd::FocusPrev=>{
-            let parent = if let Node::Leaf {parent, ..} = nodes.get(*focus){
-                parent
-            }else{
-                return Err(EditorErr::Msg("invalid node".to_string()));
-            };
-            if let Node::Container {focus: f, children, ..} = nodes.get_mut(*parent){
-                *f = (*f+children.len()-1) % children.len();
-                *focus = children[*f];
+        Cmd::FocusUp=>{
+            let parent = get_parent_idx(nodes, focus);
+            if let Node::Container {direction, ..} = nodes.get(parent){
+                match direction{
+                    SplitDirection::Vertical=>focus_prev_parent(nodes, focus),
+                    SplitDirection::Horizontal=>focus_prev(nodes, focus),
+                }
             }
-            cmd_line.cursor = 0;
-            *mode = Mode::Normal;
+            enter_normal(cmd_line, mode);
+            Ok(())
+        }
+        Cmd::FocusRight=>{
+            let parent = get_parent_idx(nodes, focus);
+            if let Node::Container {direction, focus: f, children, ..} = nodes.get(parent){
+                if *f == children.len(){
+                    focus_next_parent(nodes, focus);
+                }else{
+                    match direction{
+                        SplitDirection::Horizontal=>focus_next_parent(nodes, focus),
+                        SplitDirection::Vertical=>focus_next(nodes, focus),
+                    }
+                }
+            }
+            enter_normal(cmd_line, mode);
+            Ok(())
+        }
+        Cmd::FocusLeft=>{
+            let parent = get_parent_idx(nodes, focus);
+            if let Node::Container {direction, focus: f, ..} = nodes.get(parent){
+                if *f == 0{
+                    focus_prev_parent(nodes, focus);
+                }else{
+                    match direction {
+                        SplitDirection::Horizontal=>focus_prev_parent(nodes, focus),
+                        SplitDirection::Vertical=>focus_prev(nodes, focus),
+                    }
+                }
+            }
+            enter_normal(cmd_line, mode);
             Ok(())
         }
         Cmd::CmdInsert(c) => {
@@ -1120,17 +1181,14 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                         curr_view.x = 0;
                         curr_view.y = 0;
                         curr_view.prefered_x = 0;
-                        group.generation += 1;
                     }
                     buffers.remove(&mut idx);
                     curr_view.redraw()?;
                 }
             }else{
-                group.generation += 1;
                 curr_view.redraw()?;
                 return Err(EditorErr::Msg("will not close special buffer: 0".into()));
             }
-            exec_cmd(nodes, focus, cmd_line, views, buffers, groups, Cmd::FocusNext, mode)?;
             cmd_line.cursor = 0;
             *mode = Mode::Normal;
             Ok(())
@@ -1230,7 +1288,7 @@ fn parse_args(s: &str) -> Vec<String> {
     let rest = parts.next().unwrap_or("");
     match cmd{
         "q"  => Ok(Cmd::Quit(false)),
-        "q!" => Ok(Cmd::Quit(true)),
+        "Q" => Ok(Cmd::Quit(true)),
         "w"  =>{
             let args = parse_args(rest);
             Ok(Cmd::Save(args.get(0).cloned()))
@@ -1248,8 +1306,8 @@ fn parse_args(s: &str) -> Vec<String> {
             }
         }
         "split"  | "s"  =>Ok(Cmd::Split),
-        "vsplit" | "vs" =>Ok(Cmd::Vsplit),
-        "hsplit" | "hs" =>Ok(Cmd::Hsplit),
+        "splitv" | "sv" =>Ok(Cmd::Vsplit),
+        "splith" | "sh" =>Ok(Cmd::Hsplit),
         "close" | "c" => {
             let mut args = Vec::new();
             args.push(rest);
@@ -1263,7 +1321,7 @@ fn parse_args(s: &str) -> Vec<String> {
                 Ok(Cmd::Close(None, false))
             }
         } 
-        "close!"| "c!"=> {
+        "CLOSE"| "C" => {
             let mut args = Vec::new();
             args.push(rest);
             if let Some(arg) = args.get(0){
@@ -1276,8 +1334,10 @@ fn parse_args(s: &str) -> Vec<String> {
                 Ok(Cmd::Close(None, true))
             }
         }
-        "next" => Ok(Cmd::FocusNext),
-        "prev" => Ok(Cmd::FocusPrev),
+        "right"=> Ok(Cmd::FocusRight),
+        "left" => Ok(Cmd::FocusLeft),
+        "down" => Ok(Cmd::FocusDown),
+        "up"   => Ok(Cmd::FocusUp),
         _ => Err(EditorErr::Msg(format!("unknown command: {}",cmd))),
     }
 }
