@@ -335,7 +335,7 @@ impl View{
     fn draw_status_bar(&self, idx: BufferIdx, buffers: &Buffers, mode: Mode)->io::Result<()>{
         let buffer = buffers.get(idx);
         let mut out = io::stdout().lock();
-        write!(out, "{}", termion::cursor::Goto(self.pos_x+1, self.pos_y+1))?;
+        write!(out, "{}", termion::cursor::Goto(self.pos_x, self.pos_y+1))?;
         let mut path = "SCRATCH";
         if !buffer.check_flag(Buffer::SCRATCH){
             if let Some(p) = &buffer.file{
@@ -372,7 +372,7 @@ impl View{
         let buffer = if let Some(b) = self.buf{
             b
         }else{
-            BufferIdx { idx: 0, generation: 0}
+            SCRATCH
         };
         let buffer = buffers.get(buffer);
         let mut out = io::stdout().lock();
@@ -715,13 +715,13 @@ enum Cmd{
     MoveDown,
     MoveRight,
     MoveLeft,
-    Split,
-    Vsplit,
-    Hsplit,
-    FocusUp,
-    FocusDown,
-    FocusRight,
-    FocusLeft,
+    // Split,
+    // Vsplit,
+    // Hsplit,
+    // FocusUp,
+    // FocusDown,
+    // FocusRight,
+    // FocusLeft,
     Close(Option<BufferIdx>, bool),
     Open(Option<String>),
     Save(Option<String>),
@@ -748,10 +748,10 @@ fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
                         Key::Char('j') | Key::Down => Cmd::MoveDown,
                         Key::Char('k') | Key::Up => Cmd::MoveUp,
                         Key::Char('l') | Key::Right => Cmd::MoveRight,
-                        Key::Ctrl('h') | Key::CtrlLeft => Cmd::FocusLeft,
-                        Key::Ctrl('j') | Key::CtrlDown=> Cmd::FocusDown,
-                        Key::Ctrl('k') | Key::CtrlUp => Cmd::FocusUp,
-                        Key::Ctrl('l') | Key::CtrlRight => Cmd::FocusRight,
+                        // Key::Ctrl('h') | Key::CtrlLeft => Cmd::FocusLeft,
+                        // Key::Ctrl('j') | Key::CtrlDown=> Cmd::FocusDown,
+                        // Key::Ctrl('k') | Key::CtrlUp => Cmd::FocusUp,
+                        // Key::Ctrl('l') | Key::CtrlRight => Cmd::FocusRight,
                         _ => Cmd::NoOp,
                     }
                 },
@@ -873,7 +873,11 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                 match edit{
                     Edit::Insert {idx: c_idx, text, ..}=>{
                         if *c_idx <= idx && idx <= *c_idx+text.chars().count(){
-                            text.insert(idx - *c_idx, c);
+                            let byte_idx = text.char_indices()
+                                .nth(idx - *c_idx)
+                                .map(|(b_idx, _)| b_idx)
+                                .unwrap_or(text.len());
+                            text.insert_str(byte_idx, &c.to_string());
                         }else{
                             buffer.undo.push(Edit::Insert { idx, cursor_x, cursor_y, text: c.into() });
                         }
@@ -1014,93 +1018,93 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             curr_view.prefered_x = curr_view.x;
             Ok(())
         },
-        Cmd::Split=>{
-            let view = views.push(View::new(Some(BufferIdx { idx:0,generation:0}), ViewKind::Text));
-            let gidx = groups.push(Group::new(views, view, &[ViewKind::StatusBar, ViewKind::LineNumber]));
-            let parent = get_parent_idx(nodes, focus);
-            Node::add_leaf(parent, nodes, views, groups, gidx);
-            write!(stdout().lock(), "{}", termion::clear::All)?;
-            focus_next(nodes, focus);
-            cmd_line.cursor = 0;
-            *mode = Mode::Normal;
-            Ok(())
-        }
-        Cmd::Vsplit=>{
-            let group = group.clone();
-            Node::leaf_to_container(*focus, nodes, groups, SplitDirection::Vertical);
-            Node::add_leaf(*focus, nodes, views, groups, group);
-            let parent = views.push(View::new(Some(BufferIdx { idx:0,generation:0}), ViewKind::Text));
-            let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
-            *focus = Node::add_leaf(*focus, nodes, views, groups, gidx);
-            focus_next(nodes, focus);
-            cmd_line.cursor = 0;
-            *mode = Mode::Normal;
-            Ok(())
-        }
-        Cmd::Hsplit=>{
-            let group = group.clone();
-            Node::leaf_to_container(*focus, nodes, groups, SplitDirection::Horizontal);
-            Node::add_leaf(*focus, nodes, views, groups, group);
-            let parent = views.push(View::new(Some(BufferIdx { idx: 0, generation: 0}), ViewKind::Text));
-            let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
-            *focus = Node::add_leaf(*focus, nodes, views, groups, gidx);
-            focus_next(nodes, focus);
-            cmd_line.cursor = 0;
-            *mode = Mode::Normal;
-            Ok(())
-        }
-        Cmd::FocusDown=>{
-            let parent = get_parent_idx(nodes, focus);
-            if let Node::Container { direction, ..} = nodes.get(parent){
-                match direction{
-                    SplitDirection::Vertical=>focus_next_parent(nodes, focus),
-                    SplitDirection::Horizontal=>focus_next(nodes, focus),
-                }
-            }
-            enter_normal(cmd_line, mode);
-            Ok(())
-        }
-        Cmd::FocusUp=>{
-            let parent = get_parent_idx(nodes, focus);
-            if let Node::Container {direction, ..} = nodes.get(parent){
-                match direction{
-                    SplitDirection::Vertical=>focus_prev_parent(nodes, focus),
-                    SplitDirection::Horizontal=>focus_prev(nodes, focus),
-                }
-            }
-            enter_normal(cmd_line, mode);
-            Ok(())
-        }
-        Cmd::FocusRight=>{
-            let parent = get_parent_idx(nodes, focus);
-            if let Node::Container {direction, focus: f, children, ..} = nodes.get(parent){
-                if *f == children.len(){
-                    focus_next_parent(nodes, focus);
-                }else{
-                    match direction{
-                        SplitDirection::Horizontal=>focus_next_parent(nodes, focus),
-                        SplitDirection::Vertical=>focus_next(nodes, focus),
-                    }
-                }
-            }
-            enter_normal(cmd_line, mode);
-            Ok(())
-        }
-        Cmd::FocusLeft=>{
-            let parent = get_parent_idx(nodes, focus);
-            if let Node::Container {direction, focus: f, ..} = nodes.get(parent){
-                if *f == 0{
-                    focus_prev_parent(nodes, focus);
-                }else{
-                    match direction {
-                        SplitDirection::Horizontal=>focus_prev_parent(nodes, focus),
-                        SplitDirection::Vertical=>focus_prev(nodes, focus),
-                    }
-                }
-            }
-            enter_normal(cmd_line, mode);
-            Ok(())
-        }
+        // Cmd::Split=>{
+        //     let view = views.push(View::new(Some(SCRATCH), ViewKind::Text));
+        //     let gidx = groups.push(Group::new(views, view, &[ViewKind::StatusBar, ViewKind::LineNumber]));
+        //     let parent = get_parent_idx(nodes, focus);
+        //     Node::add_leaf(parent, nodes, views, groups, gidx);
+        //     write!(stdout().lock(), "{}", termion::clear::All)?;
+        //     focus_next(nodes, focus);
+        //     cmd_line.cursor = 0;
+        //     *mode = Mode::Normal;
+        //     Ok(())
+        // }
+        // Cmd::Vsplit=>{
+        //     let group = group.clone();
+        //     Node::leaf_to_container(*focus, nodes, groups, SplitDirection::Vertical);
+        //     Node::add_leaf(*focus, nodes, views, groups, group);
+        //     let parent = views.push(View::new(Some(SCRATCH), ViewKind::Text));
+        //     let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
+        //     *focus = Node::add_leaf(*focus, nodes, views, groups, gidx);
+        //     focus_next(nodes, focus);
+        //     cmd_line.cursor = 0;
+        //     *mode = Mode::Normal;
+        //     Ok(())
+        // }
+        // Cmd::Hsplit=>{
+        //     let group = group.clone();
+        //     Node::leaf_to_container(*focus, nodes, groups, SplitDirection::Horizontal);
+        //     Node::add_leaf(*focus, nodes, views, groups, group);
+        //     let parent = views.push(View::new(Some(SCRATCH), ViewKind::Text));
+        //     let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
+        //     *focus = Node::add_leaf(*focus, nodes, views, groups, gidx);
+        //     focus_next(nodes, focus);
+        //     cmd_line.cursor = 0;
+        //     *mode = Mode::Normal;
+        //     Ok(())
+        // }
+        // Cmd::FocusDown=>{
+        //     let parent = get_parent_idx(nodes, focus);
+        //     if let Node::Container { direction, ..} = nodes.get(parent){
+        //         match direction{
+        //             SplitDirection::Vertical=>focus_next_parent(nodes, focus),
+        //             SplitDirection::Horizontal=>focus_next(nodes, focus),
+        //         }
+        //     }
+        //     enter_normal(cmd_line, mode);
+        //     Ok(())
+        // }
+        // Cmd::FocusUp=>{
+        //     let parent = get_parent_idx(nodes, focus);
+        //     if let Node::Container {direction, ..} = nodes.get(parent){
+        //         match direction{
+        //             SplitDirection::Vertical=>focus_prev_parent(nodes, focus),
+        //             SplitDirection::Horizontal=>focus_prev(nodes, focus),
+        //         }
+        //     }
+        //     enter_normal(cmd_line, mode);
+        //     Ok(())
+        // }
+        // Cmd::FocusRight=>{
+        //     let parent = get_parent_idx(nodes, focus);
+        //     if let Node::Container {direction, focus: f, children, ..} = nodes.get(parent){
+        //         if *f == children.len(){
+        //             focus_next_parent(nodes, focus);
+        //         }else{
+        //             match direction{
+        //                 SplitDirection::Horizontal=>focus_next_parent(nodes, focus),
+        //                 SplitDirection::Vertical=>focus_next(nodes, focus),
+        //             }
+        //         }
+        //     }
+        //     enter_normal(cmd_line, mode);
+        //     Ok(())
+        // }
+        // Cmd::FocusLeft=>{
+        //     let parent = get_parent_idx(nodes, focus);
+        //     if let Node::Container {direction, focus: f, ..} = nodes.get(parent){
+        //         if *f == 0{
+        //             focus_prev_parent(nodes, focus);
+        //         }else{
+        //             match direction {
+        //                 SplitDirection::Horizontal=>focus_prev_parent(nodes, focus),
+        //                 SplitDirection::Vertical=>focus_prev(nodes, focus),
+        //             }
+        //         }
+        //     }
+        //     enter_normal(cmd_line, mode);
+        //     Ok(())
+        // }
         Cmd::CmdInsert(c) => {
             if c != '\n' {
                 cmd_line.insert(c);
@@ -1139,11 +1143,13 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             }
             if let Some(new) = f{
                 buffer.save(Some(new))?;
+                buffer.undo.clear();
+                buffer.redo.clear();
             }else{
                 if let Some(_) = &buffer.file{
                     match buffer.save(None){
                         Err(error)=>return Err(EditorErr::Io(error)),
-                        Ok(_)=>{},
+                        Ok(_)=>{buffer.undo.clear(); buffer.redo.clear();},
                     }
                 }else{
                     return Err(EditorErr::Msg("new file needs name".into()));
@@ -1167,7 +1173,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                 }
             };
             let curr_buffer = buffers.get(idx);
-            if idx.idx != 0 {
+            if idx != SCRATCH{
                 if curr_buffer.check_flag(Buffer::READ_ONLY){
                     return Err(EditorErr::ReadOnly(bidx));
                 }
@@ -1175,7 +1181,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                     return Err(EditorErr::Dirty(bidx));
                 }else{
                     if curr_view.buf == Some(idx){
-                        curr_view.buf = Some(BufferIdx{idx: 0, generation: 0});
+                        curr_view.buf = Some(SCRATCH);
                         cmd_line.input.clear();
                         curr_view.off = 0;
                         curr_view.x = 0;
@@ -1305,22 +1311,22 @@ fn parse_args(s: &str) -> Vec<String> {
                 Ok(Cmd::Open(None))
             }
         }
-        "split"  | "s"  =>Ok(Cmd::Split),
-        "splitv" | "sv" =>Ok(Cmd::Vsplit),
-        "splith" | "sh" =>Ok(Cmd::Hsplit),
-        "close" | "c" => {
-            let mut args = Vec::new();
-            args.push(rest);
-            if let Some(arg) = args.get(0){
-                if let Ok(idx) = arg.parse::<usize>(){
-                    Ok(Cmd::Close(Some(BufferIdx {idx, generation:0}), false))
-                }else{
-                    Ok(Cmd::Close(None, false))
-                }
-            }else{
-                Ok(Cmd::Close(None, false))
-            }
-        } 
+        // "split"  | "s"  =>Ok(Cmd::Split),
+        // "splitv" | "sv" =>Ok(Cmd::Vsplit),
+        // "splith" | "sh" =>Ok(Cmd::Hsplit),
+        // "close" | "c" => {
+        //     let mut args = Vec::new();
+        //     args.push(rest);
+        //     if let Some(arg) = args.get(0){
+        //         if let Ok(idx) = arg.parse::<usize>(){
+        //             Ok(Cmd::Close(Some(BufferIdx {idx, generation:0}), false))
+        //         }else{
+        //             Ok(Cmd::Close(None, false))
+        //         }
+        //     }else{
+        //         Ok(Cmd::Close(None, false))
+        //     }
+        // } 
         "CLOSE"| "C" => {
             let mut args = Vec::new();
             args.push(rest);
@@ -1334,14 +1340,15 @@ fn parse_args(s: &str) -> Vec<String> {
                 Ok(Cmd::Close(None, true))
             }
         }
-        "right"=> Ok(Cmd::FocusRight),
-        "left" => Ok(Cmd::FocusLeft),
-        "down" => Ok(Cmd::FocusDown),
-        "up"   => Ok(Cmd::FocusUp),
+    //     "right"=> Ok(Cmd::FocusRight),
+    //     "left" => Ok(Cmd::FocusLeft),
+    //     "down" => Ok(Cmd::FocusDown),
+    //     "up"   => Ok(Cmd::FocusUp),
         _ => Err(EditorErr::Msg(format!("unknown command: {}",cmd))),
     }
 }
 
+const SCRATCH: BufferIdx = BufferIdx{idx: 0, generation: 0};
 fn main()->io::Result<()>{
     let mut views = Views::new();
     let mut buffers = Buffers::new();
@@ -1353,11 +1360,11 @@ fn main()->io::Result<()>{
     let mut mode = Mode::Normal;
     let root = nodes.push(Node::Container{parent: NodeIdx{idx:0}, direction: SplitDirection::Vertical, width, height, pos_x:0, pos_y:0, focus:0, children:vec![]});
     {
+        buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
         let args: Vec<String> = env::args().skip(1).collect();
-        let scratch = buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
         let bidx = {
             if args.is_empty(){
-                scratch
+                SCRATCH
             }else{
                 buffers.push(Buffer::new(Some(&args[0]), 0).unwrap())
             }
