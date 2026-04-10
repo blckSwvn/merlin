@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::stdout;
 use std::path::Path;
 use std::process::{exit};
 use ropey::Rope;
@@ -295,6 +294,7 @@ impl CmdLine{
 #[derive(Clone)]
 struct View{
     buf: Option<BufferIdx>,
+    dirty: Vec<usize>,
     y: usize,
     x: usize,
     prefered_x: usize,
@@ -324,13 +324,9 @@ impl View{
             pos_y: 0,
             width: 0,
             height: 0,
+            dirty: vec![],
             kind,
         }
-    }
-    fn redraw(&self)->io::Result<()>{
-        let mut out = io::stdout().lock();
-        write!(out, "{}",termion::clear::All)?;
-        Ok(())
     }
     fn draw_status_bar(&self, idx: BufferIdx, buffers: &Buffers, mode: Mode)->io::Result<()>{
         let buffer = buffers.get(idx);
@@ -368,19 +364,20 @@ impl View{
         }
         Ok(())
     }
-    fn draw_text(&self, buffers: &Buffers) -> io::Result<()>{
+    fn draw_text(&mut self, buffers: &Buffers) -> io::Result<()>{
         let buffer = if let Some(b) = self.buf{
             b
         }else{
             SCRATCH
         };
+        self.dirty.sort_unstable();
+        self.dirty.dedup();
         let buffer = buffers.get(buffer);
         let mut out = io::stdout().lock();
         let start = self.off;
-        let end = usize::min(start + self.height as usize, buffer.buf.len_lines())+1;
 
-        for row in 0..(end - start){
-            write!(out, "{}", termion::cursor::Goto(self.pos_x+1, self.pos_y + row as u16 + 1))?;
+        for row in self.dirty.iter(){
+            write!(out, "{}", termion::cursor::Goto(self.pos_x+1, self.pos_y + *row as u16 + 1))?;
             let line_index = start + row;
             if let Some(line) = buffer.buf.get_line(line_index){
                 let end = usize::min(self.width as usize, line.len_chars());
@@ -396,6 +393,7 @@ impl View{
                 }
             }
         }
+        self.dirty.clear();
         let screen_y = self.pos_y + self.y.saturating_sub(self.off) as u16;
         let screen_x = self.pos_x + self.x as u16;
         write!(out, "{}", termion::cursor::Goto(screen_x+1, screen_y+1))?;
@@ -405,9 +403,12 @@ impl View{
     fn scroll(&mut self, buffer: &mut Buffer){
         if self.y < self.off{
             self.off = self.y;
-        } else if self.y >= self.off + self.height as usize{
+        } else if self.y > self.off + self.height as usize{
             self.off = self.y - self.height as usize;
         }
+        let start = self.off;
+        let end = usize::min(start + self.height as usize, buffer.buf.len_lines()+1);
+        self.dirty.extend(0..(end - start));
         if let Some(line) = buffer.buf.get_line(self.y){
             if line.len_chars() > 0 {
                 self.x = usize::min(self.x, line.len_chars().saturating_sub(1));
@@ -474,7 +475,7 @@ impl Group{
             }
         }
     }
-    fn draw_group(&self, mode: Mode, views: &Views, buffers: &Buffers)->io::Result<()>{
+    fn draw_group(&self, mode: Mode, views: &mut Views, buffers: &Buffers)->io::Result<()>{
         for c in self.children.iter(){
             let curr = views.get(*c);
             match curr.kind{
@@ -488,11 +489,12 @@ impl Group{
                     curr.draw_line_numbers()?;
                 },
                 ViewKind::Text=>{
+                    let curr = views.get_mut(*c);
                     curr.draw_text(buffers)?;
                 }
             }
         }
-        views.get(self.parent).draw_text(buffers)?;
+        views.get_mut(self.parent).draw_text(buffers)?;
         Ok(())
     }
     fn resize(&mut self, mut height: u16, mut width: u16, mut pos_x: u16, pos_y: u16, views: &mut Views){
@@ -525,6 +527,7 @@ impl Group{
             p.pos_y = pos_y;
             p.width = width;
             p.height = height;
+            p.dirty.extend(p.y..p.off+p.height as usize);
         }
     }
 }
@@ -786,46 +789,46 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
         cmd_line.cursor = 0;
         *mode = Mode::Normal;
     }
-    fn get_parent_idx(nodes: &Nodes, nidx: &NodeIdx)->NodeIdx{
-        match nodes.get(*nidx){
-            Node::Leaf { parent, ..}=>{
-                *parent
-            },
-            Node::Container {parent, ..}=>{
-                *parent
-            },
-        }
-    }
-    fn focus_next(nodes: &mut Nodes, focus: &mut NodeIdx){
-        let parent = get_parent_idx(nodes, focus);
-        if let Node::Container {children, focus: f, .. } = nodes.get_mut(parent){
-            *f = (*f+1)%children.len();
-            *focus = *children.get(*f).unwrap();
-        }
-    }
-    fn focus_prev(nodes: &mut Nodes, focus: &mut NodeIdx){
-        let parent = get_parent_idx(nodes, focus);
-        if let Node::Container {children, focus:f, ..} = nodes.get_mut(parent){
-            *f = ((*f+children.len())-1)%children.len();
-            *focus = *children.get(*f).unwrap();
-        }
-    }
-    fn focus_next_parent(nodes: &mut Nodes, focus: &mut NodeIdx){
-        let parent = get_parent_idx(nodes, focus);
-        let parent = get_parent_idx(nodes, &parent);
-        if let Node::Container {children, focus: f, ..} = nodes.get_mut(parent){
-            *f = (*f+1)%children.len();
-            *focus = *children.get(*f).unwrap();
-        }
-    }
-    fn focus_prev_parent(nodes: &mut Nodes, focus: &mut NodeIdx){
-        let parent = get_parent_idx(nodes, focus);
-        let parent = get_parent_idx(nodes, &parent);
-        if let Node::Container {children, focus: f, ..} = nodes.get_mut(parent){
-            *f = ((*f+children.len())-1)%children.len();
-            *focus = *children.get(*f).unwrap();
-        }
-    }
+    // fn get_parent_idx(nodes: &Nodes, nidx: &NodeIdx)->NodeIdx{
+    //     match nodes.get(*nidx){
+    //         Node::Leaf { parent, ..}=>{
+    //             *parent
+    //         },
+    //         Node::Container {parent, ..}=>{
+    //             *parent
+    //         },
+    //     }
+    // }
+    // fn focus_next(nodes: &mut Nodes, focus: &mut NodeIdx){
+    //     let parent = get_parent_idx(nodes, focus);
+    //     if let Node::Container {children, focus: f, .. } = nodes.get_mut(parent){
+    //         *f = (*f+1)%children.len();
+    //         *focus = *children.get(*f).unwrap();
+    //     }
+    // }
+    // fn focus_prev(nodes: &mut Nodes, focus: &mut NodeIdx){
+    //     let parent = get_parent_idx(nodes, focus);
+    //     if let Node::Container {children, focus:f, ..} = nodes.get_mut(parent){
+    //         *f = ((*f+children.len())-1)%children.len();
+    //         *focus = *children.get(*f).unwrap();
+    //     }
+    // }
+    // fn focus_next_parent(nodes: &mut Nodes, focus: &mut NodeIdx){
+    //     let parent = get_parent_idx(nodes, focus);
+    //     let parent = get_parent_idx(nodes, &parent);
+    //     if let Node::Container {children, focus: f, ..} = nodes.get_mut(parent){
+    //         *f = (*f+1)%children.len();
+    //         *focus = *children.get(*f).unwrap();
+    //     }
+    // }
+    // fn focus_prev_parent(nodes: &mut Nodes, focus: &mut NodeIdx){
+    //     let parent = get_parent_idx(nodes, focus);
+    //     let parent = get_parent_idx(nodes, &parent);
+    //     if let Node::Container {children, focus: f, ..} = nodes.get_mut(parent){
+    //         *f = ((*f+children.len())-1)%children.len();
+    //         *focus = *children.get(*f).unwrap();
+    //     }
+    // }
     if let Node::Container{children, focus: f, ..}= nodes.get(*focus){
         *focus = children[*f];
     };
@@ -893,7 +896,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             let view = views.get_mut(view);
             view.x += 1;
             view.prefered_x = view.x;
-            View::scroll(view, buffer);
+            view.dirty.push(cursor_y);
             Ok(())
         },
         Cmd::NewLine=>{
@@ -901,6 +904,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             let idx = curr_view.cursor_char(buffer);
             buffer.insert(&mut curr_view, '\n');
             buffer.undo.push(Edit::Insert { idx, cursor_x: curr_view.x, cursor_y: curr_view.y, text: "\n".to_string()});
+            curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
             curr_view.y += 1;
             curr_view.x = 0;
             View::scroll(&mut curr_view, buffer);
@@ -932,11 +936,13 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                 if curr_view.x > 0{
                     curr_view.x -= 1;
                     curr_view.prefered_x = curr_view.x;
+                    curr_view.dirty.push(curr_view.y);
                 }else{
                     curr_view.y = curr_view.y.saturating_sub(1);
                     if let Some(line) = buffer.buf.get_line(curr_view.y){
                         curr_view.x = line.len_chars();
                     }
+                    curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
                 }
                 View::scroll(&mut curr_view, buffer);
             }
@@ -960,6 +966,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                         curr_view.prefered_x = curr_view.x;
                     },
                 }
+                curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
                 return Ok(())
             }
             Err(EditorErr::Msg("undo stack is empty".to_string()))
@@ -982,6 +989,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                         buffer.undo.push(Edit::Insert{ idx, cursor_x, cursor_y, text });
                     }
                 }
+                curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);//due to newlines and joining lines
                 View::scroll(curr_view, buffer); // Make sure the view scrolls correctly
                 return Ok(());
             }
@@ -1189,10 +1197,9 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                         curr_view.prefered_x = 0;
                     }
                     buffers.remove(&mut idx);
-                    curr_view.redraw()?;
                 }
+                curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
             }else{
-                curr_view.redraw()?;
                 return Err(EditorErr::Msg("will not close special buffer: 0".into()));
             }
             cmd_line.cursor = 0;
@@ -1230,17 +1237,17 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                 curr_view.x = 0;
                 curr_view.off = 0;
                 curr_view.prefered_x = 0;
+                curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
                 cmd_line.input.clear();
                 cmd_line.cursor = 0;
                 *mode = Mode::Normal;
-                curr_view.redraw()?;
+               // curr_view.redraw()?;
             }else{
                 return Err(EditorErr::InvalidBuffer);
             }
             Ok(())
         }
         Cmd::Open(file)=>{
-            curr_view.redraw()?;
             let buffer = if let Some(f) = file{
                 if let Some(b) = buffers.get_by_path(&f){
                     *b
@@ -1254,6 +1261,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             curr_view.x = 0;
             curr_view.y = 0;
             curr_view.prefered_x = 0;
+            curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
             curr_view.buf = Some(buffer);
             cmd_line.input.clear();
             cmd_line.cursor = 0;
@@ -1314,19 +1322,19 @@ fn parse_args(s: &str) -> Vec<String> {
         // "split"  | "s"  =>Ok(Cmd::Split),
         // "splitv" | "sv" =>Ok(Cmd::Vsplit),
         // "splith" | "sh" =>Ok(Cmd::Hsplit),
-        // "close" | "c" => {
-        //     let mut args = Vec::new();
-        //     args.push(rest);
-        //     if let Some(arg) = args.get(0){
-        //         if let Ok(idx) = arg.parse::<usize>(){
-        //             Ok(Cmd::Close(Some(BufferIdx {idx, generation:0}), false))
-        //         }else{
-        //             Ok(Cmd::Close(None, false))
-        //         }
-        //     }else{
-        //         Ok(Cmd::Close(None, false))
-        //     }
-        // } 
+        "close" | "c" => {
+            let mut args = Vec::new();
+            args.push(rest);
+            if let Some(arg) = args.get(0){
+                if let Ok(idx) = arg.parse::<usize>(){
+                    Ok(Cmd::Close(Some(BufferIdx {idx, generation:0}), false))
+                }else{
+                    Ok(Cmd::Close(None, false))
+                }
+            }else{
+                Ok(Cmd::Close(None, false))
+            }
+        } 
         "CLOSE"| "C" => {
             let mut args = Vec::new();
             args.push(rest);
