@@ -1,8 +1,6 @@
 # TODO
 
-only redrawing dirty lines instead of whole view
 layout engine
-mode should be group specfic
 
 ---
 

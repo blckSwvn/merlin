@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::path::Path;
 use std::process::{exit};
+use crossterm::event::PopKeyboardEnhancementFlags;
 use ropey::Rope;
 use std::path::PathBuf;
 use std::{env, io};
@@ -331,7 +332,7 @@ impl View{
     fn draw_status_bar(&self, idx: BufferIdx, buffers: &Buffers, mode: Mode)->io::Result<()>{
         let buffer = buffers.get(idx);
         let mut out = io::stdout().lock();
-        write!(out, "{}", termion::cursor::Goto(self.pos_x, self.pos_y+1))?;
+        write!(out, "{}{}", termion::cursor::Goto(self.pos_x, self.pos_y+1), termion::clear::CurrentLine)?;
         let mut path = "SCRATCH";
         if !buffer.check_flag(Buffer::SCRATCH){
             if let Some(p) = &buffer.file{
@@ -348,13 +349,15 @@ impl View{
         write!(out, "{mode_str} {} {path}", idx.idx)?;
         Ok(())
     }
-    fn draw_line_numbers(&self) -> io::Result<()> {
+    fn draw_line_numbers(&self, views: &Views, parent_vidx: ViewIdx) -> io::Result<()> {
         let mut out = io::stdout().lock();
 
+        if views.get(parent_vidx).dirty.is_empty(){
+            return Ok(());
+        }
         let start = self.off;
         let height = self.height as usize;
         let width = self.width as usize;
-
         for row in 0..height+1{
             let screen_y = self.pos_y + row as u16 + 1;
             let line_num = start + row + 1;
@@ -403,12 +406,11 @@ impl View{
     fn scroll(&mut self, buffer: &mut Buffer){
         if self.y < self.off{
             self.off = self.y;
+            self.dirty.extend(0..self.height as usize + 1);
         } else if self.y > self.off + self.height as usize{
             self.off = self.y - self.height as usize;
+            self.dirty.extend(0..self.height as usize + 1);
         }
-        let start = self.off;
-        let end = usize::min(start + self.height as usize, buffer.buf.len_lines()+1);
-        self.dirty.extend(0..(end - start));
         if let Some(line) = buffer.buf.get_line(self.y){
             if line.len_chars() > 0 {
                 self.x = usize::min(self.x, line.len_chars().saturating_sub(1));
@@ -486,7 +488,7 @@ impl Group{
                     }
                 },
                 ViewKind::LineNumber=>{
-                    curr.draw_line_numbers()?;
+                    curr.draw_line_numbers(views, self.parent)?;
                 },
                 ViewKind::Text=>{
                     let curr = views.get_mut(*c);
@@ -527,7 +529,7 @@ impl Group{
             p.pos_y = pos_y;
             p.width = width;
             p.height = height;
-            p.dirty.extend(p.y..p.off+p.height as usize);
+            p.dirty.extend(p.y-p.off..p.height as usize);
         }
     }
 }
@@ -676,17 +678,6 @@ impl Node{
             *nodes.get_mut(nidx) = Node::Container{parent: *parent, direction, children: vec![], focus:0, pos_x: *pos_x, pos_y:*pos_y, width:*width, height:*height};
         }
     }
-    // fn get_focus(nidx: NodeIdx, nodes: &Nodes)->NodeIdx{
-    //     match nodes.get(nidx){
-    //         Node::Container {children, focus, ..}=>{
-    //             let focus = children.get(*focus).or(children.last()).unwrap();
-    //             Node::get_focus(*focus, nodes)
-    //         },
-    //         Node::Leaf {..}=>{
-    //             nidx
-    //         },
-    //     }
-    // }
     fn remove(remove: NodeIdx, parent: NodeIdx, nodes: &mut Nodes){
         if let Node::Container {children, ..} = nodes.get_mut(parent){
             children.retain(|x| *x != remove);
@@ -896,7 +887,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             let view = views.get_mut(view);
             view.x += 1;
             view.prefered_x = view.x;
-            view.dirty.push(cursor_y);
+            view.dirty.push(view.y-view.off);
             Ok(())
         },
         Cmd::NewLine=>{
@@ -904,7 +895,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             let idx = curr_view.cursor_char(buffer);
             buffer.insert(&mut curr_view, '\n');
             buffer.undo.push(Edit::Insert { idx, cursor_x: curr_view.x, cursor_y: curr_view.y, text: "\n".to_string()});
-            curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
+            curr_view.dirty.extend(curr_view.y-curr_view.off..curr_view.height as usize);
             curr_view.y += 1;
             curr_view.x = 0;
             View::scroll(&mut curr_view, buffer);
@@ -936,10 +927,10 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                 if curr_view.x > 0{
                     curr_view.x -= 1;
                     curr_view.prefered_x = curr_view.x;
-                    curr_view.dirty.push(curr_view.y);
+                    curr_view.dirty.push(curr_view.y-curr_view.off);
                 }else{
                     curr_view.y = curr_view.y.saturating_sub(1);
-                    if let Some(line) = buffer.buf.get_line(curr_view.y){
+                    if let Some(line) = buffer.buf.get_line(curr_view.y-curr_view.off){
                         curr_view.x = line.len_chars();
                     }
                     curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
@@ -966,7 +957,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                         curr_view.prefered_x = curr_view.x;
                     },
                 }
-                curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
+                curr_view.dirty.extend(curr_view.y-curr_view.off..curr_view.height as usize);
                 return Ok(())
             }
             Err(EditorErr::Msg("undo stack is empty".to_string()))
@@ -989,7 +980,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                         buffer.undo.push(Edit::Insert{ idx, cursor_x, cursor_y, text });
                     }
                 }
-                curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);//due to newlines and joining lines
+                curr_view.dirty.extend(curr_view.y-curr_view.off..curr_view.height as usize);
                 View::scroll(curr_view, buffer); // Make sure the view scrolls correctly
                 return Ok(());
             }
@@ -1198,7 +1189,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                     }
                     buffers.remove(&mut idx);
                 }
-                curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
+                curr_view.dirty.extend(0..curr_view.height as usize +1);
             }else{
                 return Err(EditorErr::Msg("will not close special buffer: 0".into()));
             }
@@ -1210,7 +1201,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             if !force{
                 let dirty: Vec<_> = buffers.iter()
                     .enumerate()
-                    .filter(|(i, b)| !b.undo.is_empty() && *i != 0)//buffer 0 is special
+                    .filter(|(i, b)| !b.undo.is_empty() && *i != SCRATCH.idx)
                     .map(|(i, _)| i)
                     .collect();
                 if !dirty.is_empty(){
@@ -1237,11 +1228,10 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                 curr_view.x = 0;
                 curr_view.off = 0;
                 curr_view.prefered_x = 0;
-                curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
+                curr_view.dirty.extend(0..curr_view.height as usize +1);
                 cmd_line.input.clear();
                 cmd_line.cursor = 0;
                 *mode = Mode::Normal;
-               // curr_view.redraw()?;
             }else{
                 return Err(EditorErr::InvalidBuffer);
             }
@@ -1261,7 +1251,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             curr_view.x = 0;
             curr_view.y = 0;
             curr_view.prefered_x = 0;
-            curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
+            curr_view.dirty.extend(0..curr_view.height as usize +1);
             curr_view.buf = Some(buffer);
             cmd_line.input.clear();
             cmd_line.cursor = 0;
