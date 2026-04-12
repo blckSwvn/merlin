@@ -1,6 +1,7 @@
 # TODO
 
-layout engine
+add floating to layout engine
+replace crossterm with termion
 
 ---
 
