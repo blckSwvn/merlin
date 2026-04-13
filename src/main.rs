@@ -4,14 +4,23 @@ use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::stdout;
 use std::path::Path;
-use std::process::{exit};
+use crossterm::cursor;
+use crossterm::cursor::MoveTo;
+use crossterm::event::KeyEvent;
+use crossterm::event::KeyModifiers;
+use crossterm::execute;
+use crossterm::queue;
+use crossterm::style::Print;
+use crossterm::terminal;
+use crossterm::terminal::Clear;
+use crossterm::terminal::ClearType;
+use crossterm::terminal::disable_raw_mode;
+use crossterm::terminal::enable_raw_mode;
+use crossterm::event::{read, Event, KeyCode};
 use ropey::Rope;
 use std::path::PathBuf;
 use std::{env, io};
 use std::io::{BufReader, Write};
-use termion::input::TermRead;
-use termion::raw::IntoRawMode;
-use termion::event::Key;
 
 impl From<std::io::Error> for EditorErr{
     fn from(e: std::io::Error)->Self{
@@ -26,6 +35,7 @@ enum EditorErr{
     Dirty(BufferIdx),
     Msg(String),
     Log(String),
+    Quit,
 }
 
 struct Logger{
@@ -296,19 +306,20 @@ impl CmdLine{
         self.cursor = 0;
         self.input.clear();
         *mode = Mode::Normal;
-        write!(out, "{}{}",termion::cursor::Goto(1, self.pos_y+1), s)?;
+        queue!(out, MoveTo(1, self.pos_y), Print(s))?;
         Ok(())
     }
     fn draw(&self, mode: Mode)->io::Result<()>{
         let mut out = io::stdout().lock();
         match mode{
             Mode::Command =>{
-                write!(out, "{}{}",termion::cursor::Goto(1, self.pos_y+1), termion::clear::CurrentLine)?;
-                write!(out, "{}:{}",termion::cursor::Goto(1,self.pos_y+1), self.input)?;
+                queue!(out, MoveTo(0, self.pos_y), Clear(ClearType::CurrentLine))?;
+                let s = format!(":{}",self.input);
+                queue!(out, MoveTo(0, self.pos_y), Print(s))?;
             }
-            Mode::Normal | Mode::Insert => write!{out, "{}{}",termion::cursor::Goto(1, self.pos_y+1), termion::clear::CurrentLine}?,
+            Mode::Normal | Mode::Insert => queue!(out, MoveTo(0, self.pos_y), Clear(ClearType::CurrentLine))?,
         }
-        out.flush()
+        Ok(())
     }
 }
 
@@ -352,7 +363,7 @@ impl View{
     fn draw_status_bar(&self, idx: BufferIdx, buffers: &Buffers, mode: Mode)->io::Result<()>{
         let buffer = buffers.get(idx);
         let mut out = io::stdout().lock();
-        write!(out, "{}", termion::cursor::Goto(self.pos_x+1, self.pos_y+1))?;
+        queue!(out, MoveTo(self.pos_x, self.pos_y))?;
         let mut path = "SCRATCH";
         if !buffer.check_flag(Buffer::SCRATCH){
             if let Some(p) = &buffer.file{
@@ -366,7 +377,10 @@ impl View{
             Mode::Insert  => "INS",
             _ => "NOR",
         };
-        write!(out, " {mode_str} {} {path}", idx.idx)?;
+        let s = format!(" {mode_str} {} {path}",idx.idx);
+        let s = format!("{:<width$}", s, width = self.width as usize);
+        queue!(out, Print(s))?;
+        // execute!(out, Print(s))?;
         Ok(())
     }
     fn draw_line_numbers(&self, views: &Views, parent_vidx: ViewIdx) -> io::Result<()> {
@@ -379,11 +393,11 @@ impl View{
         let height = self.height as usize;
         let width = self.width as usize;
         for row in 0..height+1{
-            let screen_y = self.pos_y + row as u16 + 1;
-            let line_num = start + row + 1;
+            let screen_y = self.pos_y + row as u16;
+            let line_num = start + row;
 
-            write!( out, "{}", termion::cursor::Goto(self.pos_x + 1, screen_y))?;
-            write!(out, "{:>width$} ", line_num, width = width.saturating_sub(1))?;
+            let s = format!("{:>width$} ", line_num, width = width.saturating_sub(1));
+            queue!(out, MoveTo(self.pos_x, screen_y), Print(s))?;
         }
         Ok(())
     }
@@ -400,36 +414,35 @@ impl View{
         let start = self.off;
 
         for row in self.dirty.iter(){
-            write!(out, "{}", termion::cursor::Goto(self.pos_x+1, self.pos_y + *row as u16 + 1))?;
+            queue!(out, MoveTo(self.pos_x, self.pos_y + *row as u16))?;
             let line_index = start + row;
             if let Some(line) = buffer.buf.get_line(line_index){
                 let end = usize::min(self.width as usize, line.len_chars());
                 let slice = line.slice(..end.saturating_sub(1));//off by one if not -1 totally didnt spend 2 days trying to find it
-                write!(out, "{}",slice)?;
+                queue!(out, Print(slice))?;
                 let remaining = self.width as usize - slice.len_chars();
                 for _ in 0..remaining{
-                    write!(out, " ")?;
+                    queue!(out, Print(" "))?;
                 }
             }else{
                 for _ in 0..self.width{
-                    write!(out, " ")?;
+                    queue!(out, Print(" "))?;
                 }
             }
         }
         self.dirty.clear();
         let screen_y = self.pos_y + self.y.saturating_sub(self.off) as u16;
         let screen_x = self.pos_x + self.x as u16;
-        write!(out, "{}", termion::cursor::Goto(screen_x+1, screen_y+1))?;
-        out.flush()?;
+        queue!(out, MoveTo(screen_x, screen_y))?;
         Ok(())
     }
     fn scroll(&mut self, buffer: &mut Buffer){
         if self.y < self.off{
             self.off = self.y;
-            self.dirty.extend(0..self.height as usize + 1);
+            self.dirty.extend(0..self.height as usize +1);
         } else if self.y > self.off + self.height as usize{
             self.off = self.y - self.height as usize;
-            self.dirty.extend(0..self.height as usize + 1);
+            self.dirty.extend(0..self.height as usize +1);
         }
         if let Some(line) = buffer.buf.get_line(self.y){
             if line.len_chars() > 0 {
@@ -550,7 +563,7 @@ impl Group{
         p.pos_y = pos_y;
         p.width = width;
         p.height = height;
-        p.dirty.extend(0..p.height as usize +1);
+        p.dirty.extend(0..p.height as usize+1);
     }
 }
 
@@ -640,13 +653,13 @@ impl Node{
             };
             let mut remainder = {
                 match direction {
-                    SplitDirection::Vertical=>(h-1)/children.len()as u16%h,
+                    SplitDirection::Vertical=>h/children.len()as u16%h,
                     SplitDirection::Horizontal=>w/children.len()as u16%w,
                 }
             };
             let height = {
                 match direction{
-                    SplitDirection::Horizontal=>(h as usize-1)/children.len(),
+                    SplitDirection::Horizontal=>h as usize/children.len(),
                     SplitDirection::Vertical=>h as usize,
                 }
             };
@@ -725,6 +738,7 @@ enum Cmd{
     CmdInsert(char),
     CmdBackspace,
     CmdMoveLeft,
+    CmdExec,
     CmdMoveRight,
     InsertChar(char),
     NewLine,
@@ -755,56 +769,76 @@ enum Cmd{
     NoOp,
 }
 
-fn key_to_cmd(key: Key, mode: &Mode)->Cmd{
-    match key{
-        Key::Esc => Cmd::EnterModeNormal,
-        _ => {
-            match mode{
-                Mode::Normal=>{
-                    match key{
-                        Key::Char('i') => Cmd::EnterModeInsert,
-                        Key::Char(':') => Cmd::EnterModeCommand,
-                        Key::Char('u') => Cmd::Undo,
-                        Key::Char('U') => Cmd::Redo,
-                        Key::Char('h') | Key::Left => Cmd::MoveLeft,
-                        Key::Char('j') | Key::Down => Cmd::MoveDown,
-                        Key::Char('k') | Key::Up => Cmd::MoveUp,
-                        Key::Char('l') | Key::Right => Cmd::MoveRight,
-                        Key::Ctrl('h') | Key::CtrlLeft => Cmd::FocusLeft,
-                        Key::Ctrl('j') | Key::CtrlDown=> Cmd::FocusDown,
-                        Key::Ctrl('k') | Key::CtrlUp => Cmd::FocusUp,
-                        Key::Ctrl('l') | Key::CtrlRight => Cmd::FocusRight,
-                        _ => Cmd::NoOp,
-                    }
-                },
-                Mode::Insert=>{
-                    match key{
-                        Key::Up    => Cmd::MoveUp,
-                        Key::Down  => Cmd::MoveDown,
-                        Key::Left  => Cmd::MoveLeft,
-                        Key::Right => Cmd::MoveRight,
-                        Key::Char('\n') => Cmd::NewLine,
-                        Key::Char(c) if !c.is_control() => Cmd::InsertChar(c),
-                        Key::Backspace => Cmd::Backspace,
-                        _ => Cmd::NoOp,
-                    }
-                },
-                Mode::Command=>{
-                    match key{
-                        Key::Left => Cmd::CmdMoveLeft,
-                        Key::Right => Cmd::CmdMoveRight,
-                        Key::Backspace => Cmd::CmdBackspace,
-                        Key::Char(c) => Cmd::CmdInsert(c),
-                        _ => Cmd::NoOp
+fn key_to_cmd(key: KeyEvent, mode: &Mode) -> Cmd {
+    if key.code == KeyCode::Esc{
+        return Cmd::EnterModeNormal;
+    }
+    match mode {
+        Mode::Normal => {
+            match key.code{
+                KeyCode::Char('i') => Cmd::EnterModeInsert,
+                KeyCode::Char(':') => Cmd::EnterModeCommand,
+                KeyCode::Char('u') => Cmd::Undo,
+                KeyCode::Char('U') => Cmd::Redo,
+                KeyCode::Char('h') | KeyCode::Left => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        Cmd::FocusLeft
+                    } else {
+                        Cmd::MoveLeft
                     }
                 }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        Cmd::FocusDown
+                    } else {
+                        Cmd::MoveDown
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        Cmd::FocusUp
+                    } else {
+                        Cmd::MoveUp
+                    }
+                }
+                KeyCode::Char('l') | KeyCode::Right => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        Cmd::FocusRight
+                    } else {
+                        Cmd::MoveRight
+                    }
+                }
+                _ => Cmd::NoOp,
             }
         }
+
+        Mode::Insert => match key.code {
+            KeyCode::Up => Cmd::MoveUp,
+            KeyCode::Down => Cmd::MoveDown,
+            KeyCode::Left => Cmd::MoveLeft,
+            KeyCode::Right => Cmd::MoveRight,
+            KeyCode::Enter => Cmd::NewLine,
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Cmd::InsertChar(c)
+            }
+            KeyCode::Backspace => Cmd::Backspace,
+            _ => Cmd::NoOp,
+        },
+
+        Mode::Command => match key.code {
+            KeyCode::Left => Cmd::CmdMoveLeft,
+            KeyCode::Right => Cmd::CmdMoveRight,
+            KeyCode::Backspace => Cmd::CmdBackspace,
+            KeyCode::Enter => Cmd::CmdExec,
+            KeyCode::Char(c) => Cmd::CmdInsert(c),
+            _ => Cmd::NoOp,
+        },
     }
 }
 
 fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, views: &mut Views, buffers: &mut Buffers, groups: &mut Groups, cmd: Cmd, mode: &mut Mode)->Result<(), EditorErr>{
     fn enter_normal(cmd_line: &mut CmdLine, mode: &mut Mode){
+        queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
         cmd_line.cursor = 0;
         *mode = Mode::Normal;
     }
@@ -887,6 +921,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             Ok(())
         }
         Cmd::EnterModeInsert => {
+            queue!(stdout(), cursor::SetCursorStyle::SteadyBar)?;
             *mode = Mode::Insert;
             cmd_line.input.clear();
             cmd_line.draw(*mode)?;
@@ -894,13 +929,11 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             Ok(())
         }
         Cmd::EnterModeNormal => {
-            *mode = Mode::Normal;
-            cmd_line.input.clear();
-            cmd_line.draw(*mode)?;
-            cmd_line.cursor = 0;
+            enter_normal(cmd_line, mode);
             Ok(())
         }
         Cmd::EnterModeCommand => {
+            queue!(stdout(), cursor::SetCursorStyle::SteadyBar).unwrap();
             *mode = Mode::Command;
             cmd_line.input.clear();
             cmd_line.draw(*mode)?;
@@ -1070,29 +1103,27 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             let gidx = groups.push(Group::new(views, view, &[ViewKind::StatusBar, ViewKind::LineNumber]));
             let parent = get_parent_idx(nodes, focus);
             if let Some(p) = parent{
-            let view = views.get_mut(view);
-            view.dirty.extend(0..view.height as usize +1);
-            Node::add_leaf(p, nodes, views, groups, gidx);
-            focus_next(nodes, focus);
-            cmd_line.cursor = 0;
-            *mode = Mode::Normal;
+                let view = views.get_mut(view);
+                view.dirty.extend(0..view.height as usize);
+                Node::add_leaf(p, nodes, views, groups, gidx);
+                focus_next(nodes, focus);
+                enter_normal(cmd_line, mode);
             }
             Ok(())
         }
         Cmd::Vsplit=>{
             let group = group.clone();
             let view = views.get_mut(groups.get(group).parent); 
-            view.dirty.extend(0..view.height as usize +1);
+            view.dirty.extend(0..view.height as usize);
             Node::leaf_to_container(*focus, nodes, groups, SplitDirection::Vertical);
             Node::add_leaf(*focus, nodes, views, groups, group);
             let parent = views.push(View::new(Some(SCRATCH), ViewKind::Text));
             let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
             *focus = Node::add_leaf(*focus, nodes, views, groups, gidx);
             let view = views.get_mut(groups.get(gidx).parent);
-            view.dirty.extend(0..view.height as usize +1);
+            view.dirty.extend(0..view.height as usize);
             focus_next(nodes, focus);
-            cmd_line.cursor = 0;
-            *mode = Mode::Normal;
+            enter_normal(cmd_line, mode);
             Ok(())
         }
         Cmd::Hsplit=>{
@@ -1103,10 +1134,9 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
             *focus = Node::add_leaf(*focus, nodes, views, groups, gidx);
             let view = views.get_mut(groups.get(gidx).parent);
-            view.dirty.extend(0..view.height as usize +1);
+            view.dirty.extend(0..view.height as usize);
             focus_next(nodes, focus);
-            cmd_line.cursor = 0;
-            *mode = Mode::Normal;
+            enter_normal(cmd_line, mode);
             Ok(())
         }
         Cmd::ViewClose=>{
@@ -1154,7 +1184,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                     *focus = children[*f];
                 }
             }
-            write!(stdout(), "{}",termion::clear::All)?;
+            queue!(stdout(), Clear(ClearType::All))?;
             let parent = get_parent_idx(nodes, focus);//if you forget to recalc one last time scroll stops working properly if there is only one view
             if let Some(p) = parent{
                 Node::recalc(p, nodes, views, groups, None, None);
@@ -1226,19 +1256,19 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             enter_normal(cmd_line, mode);
             Ok(())
         }
-        Cmd::CmdInsert(c)=>{
-            if c != '\n' {
-                cmd_line.insert(c);
-                cmd_line.draw(*mode)?;
-            }else{
-                let input = cmd_line.input.clone();
-                match parse_cmd(input){
-                    Ok(parsed_cmd) => exec_cmd(nodes, focus, cmd_line, views, buffers, groups, parsed_cmd, mode)?,
-                    Err(e) => {
-                        cmd_line.draw_error(mode, &format!("{:?}", e))?;
-                    }
+        Cmd::CmdExec=>{
+            let input = cmd_line.input.clone();
+            match parse_cmd(input){
+                Ok(parsed_cmd) => exec_cmd(nodes, focus, cmd_line, views, buffers, groups, parsed_cmd, mode)?,
+                Err(e) => {
+                    cmd_line.draw_error(mode, &format!("{:?}", e))?;
                 }
             }
+            Ok(())
+        }
+        Cmd::CmdInsert(c)=>{
+            cmd_line.insert(c);
+            cmd_line.draw(*mode)?;
             Ok(())
         },
         Cmd::CmdBackspace=>{
@@ -1276,9 +1306,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                     return Err(EditorErr::Msg("new file needs name".into()));
                 }
             }
-            cmd_line.input.clear();
-            cmd_line.cursor = 0;
-            *mode = Mode::Normal;
+            enter_normal(cmd_line, mode);
             Ok(())
         },
         Cmd::Close(buffer_idx, force)=>{
@@ -1311,12 +1339,11 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                     }
                     buffers.remove(&mut idx);
                 }
-                curr_view.dirty.extend(0..curr_view.height as usize +1);
+                curr_view.dirty.extend(0..curr_view.height as usize+1);
             }else{
                 return Err(EditorErr::Msg("will not close special buffer: 0".into()));
             }
-            cmd_line.cursor = 0;
-            *mode = Mode::Normal;
+            enter_normal(cmd_line, mode);
             Ok(())
         }
         Cmd::Quit(force)=>{
@@ -1330,7 +1357,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                     return Err(EditorErr::Msg(format!("cant quit dirty buffers: {:?}",dirty)));
                 }
             }
-            exit(1);
+            Err(EditorErr::Quit)
         },
         Cmd::SwitchBuffer(idx)=>{
             if idx.idx < buffers.len(){
@@ -1350,10 +1377,8 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                 curr_view.x = 0;
                 curr_view.off = 0;
                 curr_view.prefered_x = 0;
-                curr_view.dirty.extend(0..curr_view.height as usize +1);
-                cmd_line.input.clear();
-                cmd_line.cursor = 0;
-                *mode = Mode::Normal;
+                curr_view.dirty.extend(0..curr_view.height as usize+1);
+                enter_normal(cmd_line, mode);
             }else{
                 return Err(EditorErr::InvalidBuffer);
             }
@@ -1373,11 +1398,9 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             curr_view.x = 0;
             curr_view.y = 0;
             curr_view.prefered_x = 0;
-            curr_view.dirty.extend(0..curr_view.height as usize +1);
+            curr_view.dirty.extend(0..curr_view.height as usize);
             curr_view.buf = Some(buffer);
-            cmd_line.input.clear();
-            cmd_line.cursor = 0;
-            *mode = Mode::Normal;
+            enter_normal(cmd_line, mode);
             Ok(())
         }
         Cmd::NoOp=> Ok(()),
@@ -1476,7 +1499,7 @@ fn main()->io::Result<()>{
     let mut buffers = Buffers::new();
     let mut groups = Groups::new();
     let mut nodes = Nodes{data:vec![], free:vec![]};
-    let (width, height) = termion::terminal_size().unwrap();
+    let (width, height) = terminal::size().unwrap();
     let mut cmd_line = CmdLine::new(height);
     let height = height -2;
     let mut mode = Mode::Normal;
@@ -1496,34 +1519,38 @@ fn main()->io::Result<()>{
             let gidx = groups.push(Group::new(&mut views, vidx, &[ViewKind::StatusBar, ViewKind::LineNumber]));
             Node::add_leaf(root, &mut nodes, &mut views, &mut groups, gidx);
     }
-    let input = io::stdin();
-    let mut out = io::stdout().into_raw_mode()?;
-    write!(out, "{}",termion::clear::All)?;
+    enable_raw_mode()?;
+    execute!(stdout(), Clear(ClearType::All))?;
 
     //inital draw
     cmd_line.draw(mode)?;
     draw(root, &mut nodes, &mut views, &buffers, &mut groups, mode).unwrap();
     let mut focus = NodeIdx{idx:1};
 
-    for key in input.keys(){
-        let cmd = key_to_cmd(key?, &mode);
-        match exec_cmd(&mut nodes, &mut focus, &mut cmd_line, &mut views, &mut buffers, &mut groups, cmd, &mut mode){
-            Err(EditorErr::Msg(msg))=>cmd_line.draw_error(&mut mode, &msg)?,
-            Err(EditorErr::Dirty(idx))=>cmd_line.draw_error(&mut mode, &format!("buffer:{} is dirty",idx.idx))?,
-            Err(EditorErr::InvalidBuffer)=>cmd_line.draw_error(&mut mode, "index is invalid")?,
-            Err(EditorErr::ReadOnly(idx))=>cmd_line.draw_error(&mut mode, &format!("buffer:{} is read only",idx.idx))?,
-            Err(EditorErr::Io(_))=>exit(1),
-            Err(EditorErr::Log(msg))=>logger.log(&msg),
-            Ok(_) => {},
+    loop{
+        if let Event::Key(event) = read()?{
+            let cmd = key_to_cmd(event, &mode);
+            match exec_cmd(&mut nodes, &mut focus, &mut cmd_line, &mut views, &mut buffers, &mut groups, cmd, &mut mode){
+                Err(EditorErr::Msg(msg))=>cmd_line.draw_error(&mut mode, &msg)?,
+                Err(EditorErr::Dirty(idx))=>cmd_line.draw_error(&mut mode, &format!("buffer:{} is dirty",idx.idx))?,
+                Err(EditorErr::InvalidBuffer)=>cmd_line.draw_error(&mut mode, "index is invalid")?,
+                Err(EditorErr::ReadOnly(idx))=>cmd_line.draw_error(&mut mode, &format!("buffer:{} is read only",idx.idx))?,
+                Err(EditorErr::Log(msg))=>logger.log(&msg),
+                Err(EditorErr::Io(_))=>break,
+                Err(EditorErr::Quit)=>break,
+                Ok(_) => {},
+            }
+            draw(root, &mut nodes, &mut views, &buffers, &mut groups, mode).unwrap();
+            match mode{
+                Mode::Command =>{
+                    cmd_line.draw(mode)?
+                } 
+                _ => {},
+            }
         }
-        draw(root, &mut nodes, &mut views, &buffers, &mut groups, mode).unwrap();
-        match mode{
-            Mode::Command =>{
-                cmd_line.draw(mode)?
-            } 
-            _ => {},
-        }
+        stdout().flush()?;
     }
-    write!(out, "{}",termion::clear::All)?;
+    disable_raw_mode().unwrap();
+    execute!(stdout(), Clear(ClearType::All)).unwrap();
     Ok(())
 }

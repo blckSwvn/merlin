@@ -1,16 +1,23 @@
 # TODO
 
+### current
+
+cursor derived from buffer rather than storing x, y explicility
 add floating to layout engine
-replace crossterm with termion
 
 ---
 
-### far future
+### future
 copy paste, visual mode
+replacing arrays of structs(Aos) with struct of arrays(Soa)
 handle resizing of term
-registers,
-vim or helix like motions
+vim motions
 color highlighting
 
+---
+
+### maybe/unclear
 marks
+regex/fuzzy finding
 sessions
+registers
