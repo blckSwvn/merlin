@@ -1,4 +1,5 @@
-# Jay a simple text editor
+# merlin
 
 ---
-a
+
+An work in progress text editor

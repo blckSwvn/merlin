@@ -191,14 +191,10 @@ impl Groups{
 enum Edit{
     Insert{
         idx:usize,
-        cursor_x:usize,
-        cursor_y:usize,
         text:String,
     },
     Delete{
         idx:usize,
-        cursor_x:usize,
-        cursor_y:usize,
         text:String,
     },
 }
@@ -259,8 +255,8 @@ impl Buffer{
         })
     }
     fn insert(&mut self, view: &View, c: char){
-        let cursor_char = view.cursor_char(self);
-        self.buf.insert_char(cursor_char, c);
+        // let cursor_char = view.cursor_char(self);
+        self.buf.insert_char(view.cursor, c);
     }
     fn save(&mut self, new: Option<String>)->io::Result<()>{
         if let Some(new) = new{
@@ -327,8 +323,7 @@ impl CmdLine{
 struct View{
     buf: Option<BufferIdx>,
     dirty: Vec<usize>,
-    y: usize,
-    x: usize,
+    cursor: usize,
     prefered_x: usize,
     off: usize,
     width: u16,
@@ -348,9 +343,8 @@ impl View{
     fn new(buf: Option<BufferIdx>, kind: ViewKind)->Self{
         Self{
             buf,
-            x: 0,
+            cursor: 0,
             prefered_x: 0,
-            y: 0,
             off: 0,
             pos_x: 0,
             pos_y: 0,
@@ -431,31 +425,41 @@ impl View{
             }
         }
         self.dirty.clear();
-        let screen_y = self.pos_y + self.y.saturating_sub(self.off) as u16;
-        let screen_x = self.pos_x + self.x as u16;
-        queue!(out, MoveTo(screen_x, screen_y))?;
+        let line = buffer.buf.char_to_line(self.cursor);
+        let screen_y = line.saturating_sub(self.off) + self.pos_y as usize;
+        let line_start = buffer.buf.line_to_char(line);
+        let col = self.cursor - line_start;
+        queue!(out, MoveTo(col as u16 + self.pos_x, screen_y as u16))?;
         Ok(())
     }
     fn scroll(&mut self, buffer: &mut Buffer){
-        if self.y < self.off{
-            self.off = self.y;
-            self.dirty.extend(0..self.height as usize +1);
-        } else if self.y > self.off + self.height as usize{
-            self.off = self.y - self.height as usize;
+        let line = buffer.buf.char_to_line(self.cursor);
+        let line_start = buffer.buf.line_to_char(line);
+        if line < self.off{
+            self.off = line;
+            self.dirty.extend(0..self.height as usize);
+        } else if line > self.off + self.height as usize{
+            self.off = line - self.height as usize;
             self.dirty.extend(0..self.height as usize +1);
         }
-        if let Some(line) = buffer.buf.get_line(self.y){
+        let mut col = self.cursor - line_start;
+        if let Some(line) = buffer.buf.get_line(line){
             if line.len_chars() > 0 {
-                self.x = usize::min(self.x, line.len_chars().saturating_sub(1));
+                col = col.min(line.len_chars().saturating_sub(1));
+                // self.x = usize::min(self.x, line.len_chars().saturating_sub(1));
             }else{
-                self.x = 0;
+                col = 0;
             }
         }else{
-            self.x = 0;
+            col = 0;
         }
+        self.cursor = line_start + col;
     }
-    fn cursor_char(&self, buffer: &Buffer) -> usize {
-        buffer.buf.line_to_char(self.y)+self.x
+    fn cursor_to_screen(&mut self, buffers: &Buffers) -> (usize, usize){//screen cursor
+        let b = buffers.get(self.buf.unwrap());
+            let line = b.buf.char_to_line(self.cursor);
+            let line_start = b.buf.line_to_char(line);
+            (line, self.cursor - line_start)
     }
 }
 
@@ -497,13 +501,13 @@ impl Group{
     fn sync(&self, views: &mut Views){
         let (y, off) = {
             let parent = &views.get(self.parent);
-            (parent.y, parent.off)
+            (parent.cursor, parent.off)
         };
         for &child in &self.children{
             let child = views.get_mut(child);
             match child.kind{
                 ViewKind::LineNumber=>{
-                    child.y = y;
+                    child.cursor = y;
                     child.off = off;
                 }
                 _ => {},
@@ -941,9 +945,10 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
         }
         Cmd::InsertChar(c)=>{
             buffer.redo.clear();
-            let idx = curr_view.cursor_char(buffer);
-            let cursor_x = curr_view.x;
-            let cursor_y = curr_view.y;
+            // let idx = curr_view.cursor_char(buffer);
+            let idx = curr_view.cursor;
+            // let cursor_x = curr_view.x;
+            // let cursor_y = curr_view.y;
             if let Some(edit) = buffer.undo.last_mut(){
                 match edit{
                     Edit::Insert {idx: c_idx, text, ..}=>{
@@ -954,67 +959,82 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                                 .unwrap_or(text.len());
                             text.insert_str(byte_idx, &c.to_string());
                         }else{
-                            buffer.undo.push(Edit::Insert { idx, cursor_x, cursor_y, text: c.into() });
+                            buffer.undo.push(Edit::Insert{ idx, text: c.into() });
                         }
                     }
                     Edit::Delete {..}=>{
-                        buffer.undo.push(Edit::Insert { idx, cursor_x, cursor_y, text: c.into() });
+                        buffer.undo.push(Edit::Insert{ idx, text: c.into() });
                     }
                 }
             }else{
-                buffer.undo.push(Edit::Insert { idx, cursor_x, cursor_y, text: c.into()});
+                buffer.undo.push(Edit::Insert { idx, text: c.into()});
             }
             buffer.insert(views.get(view), c);
             let view = views.get_mut(view);
-            view.x += 1;
-            view.prefered_x = view.x;
-            view.dirty.push(view.y-view.off);
+            view.cursor += 1;
+            // view.x += 1;
+            // view.prefered_x = view.x;
+            // view.prefered_x = buffer.buf.char
+            let y = buffer.buf.char_to_line(view.cursor);
+            view.dirty.push(y-view.off);
             Ok(())
         },
         Cmd::NewLine=>{
             buffer.redo.clear();
-            let idx = curr_view.cursor_char(buffer);
+            // let idx = curr_view.cursor_char(buffer);
             buffer.insert(&mut curr_view, '\n');
-            buffer.undo.push(Edit::Insert { idx, cursor_x: curr_view.x, cursor_y: curr_view.y, text: "\n".to_string()});
-            curr_view.dirty.extend(curr_view.y-curr_view.off..curr_view.height as usize);
-            curr_view.y += 1;
-            curr_view.x = 0;
+            buffer.undo.push(Edit::Insert{ idx: curr_view.cursor, text: "\n".to_string()});
+            let line = buffer.buf.char_to_line(curr_view.cursor);
+            curr_view.dirty.extend(line-curr_view.off..curr_view.height as usize);
+
+            let line_start = buffer.buf.line_to_char(line); 
+            let col = curr_view.cursor - line_start;
+            let line = line + 1;
+            let line_start = buffer.buf.line_to_char(line);
+            let line_len = buffer.buf.line(line).len_chars();
+            curr_view.cursor = line_start + col.min(line_len.saturating_sub(1));
+            // curr_view.cursor = col - line_start;
             View::scroll(&mut curr_view, buffer);
             Ok(())
         },
         Cmd::Backspace=>{
             buffer.redo.clear();
-            let idx = curr_view.cursor_char(buffer);
-            if idx != 0{
-                let del = buffer.buf.slice(idx-1..idx).to_string();
+            // let idx = curr_view.cursor_char(buffer);
+            if curr_view.cursor != 0{
+                let del = buffer.buf.slice(curr_view.cursor-1..curr_view.cursor).to_string();
                 if let Some(edit) = buffer.undo.last_mut(){
                     match edit{
                         Edit::Insert {..}=>{
-                            buffer.undo.push(Edit::Delete { idx:idx-1, cursor_x: curr_view.x, cursor_y: curr_view.y, text: del });
+                            buffer.undo.push(Edit::Delete { idx:curr_view.cursor-1, text: del });
                         },
                         Edit::Delete { idx: xidx, text, .. }=>{
-                            if *xidx == idx{
+                            if *xidx == curr_view.cursor{
                                 *xidx -= 1;
                                 text.insert_str(0, &del);
                             }else{
-                                buffer.undo.push(Edit::Delete { idx: idx - 1, cursor_x: curr_view.x, cursor_y: curr_view.y, text: del});
+                                buffer.undo.push(Edit::Delete { idx: curr_view.cursor - 1, text: del});
                             }
                         }
                     }
                 }else{
-                    buffer.undo.push(Edit::Delete { idx: idx-1, cursor_x: curr_view.x, cursor_y: curr_view.y, text: del});
+                    buffer.undo.push(Edit::Delete { idx: curr_view.cursor-1, text: del});
                 }
-                buffer.buf.remove(idx - 1..idx);
-                if curr_view.x > 0{
-                    curr_view.x -= 1;
-                    curr_view.prefered_x = curr_view.x;
-                    curr_view.dirty.push(curr_view.y-curr_view.off);
+                buffer.buf.remove(curr_view.cursor- 1..curr_view.cursor);
+                let line = buffer.buf.char_to_line(curr_view.cursor);
+                let line_start = buffer.buf.line_to_char(line);
+                let col = curr_view.cursor - line_start;
+                if col > line_start{
+                    let col = col - 1;
+                    curr_view.prefered_x = col;
+                    curr_view.dirty.push(line-curr_view.off);
                 }else{
-                    curr_view.y = curr_view.y.saturating_sub(1);
-                    if let Some(line) = buffer.buf.get_line(curr_view.y-curr_view.off){
-                        curr_view.x = line.len_chars();
-                    }
-                    curr_view.dirty.extend(curr_view.y..curr_view.off+curr_view.height as usize);
+                    let line = line.saturating_sub(1);
+                    // line.saturating_sub(1);
+                    // if let Some(line) = buffer.buf.get_line(line-curr_view.off){
+                    //     let line_start = buffer.buf.line_to_char(line);
+                    //     curr_view.x = line.len_chars();
+                    // }
+                    curr_view.dirty.extend(line..curr_view.off+curr_view.height as usize);
                 }
                 View::scroll(&mut curr_view, buffer);
             }
@@ -1023,22 +1043,22 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
         Cmd::Undo=>{
             if let Some(edit) = buffer.undo.pop(){
                 match edit{
-                    Edit::Insert { idx, cursor_x, cursor_y, text, }=>{
-                        buffer.redo.push(Edit::Delete { idx, cursor_y, cursor_x, text: text.clone() });
+                    Edit::Insert { idx, text, }=>{
+                        buffer.redo.push(Edit::Delete { idx, text: text.clone() });
                         buffer.buf.remove(idx..idx + text.chars().count());
-                        curr_view.y = cursor_y;
-                        curr_view.x = cursor_x;
-                        curr_view.prefered_x = curr_view.x;
+                        curr_view.cursor = idx;
                     },
-                    Edit::Delete { idx, cursor_x, cursor_y, text, }=>{
-                        buffer.redo.push(Edit::Insert {idx, cursor_x, cursor_y, text: text.clone()});
+                    Edit::Delete { idx, text, }=>{
+                        buffer.redo.push(Edit::Insert {idx, text: text.clone()});
                         buffer.buf.insert(idx, &text);
-                        curr_view.y = cursor_y;
-                        curr_view.x = cursor_x;
-                        curr_view.prefered_x = curr_view.x;
+                        curr_view.cursor = idx;
                     },
                 }
-                curr_view.dirty.extend(curr_view.y-curr_view.off..curr_view.height as usize);
+                let line = buffer.buf.char_to_line(curr_view.cursor);
+                let line_start = buffer.buf.line_to_char(line);
+                let col = curr_view.cursor - line_start;
+                curr_view.prefered_x = col;
+                curr_view.dirty.extend(line-curr_view.off..curr_view.height as usize);
                 return Ok(())
             }
             Err(EditorErr::Msg("undo stack is empty".to_string()))
@@ -1046,56 +1066,79 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
         Cmd::Redo => {
             if let Some(edit) = buffer.redo.pop() {
                 match edit {
-                    Edit::Insert { idx, cursor_x, cursor_y, text } => {
+                    Edit::Insert { idx, text } => {
                         buffer.buf.remove(idx..idx + text.chars().count());
-                        curr_view.x = curr_view.x.saturating_sub(text.chars().count());
-                        curr_view.y = cursor_y;
-                        curr_view.prefered_x = curr_view.x;
-                        buffer.undo.push(Edit::Delete{ idx, cursor_x, cursor_y, text });
+                        curr_view.cursor = idx;
+                        buffer.undo.push(Edit::Delete{idx, text});
                     }
-                    Edit::Delete { idx, cursor_x, cursor_y, text } => {
+                    Edit::Delete { idx, text } => {
                         buffer.buf.insert(idx, &text);
-                        curr_view.y = cursor_y;
-                        curr_view.x = cursor_x;
-                        curr_view.prefered_x = curr_view.x;
-                        buffer.undo.push(Edit::Insert{ idx, cursor_x, cursor_y, text });
+                        curr_view.cursor = idx;
+                        buffer.undo.push(Edit::Insert{ idx, text });
                     }
                 }
-                curr_view.dirty.extend(curr_view.y-curr_view.off..curr_view.height as usize);
+                let line = buffer.buf.char_to_line(curr_view.cursor);
+                let line_start = buffer.buf.line_to_char(line);
+                let col = curr_view.cursor - line_start;
+                curr_view.prefered_x = col;
+                curr_view.dirty.extend(line-curr_view.off..curr_view.height as usize);
                 View::scroll(curr_view, buffer);
                 return Ok(());
             }
             Err(EditorErr::Msg("redo stack is empty".to_string()))
         },
         Cmd::MoveUp=>{
-            curr_view.y = curr_view.y.saturating_sub(1);
-            if let Some(line) = buffer.buf.get_line(curr_view.y){
-                curr_view.x = curr_view.prefered_x.min(line.len_chars());
+            let line = buffer.buf.char_to_line(curr_view.cursor);
+            let line_start = buffer.buf.line_to_char(line);
+            let col = curr_view.cursor - line_start;
+            if line > 0 {
+                let line = line - 1;
+                let line_start = buffer.buf.line_to_char(line);
+                let line_len = buffer.buf.line(line).len_chars();
+                let col = col.min(line_len.saturating_sub(1));
+
+                curr_view.cursor = line_start + col;
             }
             View::scroll(&mut curr_view, buffer);
             Ok(())
         },
         Cmd::MoveDown=>{
-            if buffer.buf.len_lines() > 0{
-                curr_view.y = usize::min(curr_view.y+1, buffer.buf.len_lines().saturating_sub(1));
+            let len_lines = buffer.buf.len_lines();
+            let line = buffer.buf.char_to_line(curr_view.cursor);
+            if line + 1 < len_lines{
+                let col = curr_view.prefered_x;
+                let line = line + 1;
+                let start = buffer.buf.line_to_char(line);
+                let len = buffer.buf.line(line).len_chars();
+                let col = col.min(len.saturating_sub(1));
+                curr_view.cursor = start + col;
+                curr_view.prefered_x = col;
+                View::scroll(&mut curr_view, buffer);
             }
-            if let Some(line) = buffer.buf.get_line(curr_view.y){
-                curr_view.x = curr_view.prefered_x.min(line.len_chars().saturating_sub(1));
-            }
-            View::scroll(&mut curr_view, buffer);
             Ok(())
         },
         Cmd::MoveRight=>{
-            curr_view.x = curr_view.x + 1;
-            if let Some(line) = buffer.buf.get_line(curr_view.y){
-                curr_view.x = curr_view.x.min(line.len_chars().saturating_sub(1));
+            let line = buffer.buf.char_to_line(curr_view.cursor);
+            let line_start = buffer.buf.line_to_char(line);
+            let line_len = buffer.buf.line(line).len_chars();
+            if curr_view.cursor < line_start + line_len.saturating_sub(1){
+                let col = curr_view.cursor - line_start; 
+                let col = col + 1;
+                let col = col.min(buffer.buf.line(line).len_chars().saturating_sub(1));
+                curr_view.prefered_x = col;
+                curr_view.cursor = line_start + col;
             }
-            curr_view.prefered_x = curr_view.x;
             Ok(())
         },
         Cmd::MoveLeft=>{
-            curr_view.x = curr_view.x.saturating_sub(1);
-            curr_view.prefered_x = curr_view.x;
+            let line = buffer.buf.char_to_line(curr_view.cursor);
+            let line_start = buffer.buf.line_to_char(line);
+            let col = curr_view.cursor - line_start;
+            if curr_view.cursor > line_start {
+                let col = col - 1;
+                curr_view.prefered_x = col;
+                curr_view.cursor = line_start + col;
+            }
             Ok(())
         },
         Cmd::Split=>{
@@ -1333,8 +1376,9 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                         curr_view.buf = Some(SCRATCH);
                         cmd_line.input.clear();
                         curr_view.off = 0;
-                        curr_view.x = 0;
-                        curr_view.y = 0;
+                        curr_view.cursor = 0;
+                        // curr_view.x = 0;
+                        // curr_view.y = 0;
                         curr_view.prefered_x = 0;
                     }
                     buffers.remove(&mut idx);
@@ -1373,8 +1417,9 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                     }
                 }
                 curr_view.buf = Some(idx);
-                curr_view.y = 0;
-                curr_view.x = 0;
+                curr_view.cursor = 0;
+                // curr_view.y = 0;
+                // curr_view.x = 0;
                 curr_view.off = 0;
                 curr_view.prefered_x = 0;
                 curr_view.dirty.extend(0..curr_view.height as usize+1);
@@ -1395,8 +1440,9 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                 buffers.push(Buffer::new(None, 0)?)
             };
             curr_view.off = 0;
-            curr_view.x = 0;
-            curr_view.y = 0;
+            curr_view.cursor = 0;
+            // curr_view.x = 0;
+            // curr_view.y = 0;
             curr_view.prefered_x = 0;
             curr_view.dirty.extend(0..curr_view.height as usize);
             curr_view.buf = Some(buffer);
@@ -1540,6 +1586,7 @@ fn main()->io::Result<()>{
                 Err(EditorErr::Quit)=>break,
                 Ok(_) => {},
             }
+            queue!(stdout(), cursor::Hide)?;
             draw(root, &mut nodes, &mut views, &buffers, &mut groups, mode).unwrap();
             match mode{
                 Mode::Command =>{
@@ -1547,6 +1594,7 @@ fn main()->io::Result<()>{
                 } 
                 _ => {},
             }
+            queue!(stdout(), cursor::Show)?;
         }
         stdout().flush()?;
     }
