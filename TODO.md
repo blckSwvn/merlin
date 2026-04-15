@@ -2,7 +2,6 @@
 
 ### current
 
-cursor derived from buffer rather than storing x, y explicility
 add floating to layout engine
 
 ---
