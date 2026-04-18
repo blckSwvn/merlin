@@ -4,6 +4,7 @@ use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::stdout;
 use std::path::Path;
+use std::sync::Mutex;
 use std::usize;
 use std::vec;
 use crossterm::cursor;
@@ -41,21 +42,50 @@ enum EditorErr{
     Quit,
 }
 
-struct Logger{
-    file: File,
+struct Logger {
+    file: &'static str,
 }
-impl Logger{
-    fn new(path: &str) -> Self{
-        let file = OpenOptions::new()
+impl Logger {
+    fn log(&self, msg: &str) {
+        let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(path)
+            .open(&self.file)
             .expect("failed to open log file");
-        Self{file}
+        writeln!(file, "{}", msg).expect("failed to write log");
     }
-    fn log(&mut self, msg: &str){
-        let msg = format!("{msg}\n");
-        self.file.write_all(msg.as_bytes()).unwrap();
+}
+fn log(msg: &str){
+    LOGGER.lock().unwrap().log(msg);
+}
+static LOGGER: Mutex<Logger> = Mutex::new(Logger {
+    file: "log",
+});
+
+trait ExpectLog<T> {
+    fn expect_log(self, msg: &str)->T;
+}
+impl<T> ExpectLog<T> for Option<T> {
+    fn expect_log(self, msg: &str)->T {
+        match self{
+            Some(v) => v,
+            None =>{
+                log(msg);
+                panic!("{}",msg);
+            }
+        }
+    }
+}
+
+impl<T, E: std::fmt::Debug> ExpectLog<T> for Result<T, E> {
+    fn expect_log(self, msg: &str) -> T {
+        match self {
+            Ok(v) => v,
+            Err(e) => {
+                log(&format!("{}: {:?}", msg, e));
+                panic!("{}: {:?}", msg, e);
+            }
+        }
     }
 }
 
@@ -447,10 +477,13 @@ impl Nodes{
     fn new_leaf(nodes: &mut Nodes, gidx: GroupIdx, parent: NodeIdx, views: &mut Views, groups: &mut Groups, focus: &mut NodeIdx)->NodeIdx{
         let new = Node::Leaf{ parent, gidx, generation: 0};
         let idx = nodes.push(new);
-        if let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(parent.idx).expect("parent is leaf"){
+        if let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(parent.idx).expect_log("parent is leaf"){
             children.push(idx);
             *f = (*f+1)%children.len();
-            *focus = *children.get(*f).unwrap();
+            *focus = *children.get(*f).expect_log("invalid focus 483");
+            while let Node::Branch {children, focus: f, ..} = nodes.data.get(focus.idx).expect_log("idk"){
+                *focus = *children.get(*f).expect_log("children.get is none");
+            }
         }
         reflow(parent, nodes, views, groups, focus);
         idx
@@ -459,9 +492,14 @@ impl Nodes{
     fn new_branch(nodes: &mut Nodes, parent: NodeIdx, views: &mut Views, groups: &mut Groups, reserved: NodeIdx, direction: Direction, focus: &mut NodeIdx)->NodeIdx{
         let new = Node::Branch { parent: Some(parent), direction, generation: 0, focus: 0, pos_x: 0, pos_y: 0, width: 0, height: 0, children: vec![reserved]};
         let idx = nodes.push(new);
-        if let Node::Branch {children, focus, ..} = nodes.data.get_mut(parent.idx).expect("parent is leaf"){
+        if let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(parent.idx).expect("parent is leaf"){
             children.push(idx);
-            *focus = (*focus+1)&children.len();
+            *f = children.len().saturating_sub(1);
+            *focus = *children.get(*f).unwrap();
+            while let Node::Branch {children, focus: f, ..} = nodes.data.get(focus.idx).unwrap(){
+                *focus = *children.get(*f).unwrap();
+            }
+            log(&format!("focus:{}",focus.idx));
         }
         reflow(parent, nodes, views, groups, focus);
         idx
@@ -1092,6 +1130,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             Ok(())
         }
         Cmd::Hsplit=>{
+            enter_normal(cmd_line, mode);
             Ok(())
         }
         Cmd::ViewClose=>{
@@ -1443,7 +1482,6 @@ fn main()->io::Result<()>{
         *w = width;
         *h = height;
     }
-    let mut logger = Logger::new("log");
     let mut focus = root;
     {
         buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
@@ -1461,7 +1499,7 @@ fn main()->io::Result<()>{
         reflow(root, &mut nodes, &mut views, &mut groups, &mut focus);
     }
     enable_raw_mode()?;
-    execute!(stdout(), Clear(ClearType::All))?;
+    execute!(stdout(), terminal::EnterAlternateScreen)?;
 
     //inital draw
     cmd_line.draw(mode)?;
@@ -1477,7 +1515,7 @@ fn main()->io::Result<()>{
                 Err(EditorErr::InvalidBuffer)=>cmd_line.draw_error(&mut mode, "index is invalid")?,
                 Err(EditorErr::ReadOnly(idx))=>cmd_line.draw_error(&mut mode, &format!("buffer:{} is read only",idx.idx))?,
                 Err(EditorErr::InvalidFocus)=>cmd_line.draw_error(&mut mode, "invalid focus")?,
-                Err(EditorErr::Log(msg))=>logger.log(&msg),
+                Err(EditorErr::Log(msg))=>log(&msg),
                 Err(EditorErr::Io(_))=>break,
                 Err(EditorErr::Quit)=>break,
                 Ok(_) => {},
@@ -1496,6 +1534,6 @@ fn main()->io::Result<()>{
         stdout().flush()?;
     }
     disable_raw_mode().unwrap();
-    execute!(stdout(), Clear(ClearType::All)).unwrap();
+    execute!(stdout(), terminal::LeaveAlternateScreen).unwrap();
     Ok(())
 }
