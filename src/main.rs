@@ -1,3 +1,4 @@
+use core::panic;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
@@ -444,13 +445,221 @@ struct Nodes{
 }
 
 impl Nodes{
+    fn new_leaf(&mut self, parent: NodeIdx, gidx: GroupIdx, views: &mut Views, groups: &mut Groups)->NodeIdx{
+        let nidx = self.push(Node::Leaf { parent, gidx });
+        let Node::Branch{children, ..} = self.data.get_mut(parent.idx).unwrap()else {panic!()};
+        children.push(nidx);
+        recalc(parent, self, views, groups);
+        nidx
+    }
+    fn new_branch(&mut self, parent: NodeIdx, gidx: GroupIdx, views: &mut Views, groups: &mut Groups, direction: Direction){
+        let new = self.push(Node::Branch {
+            parent: Some(parent),
+            children: vec![],
+            direction,
+            focus: 0, pos_x: 0, pos_y: 0, width: 0, height: 0
+        });
+        let nidx = self.push(Node::Leaf { parent:new, gidx });
+        let Node::Branch{children, ..} = self.data.get_mut(new.idx).unwrap()else {panic!()};
+        children.push(nidx);
+        let Node::Branch {children, focus, ..} = self.data.get_mut(parent.idx).unwrap()else{return;};
+        children.push(new);
+        recalc(parent, self, views, groups);
+        recalc(new, self, views, groups);
+        // let Node::Branch {..} = self.data.get(parent.idx)else{return;};
+    }
+    fn push(&mut self, node: Node)->NodeIdx{
+        if self.free.is_empty(){
+            let idx = self.data.len();
+            self.data.push(node);
+            NodeIdx { idx }
+        }else{
+            let idx = self.free.pop().unwrap();
+            self.data[idx] = node;
+            NodeIdx { idx }
+        }
+    }
+    fn remove(&mut self, nidx: NodeIdx){
+        self.free.push(nidx.idx);
+    }
 }
 
 const ROOT: NodeIdx = NodeIdx{idx: 0};
 fn paint(nidx: NodeIdx, mode: &Mode, nodes: &Nodes, views: &mut Views, groups: &Groups, buffers: &Buffers)->io::Result<()>{
+    let mut out = io::stdout().lock();
+    match nodes.data.get(nidx.idx).unwrap(){
+        Node::Leaf {gidx, ..}=>{
+            let g = groups.get(*gidx);
+            let p = views.get(g.parent);
+            let bidx = p.buf.unwrap_or(SCRATCH);
+            let buffer = buffers.get(p.buf.unwrap());
+            for c in &g.children{
+                let c = views.get(*c);
+                match c.kind{
+                    ViewKind::LineNumber=>{
+                        if p.dirty.is_empty(){continue;}
+                        for row in 0..c.height+1{
+                            let screen_y = p.pos_y + row as u16;
+                            let line_num = p.off + row as usize;
+                            let s = format!("{:>width$} ", line_num, width = (c.width - 1)as usize);
+                            queue!(out, MoveTo(c.pos_x, screen_y), Print(s))?;
+                        }
+                    }
+                    ViewKind::StatusBar=>{
+                        let mut path = "SCRATCH";
+                        if !buffer.check_flag(Buffer::SCRATCH){
+                            if let Some(p) = &buffer.file{
+                                path = p.to_str().unwrap_or("NEW_FILE");
+                            }else{
+                                path = "NEW_FILE";
+                            }
+                        }
+                        let mode_str = match mode{
+                            Mode::Command=> "CMD",
+                            Mode::Insert => "INS",
+                            _ => "NOR",
+                        };
+                        let s = format!("{mode_str} {} {path}", bidx.idx);
+                        let s = format!("{:<width$}", s, width = c.width as usize);
+                        queue!(out, MoveTo(c.pos_x, c.pos_y), Print(s))?;
+                    }
+                    _ => {},
+                }
+            }
+            let p = views.get_mut(g.parent);
+            p.dirty.sort_unstable();
+            p.dirty.dedup();
+            for row in p.dirty.iter(){
+                queue!(out, MoveTo(p.pos_x, p.pos_y + *row as u16))?;
+                let line_idx = p.off + row;
+                if let Some(line) = buffer.buf.get_line(line_idx){
+                    let end = usize::min(p.width as usize, line.len_chars());
+                    let slice = line.slice(..end.saturating_sub(1));
+                    queue!(out, Print(slice))?;
+                    let rem = p.width as usize - slice.len_chars();
+                    for _ in 0..rem{
+                        queue!(out, Print(" "))?;
+                    }
+                }else{
+                    for _ in 0..p.width{
+                        queue!(out, Print(" "))?;
+                    }
+                }
+            }
+            p.dirty.clear();
+            let line = buffer.buf.char_to_line(p.cursor);
+            let screen_y = line.saturating_sub(p.off) + p.pos_y as usize;
+            let line_start = buffer.buf.line_to_char(line);
+            let col = p.cursor - line_start;
+            queue!(out, MoveTo(col as u16 + p.pos_x, screen_y as u16))?;
+        }
+        Node::Branch {children, focus, ..}=>{
+            for (i, c) in children.iter().enumerate(){
+                if i != *focus as usize{
+                    paint(*c, mode, nodes, views, groups, buffers)?;
+                }
+            }
+            let idk = children.get(*focus).unwrap();
+            paint(*idk, mode, nodes, views, groups, buffers)?;
+        }
+    }
+    Ok(())
+}
+
+fn recalc(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &mut Groups){
+    let curr = nidx;
+    let Node::Branch {children, direction, height, width, pos_x, pos_y, ..} = nodes.data.get(curr.idx).unwrap()else{
+        panic!()
+    };
+    let (width, height) = {
+        match direction{
+            Direction::Vertical=> (width/children.len()as u16, *height),
+            Direction::Horizontal=> (*width, height/children.len() as u16),
+        }
+    };
+    let mut pos_x = pos_x.clone();
+    let mut pos_y = pos_y.clone();
+    let direction = direction.clone();
+    let children = children.clone();
+    for c in children.iter(){
+        let c = nodes.data.get_mut(c.idx).unwrap();
+        match c{
+            Node::Branch {width: w, height: h, pos_x: x, pos_y: y, ..}=>{
+                *w = width;
+                *h = height;
+                *x = pos_x;
+                *y = pos_y;
+            }
+            Node::Leaf {gidx, ..}=>{
+                let mut h = height;
+                let mut w = width;
+                let mut y = pos_y;
+                let mut x = pos_x; 
+                let g = groups.get(*gidx);
+                for c in g.children.iter(){
+                    let c = views.get_mut(*c);
+                    match c.kind{
+                        ViewKind::LineNumber=>{
+                            c.pos_x = x;
+                            c.pos_y = y;
+                            c.height = h;
+                            c.width = 5;
+                            w -= 5;
+                            x += 5;
+                        }
+                        ViewKind::StatusBar=>{
+                            c.pos_x = x;
+                            c.pos_y = h;
+                            c.width = w;
+                            c.height = 1;
+                            h -= 1;
+                        }
+                        _ => {},
+                    }
+                }
+                let p = views.get_mut(g.parent);
+                p.height = h;
+                p.width = w;
+                p.pos_x = x;
+                p.pos_y = y;
+                p.dirty.extend(0..p.height as usize+1);
+            }
+        }
+        match direction{
+            Direction::Vertical=>pos_x += width,
+            Direction::Horizontal=>pos_y += height,
+        }
+    }
 }
 
 fn reflow(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &mut Groups, focus: &mut NodeIdx){
+    let mut remove_nodes: Vec<(NodeIdx, usize, NodeIdx)> = vec![];
+    let mut curr = nidx;
+    while let Node::Branch {parent, children, ..} = nodes.data.get(curr.idx).unwrap(){
+        for (c, n) in children.iter().enumerate(){
+            if let Node::Branch {children, ..} = nodes.data.get(n.idx).unwrap(){
+                if children.is_empty(){
+                    remove_nodes.push((curr, c, *n));
+                }
+            }
+        }
+        if children.is_empty(){
+            if let Some(p) = parent{
+                curr = *p;
+            }
+        }else{
+            break;
+        }
+    }
+    for (p, c, n) in remove_nodes.iter(){
+        let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(p.idx).unwrap()else {return;};
+        children.remove(*c);
+        if !children.is_empty(){
+            *f = *f%children.len();
+        }
+        recalc(*p, nodes, views, groups);
+        nodes.remove(*n);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -827,22 +1036,71 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             Ok(())
         },
         Cmd::Split=>{
+            let parent = views.push(View::new(Some(SCRATCH), ViewKind::Text));
+            let gidx = groups.push(Group::new(views, parent, &[ViewKind::LineNumber, ViewKind::StatusBar]));
+            let parent = get_parent(*focus)?;
+            nodes.new_leaf(parent, gidx, views, groups);
+            enter_normal(cmd_line, mode);
+            Ok(())
         }
         Cmd::Vsplit=>{
             enter_normal(cmd_line, mode);
             Ok(())
         }
         Cmd::Hsplit=>{
+            let parent = views.push(View::new(Some(SCRATCH), ViewKind::Text));
+            let gidx = groups.push(Group::new(views, parent, &[ViewKind::LineNumber, ViewKind::StatusBar]));
+            let parent = get_parent(*focus)?;
+            nodes.new_branch(parent, gidx, views, groups, Direction::Horizontal);
+            enter_normal(cmd_line, mode);
+            Ok(())
         }
         Cmd::ViewClose=>{
+            let parent = get_parent(*focus)?;
+            let Node::Branch {parent: p2, children, focus:f, ..} = nodes.data.get_mut(parent.idx).unwrap() else {
+                panic!()
+            };
+            children.remove(*f);
+            if !children.is_empty(){
+                *f = (*f+children.len()-1)%children.len();
+                *focus = *children.get(*f).unwrap();
+                recalc(parent, nodes, views, groups);
+            }else{
+                reflow(parent, nodes, views, groups, focus);
+            }
+            enter_normal(cmd_line, mode);
+            Ok(())
         }
         Cmd::FocusDown=>{
+            enter_normal(cmd_line, mode);
+            Ok(())
         }
         Cmd::FocusUp=>{
+            enter_normal(cmd_line, mode);
+            Ok(())
         }
         Cmd::FocusRight=>{
+            enter_normal(cmd_line, mode);
+            let parent = get_parent(*focus)?;
+            let Node::Branch {children, focus:f, ..} = nodes.data.get_mut(parent.idx).unwrap()else{panic!()};
+            *f = (*f+1)%children.len();
+            *focus = *children.get(*f).unwrap();
+            while let Node::Branch {children, focus:f, ..} = nodes.data.get(focus.idx).unwrap(){
+                *focus = *children.get(*f).unwrap();
+            }
+            Ok(())
         }
         Cmd::FocusLeft=>{
+            enter_normal(cmd_line, mode);
+            let parent = get_parent(*focus)?;
+            let Node::Branch {children, focus:f, ..} = nodes.data.get_mut(parent.idx).unwrap()else{panic!()};
+            *f = (*f+children.len()-1)%children.len();
+            *focus = *children.get(*f).unwrap();
+            while let Node::Branch {children, focus:f, ..} = nodes.data.get(focus.idx).unwrap(){
+                *focus = *children.get(*f).unwrap();
+            }
+            enter_normal(cmd_line, mode);
+            Ok(())
         }
         Cmd::CmdExec=>{
             let input = cmd_line.input.clone();
@@ -1093,8 +1351,8 @@ fn main()->io::Result<()>{
     let height = height -2;
     let mut mode = Mode::Normal;
     let root = {
-        let new = Node::Branch { parent: None, children: vec![], direction: Direction::Vertical, focus: 0, pos_x: 0, pos_y: 0, width, height };
-        nodes.push(new)
+        let root = Node::Branch {parent: None, children: vec![], direction: Direction::Vertical, focus: 0, pos_x: 0, pos_y: 0, width, height };
+        nodes.push(root)
     };
     if let Node::Branch {height: h, width: w, ..} = nodes.data.get_mut(root.idx).unwrap(){
         *w = width;
@@ -1113,9 +1371,13 @@ fn main()->io::Result<()>{
         };
         let vidx = views.push(View::new(Some(bidx), ViewKind::Text));
         let gidx = groups.push(Group::new(&mut views, vidx, &[ViewKind::StatusBar, ViewKind::LineNumber]));
-        focus = Nodes::new_leaf(&mut nodes, gidx, ROOT, &mut views, &mut groups, &mut focus);
-        reflow(root, &mut nodes, &mut views, &mut groups, &mut focus);
+        focus = Nodes::new_leaf(&mut nodes, ROOT, gidx, &mut views, &mut groups);
+        // focus = Nodes::new_leaf(&mut nodes, ROOT, gidx);
+        // focus = Nodes::new_leaf(&mut nodes, gidx, ROOT, &mut views, &mut groups, &mut focus);
+        // reflow(root, &mut nodes, &mut views, &mut groups, &mut focus);
     }
+    recalc(root, &mut nodes, &mut views, &mut groups);
+    reflow(root, &mut nodes, &mut views, &mut groups, &mut focus);
     enable_raw_mode()?;
     execute!(stdout(), terminal::EnterAlternateScreen)?;
 
