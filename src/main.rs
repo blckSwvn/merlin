@@ -62,33 +62,6 @@ static LOGGER: Mutex<Logger> = Mutex::new(Logger {
     file: "log",
 });
 
-trait ExpectLog<T> {
-    fn expect_log(self, msg: &str)->T;
-}
-impl<T> ExpectLog<T> for Option<T> {
-    fn expect_log(self, msg: &str)->T {
-        match self{
-            Some(v) => v,
-            None =>{
-                log(msg);
-                panic!("{}",msg);
-            }
-        }
-    }
-}
-
-impl<T, E: std::fmt::Debug> ExpectLog<T> for Result<T, E> {
-    fn expect_log(self, msg: &str) -> T {
-        match self {
-            Ok(v) => v,
-            Err(e) => {
-                log(&format!("{}: {:?}", msg, e));
-                panic!("{}: {:?}", msg, e);
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BufferIdx{
     idx:usize,
@@ -443,14 +416,12 @@ enum Node{
     Leaf{
         parent: NodeIdx,
         gidx: GroupIdx,
-        generation: u16,
     },
     Branch{
         parent: Option<NodeIdx>,
         children: Vec<NodeIdx>,
         direction: Direction,
         focus: usize,
-        generation: u16,
         pos_x: u16,
         pos_y: u16,
         width: u16,
@@ -466,7 +437,6 @@ enum Direction{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NodeIdx{
     idx:usize,
-    generation:u16,
 }
 struct Nodes{
     data:Vec<Node>,
@@ -475,22 +445,21 @@ struct Nodes{
 
 impl Nodes{
     fn new_leaf(nodes: &mut Nodes, gidx: GroupIdx, parent: NodeIdx, views: &mut Views, groups: &mut Groups, focus: &mut NodeIdx)->NodeIdx{
-        let new = Node::Leaf{ parent, gidx, generation: 0};
+        let new = Node::Leaf{ parent, gidx};
         let idx = nodes.push(new);
-        if let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(parent.idx).expect_log("parent is leaf"){
+        if let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(parent.idx).unwrap(){
             children.push(idx);
             *f = (*f+1)%children.len();
-            *focus = *children.get(*f).expect_log("invalid focus 483");
-            while let Node::Branch {children, focus: f, ..} = nodes.data.get(focus.idx).expect_log("idk"){
-                *focus = *children.get(*f).expect_log("children.get is none");
+            *focus = *children.get(*f).unwrap();
+            while let Node::Branch {children, focus: f, ..} = nodes.data.get(focus.idx).unwrap(){
+                *focus = *children.get(*f).unwrap();
             }
         }
         reflow(parent, nodes, views, groups, focus);
         idx
     }
-    //need to resize and then add children imediately and manually and call reflow on parent
     fn new_branch(nodes: &mut Nodes, parent: NodeIdx, views: &mut Views, groups: &mut Groups, reserved: NodeIdx, direction: Direction, focus: &mut NodeIdx)->NodeIdx{
-        let new = Node::Branch { parent: Some(parent), direction, generation: 0, focus: 0, pos_x: 0, pos_y: 0, width: 0, height: 0, children: vec![reserved]};
+        let new = Node::Branch { parent: Some(parent), direction, focus: 0, pos_x: 0, pos_y: 0, width: 0, height: 0, children: vec![reserved]};
         let idx = nodes.push(new);
         if let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(parent.idx).expect("parent is leaf"){
             children.push(idx);
@@ -501,49 +470,39 @@ impl Nodes{
             }
             log(&format!("focus:{}",focus.idx));
         }
-        reflow(parent, nodes, views, groups, focus);
+        // reflow(parent, nodes, views, groups, focus);
         idx
     }
     fn push(&mut self, new: Node)->NodeIdx{
-        let generation = {
-            match new{
-                Node::Leaf {generation, ..}=>generation,
-                Node::Branch {generation, ..}=>generation,
-            }
-        };
         if self.free.is_empty(){
             self.data.push(new);
-            NodeIdx{ idx:self.data.len().saturating_sub(1), generation: 0 }
+            NodeIdx{ idx:self.data.len().saturating_sub(1)}
         }else{
             let idx = self.free.last_mut().unwrap();
             let old = self.data.get_mut(*idx).unwrap();
             *old = new;
-            NodeIdx { idx: *idx, generation}
+            NodeIdx {idx: *idx}
         }
     }
     fn reserve(&mut self)->NodeIdx{
         if self.free.is_empty(){
-            self.data.push(Node::Leaf { parent: NodeIdx {idx: 0, generation: 0}, gidx: GroupIdx { idx: 0, generation: 0 }, generation:0});
-            NodeIdx{idx:self.data.len().saturating_sub(1), generation: 0}
+            self.data.push(Node::Leaf { parent: NodeIdx {idx: 0}, gidx: GroupIdx { idx: 0, generation: 0 }});
+            NodeIdx{idx:self.data.len().saturating_sub(1)}
         }else{
             let idx = *self.free.last_mut().unwrap();
-            match self.data.get_mut(idx).unwrap(){
-                Node::Leaf {generation, ..}=>*generation = 0,
-                Node::Branch {generation, ..}=>*generation = 0,
-            }
-            NodeIdx { idx, generation:0}
+            // match self.data.get_mut(idx).unwrap(){
+            //     Node::Leaf {generation, ..}=>*generation = 0,
+            //     Node::Branch {generation, ..}=>*generation = 0,
+            // }
+            NodeIdx {idx}
         }
     }
     fn remove(&mut self, nidx: NodeIdx){
-        match self.data.get_mut(nidx.idx).unwrap(){
-            Node::Leaf {generation, ..}=>*generation += 1,
-            Node::Branch {generation, ..}=>*generation += 1,
-        }
         self.free.push(nidx.idx);
     }
 }
 
-const ROOT: NodeIdx = NodeIdx{idx: 0, generation: 0};
+const ROOT: NodeIdx = NodeIdx{idx: 0};
 fn paint(nidx: NodeIdx, mode: &Mode, nodes: &Nodes, views: &mut Views, groups: &Groups, buffers: &Buffers)->io::Result<()>{
     let mut out = io::stdout().lock();
     match nodes.data.get(nidx.idx).unwrap(){
@@ -698,12 +657,20 @@ fn reflow(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &mut Grou
     let mut to_recalc: Vec<NodeIdx> = vec![];
     mark(nidx, &mut rm, &mut to_recalc, nodes);
     for (p, i, n) in rm.iter().rev(){
-        let Node::Branch {focus: f, children, ..} = nodes.data.get_mut(p.idx).unwrap() else {return};
+        let Node::Branch {parent, focus: f, children, ..} = nodes.data.get_mut(p.idx).unwrap() else {return};
         children.remove(*i);
-        *f = (*f+children.len()-1)%children.len();
-        *focus = *children.get(*f).unwrap();
-        while let Node::Branch {focus:f, children, ..} = nodes.data.get(focus.idx).unwrap(){
+        if children.is_empty(){
+            let parent = parent.clone();
+            if let Node::Branch {focus:f, children, ..} = nodes.data.get_mut(parent.unwrap().idx).unwrap(){
+                *f = (*f+children.len()-1)%children.len();
+                *focus = *children.get(*f).unwrap();
+            }
+        }else{
+            *f = (*f+children.len()-1)%children.len();
             *focus = *children.get(*f).unwrap();
+        }
+        while let Node::Branch {focus:f, children, ..} = nodes.data.get(focus.idx).unwrap(){
+            *focus = *children.get(*f).expect("branch is empty during reflow");
         }
         nodes.remove(*n);
     }
@@ -718,30 +685,19 @@ fn reflow(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &mut Grou
         };
         recalc.push(nidx);
         for(c, n) in children.iter().enumerate(){
-            let child = nodes.data.get(n.idx).unwrap();
-            match child{
-                Node::Leaf { generation, .. }=>{
-                    if *generation != n.generation{
-                        rm.push((nidx, c, *n));
-                    }
-                },
-                Node::Branch {children, generation, ..}=>{
-                    if children.is_empty(){
-                        rm.push((nidx, c, *n));
-                    }else if *generation != n.generation{
-                        mark(*n, rm, recalc, nodes);
-                        recalc.push(*n);
-                    }
+            if let Node::Branch {children, ..} = nodes.data.get(n.idx).unwrap(){
+                if children.is_empty(){
+                    rm.push((nidx, c, *n));
+                }
+            }
+            if children.is_empty(){
+                if let Some(p)  = parent{
+                    mark(*p, rm, recalc, nodes);
                 }
             }
         }
-        if children.is_empty(){
-            if let Some(p)  = parent{
-                mark(*p, rm, recalc, nodes);
-            }
-        }
+
     }
-    
 }
 
 #[derive(Clone, Copy)]
@@ -1130,14 +1086,39 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             Ok(())
         }
         Cmd::Hsplit=>{
+            let view = views.push(View::new(Some(SCRATCH), ViewKind::Text));
+            let gidx = groups.push(Group::new(views, view, &[ViewKind::LineNumber, ViewKind::StatusBar]));
+            let parent = get_parent(*focus)?;
+            let new_leaf = nodes.push(Node::Leaf { parent, gidx});
+            let new_parent = nodes.push(Node::Branch{
+                parent: Some(parent),
+                children: vec![new_leaf],
+                direction: Direction::Horizontal,
+                focus: 0, pos_x: 0, pos_y: 0, width: 0, height: 0
+            });
+            if let Node::Leaf {parent, ..} = nodes.data.get_mut(new_leaf.idx).unwrap(){
+                *parent = new_parent;
+            }
+            if let Node::Branch {children, ..} = nodes.data.get(new_parent.idx).unwrap(){
+                *focus = *children.get(0).unwrap();
+            }
+            let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(parent.idx).unwrap()else{return Err(EditorErr::InvalidFocus);};
+            *f = children.len();
+            children.push(new_parent);
+            recalc(parent, nodes, views, groups);
+            recalc(new_parent, nodes, views, groups);
             enter_normal(cmd_line, mode);
             Ok(())
         }
         Cmd::ViewClose=>{
-            let Node::Leaf {parent, generation, ..} = nodes.data.get_mut(focus.idx).unwrap()else{
+            let Node::Leaf {parent, ..} = nodes.data.get_mut(focus.idx).unwrap()else{
                 return Err(EditorErr::InvalidFocus);
             };
-            *generation += 1;
+            // let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(parent.idx).unwrap()else{
+            //     return Err(EditorErr::InvalidFocus);
+            // };
+            // children.remove(*f);
+            //remove
             reflow(*parent, nodes, views, groups, focus);
             enter_normal(cmd_line, mode);
             Ok(())
@@ -1157,6 +1138,9 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                         let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(p.idx).unwrap() else {return Err(EditorErr::InvalidFocus);};
                         *f = (*f+1)%children.len();
                         *focus = *children.get(*f).unwrap();
+                        while let Node::Branch {children, focus:f, ..} = nodes.data.get(focus.idx).unwrap(){
+                            *focus = *children.get(*f).unwrap();
+                        }
                     }
                 }
             }
@@ -1171,6 +1155,9 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                     let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(p.idx).unwrap() else {return Err(EditorErr::InvalidFocus);};
                     *f = (*f+children.len()-1)%children.len();
                     *focus = *children.get(*f).unwrap();
+                    while let Node::Branch {children, focus: f, ..} = nodes.data.get(focus.idx).unwrap(){
+                        *focus = *children.get(*f).unwrap();
+                    }
                 }
                 Direction::Vertical=>{
                     if let Some(p) = parent{
@@ -1178,6 +1165,9 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                         let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(p.idx).unwrap() else {return Err(EditorErr::InvalidFocus);};
                         *f = (*f+children.len()-1)%children.len();
                         *focus = *children.get(*f).unwrap();
+                        while let Node::Branch {children, focus: f, ..} = nodes.data.get(focus.idx).unwrap(){
+                            *focus = *children.get(*f).unwrap();
+                        }
                     }
                 }
             }
@@ -1192,13 +1182,19 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                     let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(p.idx).unwrap() else {return Err(EditorErr::InvalidFocus);};
                     *f = (*f+1)%children.len();
                     *focus = *children.get(*f).unwrap();
+                    while let Node::Branch {children, focus:f, ..} = nodes.data.get(focus.idx).unwrap(){
+                        *focus = *children.get(*f).unwrap();
+                    }
                 }
                 Direction::Horizontal=>{
                     if let Some(p) = parent{
-                        let p = get_parent(*p)?;
+                        let p = p.clone();
                         let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(p.idx).unwrap() else {return Err(EditorErr::InvalidFocus);};
                         *f = (*f+1)%children.len();
                         *focus = *children.get(*f).unwrap();
+                        while let Node::Branch {children, focus: f, ..} = nodes.data.get(focus.idx).unwrap(){
+                            *focus = *children.get(*f).unwrap();
+                        }
                     }
                 }
             }
@@ -1210,17 +1206,33 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             let Node::Branch {direction, parent, ..} = nodes.data.get(p.idx).unwrap() else {return Err(EditorErr::InvalidFocus);};
             match direction{
                 Direction::Vertical=>{
-                    let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(p.idx).unwrap() else {return Err(EditorErr::InvalidFocus);};
+                    let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(p.idx).unwrap() else {
+                        return Err(EditorErr::Log("1240 invalid focus".to_string()));
+                    };
                     *f = (*f+children.len()-1)%children.len();
                     *focus = *children.get(*f).unwrap();
+                    while let Node::Branch {focus:f, children, ..} = nodes.data.get(focus.idx).unwrap(){
+                        *focus = *children.get(*f).unwrap();
+                    }
                 }
                 Direction::Horizontal=>{
                     if let Some(p) = parent{
-                        let p = get_parent(*p)?;
-                        let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(p.idx).unwrap() else {return Err(EditorErr::InvalidFocus);};
+                        let p = p.clone();
+                        let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(p.idx).unwrap()else{
+                            return Err(EditorErr::Log("1251 invalid focus".to_string()));
+                        };
                         *f = (*f+children.len()-1)%children.len();
                         *focus = *children.get(*f).unwrap();
+                        while let Node::Branch {children, focus: f, ..} = nodes.data.get(focus.idx).unwrap(){
+                            *focus = *children.get(*f).unwrap();
+                        }
                     }
+                    // if let Some(p) = parent{
+                    //     let p = get_parent(*p)?;
+                    //     let Node::Branch {children, focus: f, ..} = nodes.data.get_mut(p.idx).unwrap() else {return Err(EditorErr::InvalidFocus);};
+                    //     *f = (*f+children.len()-1)%children.len();
+                    //     *focus = *children.get(*f).unwrap();
+                    // }
                 }
             }
             enter_normal(cmd_line, mode);
@@ -1475,7 +1487,7 @@ fn main()->io::Result<()>{
     let height = height -2;
     let mut mode = Mode::Normal;
     let root = {
-        let new = Node::Branch { parent: None, children: vec![], direction: Direction::Vertical, focus: 0, generation: 0, pos_x: 0, pos_y: 0, width, height };
+        let new = Node::Branch { parent: None, children: vec![], direction: Direction::Vertical, focus: 0, pos_x: 0, pos_y: 0, width, height };
         nodes.push(new)
     };
     if let Node::Branch {height: h, width: w, ..} = nodes.data.get_mut(root.idx).unwrap(){
