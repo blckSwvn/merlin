@@ -439,6 +439,7 @@ enum Direction{
 struct NodeIdx{
     idx:usize,
 }
+
 struct Nodes{
     data:Vec<Node>,
     root:Vec<NodeIdx>,
@@ -588,10 +589,10 @@ fn recalc(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &mut Grou
     let Node::Branch {children, direction, height, width, pos_x, pos_y, ..} = nodes.data.get(curr.idx).unwrap()else{
         panic!()
     };
-    let (width, height) = {
+    let (width, height, mut remainder) = {
         match direction{
-            Direction::Vertical=> (width/children.len()as u16, *height),
-            Direction::Horizontal=> (*width, height/children.len() as u16),
+            Direction::Vertical=> (width/children.len()as u16, *height, width%children.len() as u16),
+            Direction::Horizontal=> (*width, *height/children.len()as u16, height%children.len() as u16),
         }
     };
     let mut pos_x = pos_x.clone();
@@ -599,6 +600,24 @@ fn recalc(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &mut Grou
     let direction = direction.clone();
     let children = children.clone();
     for c in children.iter(){
+        let (width, height) = {
+            match direction{
+                Direction::Vertical=>{
+                    if remainder > 0 {
+                        (width+1, height)
+                    }else{
+                        (width, height)
+                    }
+                }
+                Direction::Horizontal=>{
+                    if remainder > 0{
+                        (width, height+1)
+                    }else{
+                        (width, height)
+                    }
+                }
+            }
+        };
         let n = nodes.data.get_mut(c.idx).unwrap();
         match n{
             Node::Branch {width: w, height: h, pos_x: x, pos_y: y, ..}=>{
@@ -620,14 +639,14 @@ fn recalc(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &mut Grou
                         ViewKind::LineNumber=>{
                             c.pos_x = x;
                             c.pos_y = y;
-                            c.height = h;
+                            c.height = h-1;
                             c.width = 5;
                             w -= 5;
                             x += 5;
                         }
                         ViewKind::StatusBar=>{
                             c.pos_x = x;
-                            c.pos_y = h;
+                            c.pos_y = pos_y + h-1;
                             c.width = w;
                             c.height = 1;
                             h -= 1;
@@ -636,7 +655,7 @@ fn recalc(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &mut Grou
                     }
                 }
                 let p = views.get_mut(g.parent);
-                p.height = h;
+                p.height = h-1;
                 p.width = w;
                 p.pos_x = x;
                 p.pos_y = y;
@@ -647,6 +666,7 @@ fn recalc(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &mut Grou
             Direction::Vertical=>pos_x += width,
             Direction::Horizontal=>pos_y += height,
         }
+        remainder = remainder.saturating_sub(1);
     }
 }
 
@@ -837,7 +857,6 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             Ok(())
         }
         Cmd::InsertChar(c)=>{
-            let view = views.get(vidx);
             let buffer = buffers.get_mut(bidx);
             buffer.redo.clear();
             let view = views.get(vidx);
@@ -1045,19 +1064,23 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
         },
         Cmd::Split=>{
             let parent = views.push(View::new(Some(SCRATCH), ViewKind::Text));
-            let gidx = groups.push(Group::new(views, parent, &[ViewKind::LineNumber, ViewKind::StatusBar]));
+            let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
             let parent = get_parent(*focus)?;
             nodes.new_leaf(parent, gidx, views, groups);
             enter_normal(cmd_line, mode);
             Ok(())
         }
         Cmd::Vsplit=>{
+            let parent = views.push(View::new(Some(SCRATCH), ViewKind::Text));
+            let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
+            let parent = get_parent(*focus)?;
+            nodes.new_branch(parent, gidx, views, groups, Direction::Vertical);
             enter_normal(cmd_line, mode);
             Ok(())
         }
         Cmd::Hsplit=>{
             let parent = views.push(View::new(Some(SCRATCH), ViewKind::Text));
-            let gidx = groups.push(Group::new(views, parent, &[ViewKind::LineNumber, ViewKind::StatusBar]));
+            let gidx = groups.push(Group::new(views, parent, &[ViewKind::StatusBar, ViewKind::LineNumber]));
             let parent = get_parent(*focus)?;
             nodes.new_branch(parent, gidx, views, groups, Direction::Horizontal);
             enter_normal(cmd_line, mode);
@@ -1075,6 +1098,9 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             if !children.is_empty(){
                 *f = (*f+children.len()-1)%children.len();
                 *focus = *children.get(*f).unwrap();
+                while let Node::Branch {children, focus:f, ..} = nodes.data.get(focus.idx).unwrap(){
+                    *focus = *children.get(*f).unwrap();
+                }
                 recalc(parent, nodes, views, groups);
             }else{
                 reflow(parent, nodes, views, groups, focus);
@@ -1428,7 +1454,7 @@ fn main()->io::Result<()>{
     let mut nodes = Nodes{data:vec![], root:vec![], free:vec![]};
     let (width, height) = terminal::size().unwrap();
     let mut cmd_line = CmdLine::new(height);
-    let height = height -2;
+    let height = height -1;
     let mut mode = Mode::Normal;
     let root = nodes.new_root(0, 0, height, width, Direction::Vertical);
     if let Node::Branch {height: h, width: w, ..} = nodes.data.get_mut(root.idx).unwrap(){
