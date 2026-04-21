@@ -328,7 +328,6 @@ impl CmdLine{
 #[derive(Clone)]
 struct View{
     buf: Option<BufferIdx>,
-    dirty: Vec<usize>,
     cursor: usize,
     prefered_x: usize,
     off: usize,
@@ -356,7 +355,6 @@ impl View{
             pos_y: 0,
             width: 0,
             height: 0,
-            dirty: vec![],
             kind,
         }
     }
@@ -365,10 +363,8 @@ impl View{
         let line_start = buffer.buf.line_to_char(line);
         if line < self.off{
             self.off = line;
-            self.dirty.extend(0..self.height as usize+1);
         } else if line > self.off + self.height as usize{
             self.off = line - self.height as usize;
-            self.dirty.extend(0..self.height as usize +1);
         }
         let mut col = self.cursor - line_start;
         if let Some(line) = buffer.buf.get_line(line){
@@ -495,13 +491,80 @@ fn new_root(&mut self, pos_x: u16, pos_y: u16, height: u16, width: u16, directio
     }
 }
 
-fn paint(mode: &Mode, nodes: &Nodes, views: &mut Views, groups: &Groups, buffers: &Buffers)->io::Result<()>{
-    for r in &nodes.root{
-        draw(*r, mode, nodes, views, groups, buffers)?;
+struct ScreenBuffer{
+    cells: Vec<char>,
+    width: u16,
+    height: u16,
+    cursor_y: u16,
+    cursor_x: u16,
+}
+impl ScreenBuffer{
+    fn set_cell_xy(&mut self, x: u16, y: u16, cell: char){
+        let idx = y * self.width + x;
+        self.cells[idx as usize] = cell;
     }
+    fn set_cell(&mut self, idx: usize, cell: char){
+        self.cells[idx as usize] = cell;
+    }
+    fn get_cell_xy(&mut self, x: u16, y: u16)->char{
+        let idx = y * self.width + x;
+        self.cells[idx as usize]
+    }
+    fn get_cell(&mut self, idx: usize)->char{
+        self.cells[idx as usize]
+    }
+    fn set_string_xy(&mut self, x: u16, y: u16, s: &str){
+        for (i, cell) in s.chars().enumerate(){
+            let xx = x + i as u16;
+            if xx >= self.width || y >= self.height {
+                panic!("writing past screenbuffer width")
+            }
+            self.set_cell_xy(xx, y, cell);
+        }
+    }
+    fn clear_buffer(&mut self){
+        self.cells.fill(' ');
+    }
+    fn print(&mut self, prev: &mut ScreenBuffer)->io::Result<()>{
+        let mut out = stdout().lock();
+        for y in 0..self.height{
+            let mut x = 0;
+            while x < self.width{
+                let idx = y * self.width + x;
+                let old = prev.cells[idx as usize];
+                let new = self.cells[idx as usize];
+                if new != old{
+                    let start_x = x;
+                    let mut line = String::with_capacity(self.width as usize);
+                    while x < self.width{
+                        let idx = y * self.width + x;
+                        let old = prev.cells[idx as usize];
+                        let new = self.cells[idx as usize];
+                        if new == old{
+                            break;
+                        }
+                        line.push(new);
+                        x += 1;
+                    }
+                    queue!(out, MoveTo(start_x, y), Print(line))?;
+                }else{
+                    x += 1;
+                }
+            }
+        }
+        queue!(out, MoveTo(self.cursor_x, self.cursor_y))?;
+        std::mem::swap(self, prev);
+        self.clear_buffer();
+        Ok(())
+    }
+}
+fn paint(mode: &Mode, nodes: &Nodes, views: &Views, groups: &Groups, buffers: &Buffers, old: &mut ScreenBuffer, new: &mut ScreenBuffer)->io::Result<()>{
+    for r in &nodes.root{
+        draw(*r, mode, nodes, views, groups, buffers, new)?;
+    }
+    new.print(old)?;
     return Ok(());
-    fn draw(nidx: NodeIdx, mode: &Mode, nodes: &Nodes, views: &mut Views, groups: &Groups, buffers: &Buffers)->io::Result<()>{
-        let mut out = io::stdout().lock();
+    fn draw(nidx: NodeIdx, mode: &Mode, nodes: &Nodes, views: &Views, groups: &Groups, buffers: &Buffers, new: &mut ScreenBuffer)->io::Result<()>{
         match nodes.data.get(nidx.idx).unwrap(){
             Node::Leaf {gidx, ..}=>{
                 let g = groups.get(*gidx);
@@ -512,12 +575,11 @@ fn paint(mode: &Mode, nodes: &Nodes, views: &mut Views, groups: &Groups, buffers
                     let c = views.get(*c);
                     match c.kind{
                         ViewKind::LineNumber=>{
-                            if p.dirty.is_empty(){continue;}
                             for row in 0..c.height+1{
                                 let screen_y = p.pos_y + row as u16;
                                 let line_num = p.off + row as usize;
                                 let s = format!("{:>width$} ", line_num, width = (c.width - 1)as usize);
-                                queue!(out, MoveTo(c.pos_x, screen_y), Print(s))?;
+                                new.set_string_xy(c.pos_x, screen_y, &s);
                             }
                         }
                         ViewKind::StatusBar=>{
@@ -536,47 +598,36 @@ fn paint(mode: &Mode, nodes: &Nodes, views: &mut Views, groups: &Groups, buffers
                             };
                             let s = format!("{mode_str} {} {path}", bidx.idx);
                             let s = format!("{:<width$}", s, width = c.width as usize);
-                            queue!(out, MoveTo(c.pos_x, c.pos_y), Print(s))?;
+                            new.set_string_xy(c.pos_x, c.pos_y, &s);
                         }
                         _ => {},
                     }
                 }
-                let p = views.get_mut(g.parent);
-                p.dirty.sort_unstable();
-                p.dirty.dedup();
-                for row in p.dirty.iter(){
-                    queue!(out, MoveTo(p.pos_x, p.pos_y + *row as u16))?;
-                    let line_idx = p.off + row;
+                let p = views.get(g.parent);
+                for row in 0..p.height+1{
+                    let line_idx = p.off + row as usize;
                     if let Some(line) = buffer.buf.get_line(line_idx){
                         let end = usize::min(p.width as usize, line.len_chars());
-                        let slice = line.slice(..end.saturating_sub(1));
-                        queue!(out, Print(slice))?;
-                        let rem = p.width as usize - slice.len_chars();
-                        for _ in 0..rem{
-                            queue!(out, Print(" "))?;
-                        }
-                    }else{
-                        for _ in 0..p.width{
-                            queue!(out, Print(" "))?;
-                        }
+                        let s = line.slice(..end.saturating_sub(1));
+                        new.set_string_xy(p.pos_x, p.pos_y + row, &s.to_string());
                     }
                 }
-                p.dirty.clear();
                 let line = buffer.buf.char_to_line(p.cursor);
                 let screen_y = line.saturating_sub(p.off) + p.pos_y as usize;
                 let line_start = buffer.buf.line_to_char(line);
                 let col = p.cursor - line_start;
-                queue!(out, MoveTo(col as u16 + p.pos_x, screen_y as u16))?;
+                new.cursor_x = col as u16 + p.pos_x;
+                new.cursor_y = screen_y as u16;
             }
             Node::Branch {children, focus, ..}=>{
                 for (i, c) in children.iter().enumerate(){
                     if i != *focus as usize{
-                        draw(*c, mode, nodes, views, groups, buffers)?;
+                        draw(*c, mode, nodes, views, groups, buffers, new)?;
                     }
                 }
                 if !children.is_empty(){
                     let f = children.get(*focus).unwrap();
-                    draw(*f, mode, nodes, views, groups, buffers)?;
+                    draw(*f, mode, nodes, views, groups, buffers, new)?;
                 }
             }
         }
@@ -659,7 +710,6 @@ fn recalc(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views, groups: &mut Grou
                 p.width = w;
                 p.pos_x = x;
                 p.pos_y = y;
-                p.dirty.extend(0..p.height as usize+1);
             }
         }
         match direction{
@@ -891,7 +941,6 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
 
             view.cursor = line_start + col;
             view.prefered_x = view.cursor - line_start;
-            view.dirty.push(line-view.off);
             Ok(())
         },
         Cmd::NewLine=>{
@@ -904,7 +953,6 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             let len_lines = buffer.buf.len_lines();
             let line = line.min(len_lines);
             let line_start = buffer.buf.line_to_char(line);
-            view.dirty.extend(line..view.height as usize+1);
             view.cursor = line_start;
             View::scroll(view, buffer);
             Ok(())
@@ -970,7 +1018,6 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                 let line_start = buffer.buf.line_to_char(line);
                 let col = view.cursor - line_start;
                 view.prefered_x = col;
-                view.dirty.extend(line-view.off..view.height as usize);
                 return Ok(())
             }
             Err(EditorErr::Msg("undo stack is empty".to_string()))
@@ -995,7 +1042,6 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                 let line_start = buffer.buf.line_to_char(line);
                 let col = view.cursor - line_start;
                 view.prefered_x = col;
-                view.dirty.extend(line-view.off..view.height as usize);
                 let view = views.get_mut(vidx);
                 let buffer = buffers.get_mut(bidx);
                 View::scroll(view, buffer);
@@ -1292,7 +1338,6 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                     }
                     buffers.remove(&mut idx);
                 }
-                view.dirty.extend(0..view.height as usize+1);
             }else{
                 return Err(EditorErr::Msg("will not close special buffer: 0".into()));
             }
@@ -1330,7 +1375,6 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
                 view.cursor = 0;
                 view.off = 0;
                 view.prefered_x = 0;
-                view.dirty.extend(0..view.height as usize+1);
                 enter_normal(cmd_line, mode);
             }else{
                 return Err(EditorErr::InvalidBuffer);
@@ -1351,7 +1395,6 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             view.off = 0;
             view.cursor = 0;
             view.prefered_x = 0;
-            view.dirty.extend(0..view.height as usize+1);
             view.buf = Some(buffer);
             enter_normal(cmd_line, mode);
             Ok(())
@@ -1456,12 +1499,12 @@ fn main()->io::Result<()>{
     let mut cmd_line = CmdLine::new(height);
     let height = height -1;
     let mut mode = Mode::Normal;
-    let root = nodes.new_root(0, 0, height, width, Direction::Vertical);
-    if let Node::Branch {height: h, width: w, ..} = nodes.data.get_mut(root.idx).unwrap(){
+    let base = nodes.new_root(0, 0, height, width, Direction::Vertical);
+    if let Node::Branch {height: h, width: w, ..} = nodes.data.get_mut(base.idx).unwrap(){
         *w = width;
         *h = height;
     }
-    let mut focus = root;
+    let mut focus = base;
     {
         buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
         let args: Vec<String> = env::args().skip(1).collect();
@@ -1474,16 +1517,17 @@ fn main()->io::Result<()>{
         };
         let vidx = views.push(View::new(Some(bidx), ViewKind::Text));
         let gidx = groups.push(Group::new(&mut views, vidx, &[ViewKind::StatusBar, ViewKind::LineNumber]));
-        focus = Nodes::new_leaf(&mut nodes, root, gidx, &mut views, &mut groups);
+        focus = Nodes::new_leaf(&mut nodes, base, gidx, &mut views, &mut groups);
     }
-    recalc(root, &mut nodes, &mut views, &mut groups);
-    reflow(root, &mut nodes, &mut views, &mut groups, &mut focus);
+    recalc(base, &mut nodes, &mut views, &mut groups);
     enable_raw_mode()?;
     execute!(stdout(), terminal::EnterAlternateScreen, cursor::SetCursorStyle::SteadyBlock)?;
 
     //inital draw
     cmd_line.draw(mode)?;
-    paint(&mode, &nodes, &mut views, &groups, &buffers)?;
+    let mut old = ScreenBuffer{cursor_x: 0, cursor_y: 0, width, height, cells: vec![' '; (width * height) as usize]};
+    let mut new = ScreenBuffer{cursor_y: 0, cursor_x: 0, width, height, cells: vec![' '; (width * height)as usize]};
+    paint(&mode, &nodes, &views, &groups, &buffers, &mut old, &mut new)?;
     stdout().flush().unwrap();
 
     loop{
@@ -1501,8 +1545,7 @@ fn main()->io::Result<()>{
                 Ok(_) => {},
             }
             queue!(stdout(), cursor::Hide)?;
-            reflow(root, &mut nodes, &mut views, &mut groups, &mut focus);
-            paint(&mode, &nodes, &mut views, &groups, &buffers)?;
+            paint(&mode, &nodes, &views, &groups, &buffers, &mut old, &mut new)?;
             match mode{
                 Mode::Command =>{
                     cmd_line.draw(mode)?
