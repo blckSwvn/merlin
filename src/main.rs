@@ -43,10 +43,10 @@ enum EditorErr{
     Quit,
 }
 
-struct Logger {
+struct Logger{
     file: &'static str,
 }
-impl Logger {
+impl Logger{
     fn log(&self, msg: &str) {
         let mut file = OpenOptions::new()
             .create(true)
@@ -308,17 +308,96 @@ impl CmdLine{
     }
 }
 
-// #[derive(Clone)]
 struct View{
     buf: BufferIdx,
     cursor: usize,
     prefered_x: usize,
     off: usize,
     rect: Rect,
+    recalc: fn(&mut View, &mut Rect),
+    draw: fn(&View, buffer: &Buffers, mode: &Mode, &mut ScreenBuffer),
     deco: Vec<Decoration>,
 }
 
 impl View{
+    fn recalc(&mut self, rect: &mut Rect){
+        deco_recalc(&mut self.deco, rect);
+        view_recalc(self, rect);
+    fn deco_recalc(deco: &mut Vec<Decoration>, rect: &mut Rect){
+        for d in deco{
+            match d{
+                Decoration::LineNumber(r)=>{
+                    r.x = rect.x;
+                    r.y = rect.y;
+                    r.height = rect.height-1;
+                    r.width = 5;
+                    rect.width -= 5;
+                    rect.x += 5;
+                }
+                Decoration::StatusBar(r)=>{
+                    r.x = rect.x;
+                    r.y = rect.y + rect.height-1;
+                    r.width = rect.width;
+                    rect.height -= 1;
+                }
+            }
+        }
+    }
+    fn view_recalc(view: &mut View, rect: &mut Rect){
+        view.rect.height = rect.height-1;
+        view.rect.width = rect.width;
+        view.rect.x = rect.x;
+        view.rect.y = rect.y;
+    }
+    }
+    fn draw(&self, buffers: &Buffers, mode: &Mode, screen: &mut ScreenBuffer){
+        deco_draw(&self, buffers, mode, screen);
+        text_draw(&self, buffers, screen);
+        fn text_draw(view: &View, buffers: &Buffers, screen: &mut ScreenBuffer){
+            for row in 0..view.rect.height+1{
+                let line_idx = view.off + row as usize;
+                if let Some(line) = buffers.get(view.buf).buf.get_line(line_idx){
+                    let end = usize::min(view.rect.width as usize, line.len_chars());
+                    let s = line.slice(..end.saturating_sub(1));
+                    screen.set_string_xy(view.rect.x, view.rect.y + row, &s.to_string());
+                }
+            }
+        }
+        fn deco_draw(view: &View, buffers: &Buffers, mode: &Mode, screen: &mut ScreenBuffer){
+            for d in &view.deco{
+                match d{
+                    Decoration::LineNumber(r)=>{
+                        for row in 0..r.height+1{
+                            let screen_y = r.y + row as u16;
+                            let line_num = view.off+row as usize;
+                            let s = format!("{:>width$} ", line_num,
+                                width = r.width as usize -1);
+                            screen.set_string_xy(r.x, screen_y, &s);
+                        }
+                    }
+                    Decoration::StatusBar(r)=>{
+                        let mut path = "SCRATCH";
+                        let buffer = buffers.get(view.buf);
+                        if !buffer.check_flag(Buffer::SCRATCH){
+                            if let Some(p) = &buffer.file{
+                                path = p.to_str().unwrap_or("NEW_FILE");
+                            }else{
+                                path = "NEW_FILE";
+                            }
+                        }
+                        let mode_str = match mode{
+                            Mode::Command => "CMD",
+                            Mode::Insert  => "INS",
+                            _ => "NOR",
+                        };
+                        let s = format!("{mode_str} {} {path}", view.buf.idx);
+                        let s = format!("{:width$}", s, width = r.width as usize);
+                        screen.set_string_xy(r.x, r.y, &s);
+                    }
+                }
+            }
+        }
+    }
     fn new(buf: BufferIdx, deco: &[Decoration])->Self{
         Self{
             buf,
@@ -326,6 +405,8 @@ impl View{
             prefered_x: 0,
             off: 0,
             rect: Rect { x:0, y:0, height:0, width:0},
+            draw: View::draw,
+            recalc: View::recalc,
             deco: deco.to_vec(),
         }
     }
@@ -507,56 +588,13 @@ fn paint(mode: &Mode, nodes: &Nodes, views: &Views, buffers: &Buffers, old: &mut
     new.print(old)?;
     return Ok(());
     fn draw(nidx: NodeIdx, mode: &Mode, nodes: &Nodes, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer)->io::Result<()>{
-        fn deco_draw(view: &View, buffers: &Buffers, mode: &Mode, screen: &mut ScreenBuffer){
-            for d in &view.deco{
-                match d{
-                    Decoration::LineNumber(r)=>{
-                        for row in 0..r.height+1{
-                            let screen_y = r.y + row as u16;
-                            let line_num = view.off+row as usize;
-                            let s = format!("{:>width$} ", line_num,
-                            width = r.width as usize -1);
-                            screen.set_string_xy(r.x, screen_y, &s);
-                        }
-                    }
-                    Decoration::StatusBar(r)=>{
-                        let mut path = "SCRATCH";
-                    let buffer = buffers.get(view.buf);
-                        if !buffer.check_flag(Buffer::SCRATCH){
-                            if let Some(p) = &buffer.file{
-                                path = p.to_str().unwrap_or("NEW_FILE");
-                            }else{
-                                path = "NEW_FILE";
-                            }
-                        }
-                        let mode_str = match mode{
-                            Mode::Command => "CMD",
-                            Mode::Insert  => "INS",
-                            _ => "NOR",
-                        };
-                        let s = format!("{mode_str} {} {path}", view.buf.idx);
-                        let s = format!("{:width$}", s, width = r.width as usize);
-                        screen.set_string_xy(r.x, r.y, &s);
-                    }
-                }
-            }
-        }
-        fn text_draw(view: &View, buffers: &Buffers, screen: &mut ScreenBuffer){
-            for row in 0..view.rect.height+1{
-                let line_idx = view.off + row as usize;
-                if let Some(line) = buffers.get(view.buf).buf.get_line(line_idx){
-                    let end = usize::min(view.rect.width as usize, line.len_chars());
-                    let s = line.slice(..end.saturating_sub(1));
-                    screen.set_string_xy(view.rect.x, view.rect.y + row, &s.to_string());
-                }
-            }
-        }
+        
+        
         match nodes.data.get(nidx.idx).unwrap(){
             Node::Leaf {vidx, ..}=>{
                 let view = views.get(*vidx);
                 let buffer = buffers.get(view.buf);
-                deco_draw(view, buffers, mode, screen);
-                text_draw(view, buffers, screen);
+                (view.draw)(view, buffers, mode, screen);
                 let line = buffer.buf.char_to_line(view.cursor);
                 let screen_y = line.saturating_sub(view.off) + view.rect.y as usize;
                 let line_start = buffer.buf.line_to_char(line);
@@ -581,32 +619,6 @@ fn paint(mode: &Mode, nodes: &Nodes, views: &Views, buffers: &Buffers, old: &mut
 }
 
 fn recalc(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views){
-    fn deco_recalc(deco: &mut Vec<Decoration>, rect: &mut Rect){
-        for d in deco{
-            match d{
-                Decoration::LineNumber(r)=>{
-                    r.x = rect.x;
-                    r.y = rect.y;
-                    r.height = rect.height-1;
-                    r.width = 5;
-                    rect.width -= 5;
-                    rect.x += 5;
-                }
-                Decoration::StatusBar(r)=>{
-                    r.x = rect.x;
-                    r.y = rect.y + rect.height-1;
-                    r.width = rect.width;
-                    rect.height -= 1;
-                }
-            }
-        }
-    }
-    fn view_recalc(view: &mut View, rect: Rect){
-        view.rect.height = rect.height-1;
-        view.rect.width = rect.width;
-        view.rect.x = rect.x;
-        view.rect.y = rect.y;
-    }
     let curr = nidx;
     let Node::Branch {children, direction, height, width, pos_x, pos_y, ..} = nodes.data.get(curr.idx).unwrap()else{
         panic!()
@@ -652,8 +664,7 @@ fn recalc(nidx: NodeIdx, nodes: &mut Nodes, views: &mut Views){
             Node::Leaf {vidx, ..}=>{
                 let mut rect = Rect{x: pos_x, y: pos_y, width, height};
                 let view = views.get_mut(*vidx);
-                deco_recalc(&mut view.deco, &mut rect);
-                view_recalc(view, rect);
+                (view.recalc)(view, &mut rect);
             }
         }
         match direction{
@@ -734,7 +745,7 @@ enum Cmd{
     NoOp,
 }
 
-fn key_to_cmd(key: KeyEvent, mode: &Mode) -> Cmd {
+fn key_to_cmd(key: KeyEvent, mode: &Mode) -> Cmd{
     if key.code == KeyCode::Esc{
         return Cmd::EnterModeNormal;
     }
@@ -788,7 +799,7 @@ fn key_to_cmd(key: KeyEvent, mode: &Mode) -> Cmd {
             KeyCode::Backspace => Cmd::Backspace,
             _ => Cmd::NoOp,
         },
-        Mode::Command => match key.code {
+        Mode::Command => match key.code{
             KeyCode::Left => Cmd::CmdMoveLeft,
             KeyCode::Right => Cmd::CmdMoveRight,
             KeyCode::Backspace => Cmd::CmdBackspace,
@@ -811,17 +822,6 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
         Ok(*parent)
     };
 
-    // let vidx = || ->Result<(ViewIdx, GroupIdx), EditorErr>{
-    //     Ok((groups.get(gidx).parent, gidx))
-    // };
-    // let bidx = || -> Result<(BufferIdx, ViewIdx, GroupIdx), EditorErr>{
-    //     let (vidx, gidx) = vidx()?;
-    //     if let Some(b) = views.get(vidx).buf{
-    //         Ok((b, vidx, gidx))
-    //     }else{
-    //         Err(EditorErr::InvalidBuffer)
-    //     }
-    // };
     let (bidx, vidx) = {
         match nodes.data.get(focus.idx).unwrap(){
             Node::Branch {..}=>return Err(EditorErr::Msg("focus cannot be container".to_string())),
