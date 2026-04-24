@@ -16,6 +16,8 @@ use crossterm::execute;
 use crossterm::queue;
 use crossterm::style::Print;
 use crossterm::terminal;
+use crossterm::terminal::Clear;
+use crossterm::terminal::ClearType;
 use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
 use crossterm::event::{read, Event, KeyCode};
@@ -269,7 +271,6 @@ struct CmdLine{
     input: String,
     pos_y: u16,
     cursor: usize,
-    error: bool,
 }
 impl CmdLine{
     fn new(height: u16)->Self{
@@ -277,49 +278,36 @@ impl CmdLine{
             input: String::new(),
             pos_y: height,
             cursor: 0,
-            error: false,
         }
     }
     fn insert(&mut self, c: char){
-        if self.error{
-            self.cursor = 0;
-            self.input.clear();
-            self.error = false;
-        }
         let byte_idx = self.cursor;
         self.input.insert(byte_idx, c);
         self.cursor += c.len_utf8();
     }
     fn backspace(&mut self){
-        if self.error{
-            self.cursor = 0;
-            self.input.clear();
-            self.error = false;
-        }
         if self.cursor > 0 {
             let char_len = self.input[..self.cursor].chars().rev().next().unwrap().len_utf8();
             self.cursor -= char_len as usize;
             self.input.remove(self.cursor);
         }
     }
-    fn error(&mut self, s: &str){
-        self.error = true;
+    fn draw_error(&mut self, screen: &mut ScreenBuffer, mode: &mut Mode, s: &str){
+        self.cursor = 0;
         self.input.clear();
-        self.input = s.to_string();
+        *mode = Mode::Normal;
+        screen.set_string_xy(1, self.pos_y, s);
+        // queue!(out, MoveTo(1, self.pos_y), Print(s))?;
     }
-    fn draw(&self, screen: &mut ScreenBuffer){
-        let s = {
-            if self.error{
-                format!("{}",self.input)
-            }else{
-                if self.input.is_empty(){
-                    "".to_string()
-                }else{
-                    format!(":{}",self.input)
-                }
+    fn draw(&self, mode: &Mode, screen: &mut ScreenBuffer){
+        match mode{
+            Mode::Command =>{
+                let s = format!(":{}",self.input);
+                screen.set_string_xy(0, self.pos_y, &s);
             }
-        };
-        screen.set_string_xy(0, self.pos_y, &s);
+            _ => {},
+            // Mode::Normal | Mode::Insert => screen.set_string_xy(0, self.pos_y, screen.width),
+        }
     }
 }
 
@@ -597,13 +585,15 @@ impl ScreenBuffer{
     }
 }
 fn paint(mode: &Mode, cmd_line: &mut CmdLine, nodes: &Nodes, views: &Views, buffers: &Buffers, old: &mut ScreenBuffer, new: &mut ScreenBuffer)->io::Result<()>{
+    cmd_line.draw(mode, new);
     for r in &nodes.root{
         draw(*r, mode, nodes, views, buffers, new)?;
     }
-    cmd_line.draw(new);
     new.print(old)?;
     return Ok(());
     fn draw(nidx: NodeIdx, mode: &Mode, nodes: &Nodes, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer)->io::Result<()>{
+        
+        
         match nodes.data.get(nidx.idx).unwrap(){
             Node::Leaf {vidx, ..}=>{
                 let view = views.get(*vidx);
@@ -849,6 +839,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             queue!(stdout(), cursor::SetCursorStyle::SteadyBar)?;
             *mode = Mode::Insert;
             cmd_line.input.clear();
+            cmd_line.draw(*mode)?;
             cmd_line.cursor = 0;
             Ok(())
         }
@@ -860,6 +851,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             queue!(stdout(), cursor::SetCursorStyle::SteadyBar).unwrap();
             *mode = Mode::Command;
             cmd_line.input.clear();
+            cmd_line.draw(*mode)?;
             Ok(())
         }
         Cmd::InsertChar(c)=>{
@@ -1215,17 +1207,19 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
             match parse_cmd(input){
                 Ok(parsed_cmd) => exec_cmd(nodes, focus, cmd_line, views, buffers, parsed_cmd, mode)?,
                 Err(e) => {
-                    cmd_line.error(&format!("{:?}", e));
+                    cmd_line.draw_error(mode, &format!("{:?}", e))?;
                 }
             }
             Ok(())
         }
         Cmd::CmdInsert(c)=>{
             cmd_line.insert(c);
+            cmd_line.draw(*mode)?;
             Ok(())
         },
         Cmd::CmdBackspace=>{
             cmd_line.backspace();
+            cmd_line.draw(*mode)?;
             Ok(())
         },
         Cmd::CmdMoveLeft=>{
@@ -1239,7 +1233,7 @@ fn exec_cmd(nodes: &mut Nodes, focus: &mut NodeIdx, cmd_line: &mut CmdLine, view
         Cmd::Save(f)=>{
             let buffer = buffers.get_mut(bidx);
             if buffer.check_flag(Buffer::READ_ONLY){
-                cmd_line.error("cannot save read only");
+                cmd_line.draw_error(mode, "cannot save read only")?;
                 return Err(EditorErr::ReadOnly(bidx));
             }
             if buffer.check_flag(Buffer::SCRATCH){
@@ -1460,12 +1454,13 @@ fn main()->io::Result<()>{
     let mut buffers = Buffers::new();
     let mut nodes = Nodes{data:vec![], root:vec![], free:vec![]};
     let (width, height) = terminal::size().unwrap();
-    let mut cmd_line = CmdLine::new(height-1);
+    let mut cmd_line = CmdLine::new(height);
+    let height = height -1;
     let mut mode = Mode::Normal;
     let base = nodes.new_root(0, 0, height, width, Direction::Vertical);
     if let Node::Branch {height: h, width: w, ..} = nodes.data.get_mut(base.idx).unwrap(){
         *w = width;
-        *h = height-1;
+        *h = height;
     }
     let mut focus = base;
     {
@@ -1487,27 +1482,34 @@ fn main()->io::Result<()>{
     execute!(stdout(), terminal::EnterAlternateScreen, cursor::SetCursorStyle::SteadyBlock)?;
 
     //inital draw
+    cmd_line.draw(mode)?;
     let mut old = ScreenBuffer{cursor_x: 0, cursor_y: 0, width, height, cells: vec![' '; (width * height) as usize]};
     let mut new = ScreenBuffer{cursor_y: 0, cursor_x: 0, width, height, cells: vec![' '; (width * height)as usize]};
-    paint(&mode, &mut cmd_line, &nodes, &views, &buffers, &mut old, &mut new)?;
+    paint(&mode, &nodes, &views, &buffers, &mut old, &mut new)?;
     stdout().flush().unwrap();
 
     loop{
         if let Event::Key(event) = read()?{
             let cmd = key_to_cmd(event, &mode);
             match exec_cmd(&mut nodes, &mut focus, &mut cmd_line, &mut views, &mut buffers, cmd, &mut mode){
-                Err(EditorErr::Msg(msg))=>cmd_line.error(&msg),
-                Err(EditorErr::Dirty(idx))=>cmd_line.error(&format!("buffer:{} is dirty",idx.idx)),
-                Err(EditorErr::InvalidBuffer)=>cmd_line.error("index is invalid"),
-                Err(EditorErr::ReadOnly(idx))=>cmd_line.error(&format!("buffer:{}is read only",idx.idx)),
-                Err(EditorErr::InvalidFocus)=>cmd_line.error("invalid focus"),
+                Err(EditorErr::Msg(msg))=>cmd_line.draw_error(&mut mode, &msg)?,
+                Err(EditorErr::Dirty(idx))=>cmd_line.draw_error(&mut mode, &format!("buffer:{} is dirty",idx.idx))?,
+                Err(EditorErr::InvalidBuffer)=>cmd_line.draw_error(&mut mode, "index is invalid")?,
+                Err(EditorErr::ReadOnly(idx))=>cmd_line.draw_error(&mut mode, &format!("buffer:{} is read only",idx.idx))?,
+                Err(EditorErr::InvalidFocus)=>cmd_line.draw_error(&mut mode, "invalid focus")?,
                 Err(EditorErr::Log(msg))=>log(&msg),
                 Err(EditorErr::Io(_))=>{log("IO error"); break},
                 Err(EditorErr::Quit)=>break,
                 Ok(_) => {},
             }
             queue!(stdout(), cursor::Hide)?;
-            paint(&mode, &mut cmd_line, &nodes, &views, &buffers, &mut old, &mut new)?;
+            paint(&mode, &nodes, &views, &buffers, &mut old, &mut new)?;
+            match mode{
+                Mode::Command =>{
+                    cmd_line.draw(mode)?
+                } 
+                _ => {},
+            }
             queue!(stdout(), cursor::Show)?;
         }
         stdout().flush()?;
