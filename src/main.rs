@@ -64,7 +64,6 @@ static LOGGER: Mutex<Logger> = Mutex::new(Logger {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BufferIdx{
     idx:usize,
-    generation:u64,
 }
 struct Buffers{
     data:Vec<Buffer>,
@@ -88,12 +87,11 @@ impl Buffers{
     fn push(&mut self, buf: Buffer) -> BufferIdx {
         let path = buf.file.clone();
         let idx = if self.free.is_empty(){
-            let idx = BufferIdx{idx:self.data.len(), generation:0};
+            let idx = BufferIdx{idx:self.data.len()};
             self.data.push(buf);
             idx
         }else{
-            let mut idx = self.free.pop_front().unwrap();
-            idx.generation += 1;
+            let idx = self.free.pop_front().unwrap();
             let element = self.get_mut(idx);
             *element = buf;
             idx
@@ -109,16 +107,13 @@ impl Buffers{
         if let Ok(p) = Path::new(path).canonicalize(){
             let buffer = self.path_map.get(&p);
             if let Some(idx) = buffer{
-                if idx.generation == self.get(*idx).generation{
-                    return Some(idx)
-                }
+                return Some(idx)
             }
         }
         None
     }
     fn remove(&mut self, idx: &mut BufferIdx){
         self.get_mut(*idx).generation += 1;
-        idx.generation += 1;
         self.data[idx.idx].partial_reset();
         self.free.push_back(*idx);
     }
@@ -816,7 +811,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                         let args = parse_args(rest);
                         if let Some(arg) = args.get(0){
                             if let Ok(idx) = arg.parse::<usize>(){
-                                Ok(Cmd::SwitchBuffer(BufferIdx { idx, generation: 0}))
+                                Ok(Cmd::SwitchBuffer(BufferIdx {idx}))
                             }else{
                                 Ok(Cmd::Open(Some(arg.clone())))
                             }
@@ -832,7 +827,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                         args.push(rest);
                         if let Some(arg) = args.get(0){
                             if let Ok(idx) = arg.parse::<usize>(){
-                                Ok(Cmd::Close(Some(BufferIdx {idx, generation:0}), false))
+                                Ok(Cmd::Close(Some(BufferIdx {idx}), false))
                             }else{
                                 Ok(Cmd::Close(None, false))
                             }
@@ -845,7 +840,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                         args.push(rest);
                         if let Some(arg) = args.get(0){
                             if let Ok(idx) = arg.parse::<usize>(){
-                                Ok(Cmd::Close(Some(BufferIdx { idx, generation: 0}), true))
+                                Ok(Cmd::Close(Some(BufferIdx {idx}), true))
                             }else{
                                 Ok(Cmd::Close(None, true))
                             }
@@ -1476,7 +1471,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
     }
 }
 
-const SCRATCH: BufferIdx = BufferIdx{idx: 0, generation: 0};
+const SCRATCH: BufferIdx = BufferIdx{idx: 0};
 fn main()->io::Result<()>{
     let mut views = Views::new();
     let mut buffers = Buffers::new();
@@ -1536,6 +1531,7 @@ fn main()->io::Result<()>{
                     let v = views.get_mut(*vidx);
                     v.mode = Mode::Normal;
                     focus = Focus::Node(n);
+                    cmd_line.error = false;
                     queue!(stdout(), SetCursorStyle::SteadyBlock)?;
                 }
                 Ok(_) => {},
