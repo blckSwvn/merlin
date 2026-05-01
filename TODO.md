@@ -1,12 +1,8 @@
 # TODO
 
 ### current
-add UI component/widget system to allow for actual decent customizable UI like filepickers auto complete pop ups
-    add componenets 
-    add z index focus
-asdasdads
+redo UI system again :(
 :splitv/splith replace the current leaf with a branch and move the leaf into the new branch instead of apending children
-prevent viewclose on after :sh then :vc :vc it currently panics it should not be able to close the last view even if other branches are present
 
 
 ---
