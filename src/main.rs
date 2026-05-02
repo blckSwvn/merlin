@@ -164,11 +164,10 @@ struct Rect{
     y:u16,
     height:u16,
     width:u16,
-}
-#[derive(Clone)]
-enum Decoration{
-    LineNumber(Rect),
-    StatusBar(Rect),
+    min_height:Option<u16>,
+    min_width:Option<u16>,
+    max_height:Option<u16>,
+    max_width:Option<u16>,
 }
 
 enum Edit{
@@ -262,15 +261,24 @@ impl Buffer{
 
 struct CmdLine{
     input: String,
-    pos_y: u16,
+    rect: Rect,
     cursor: usize,
     error: bool,
 }
 impl CmdLine{
-    fn new(height: u16)->Self{
+    fn new(width:u16, height:u16)->Self{
         Self{
             input: String::new(),
-            pos_y: height,
+            rect: Rect {
+                x: 0,
+                y: height,
+                height:1,
+                width: width,
+                min_height: Some(1),
+                min_width: Some(width),
+                max_height: Some(1),
+                max_width: Some(width)
+            },
             cursor: 0,
             error: false,
         }
@@ -318,7 +326,7 @@ impl CmdLine{
                 }
             }
         };
-        screen.set_string_xy(0, self.pos_y, &s);
+        screen.set_string_xy(0, self.rect.y, &s);
     }
 }
 
@@ -327,112 +335,71 @@ struct View{
     cursor: usize,
     prefered_x: usize,
     off: usize,
-    rect: Rect,
-    recalc: fn(&mut View, &mut Rect),
-    draw: fn(&View, buffer: &Buffers, &mut ScreenBuffer),
     mode: Mode,
-    deco: Vec<Decoration>,
 }
 
 impl View{
-    fn recalc(&mut self, rect: &mut Rect){
-        deco_recalc(&mut self.deco, rect);
-        view_recalc(self, rect);
-    fn deco_recalc(deco: &mut Vec<Decoration>, rect: &mut Rect){
-        for d in deco{
-            match d{
-                Decoration::LineNumber(r)=>{
-                    r.x = rect.x;
-                    r.y = rect.y;
-                    r.height = rect.height-1;
-                    r.width = 5;
-                    rect.width -= 5;
-                    rect.x += 5;
-                }
-                Decoration::StatusBar(r)=>{
-                    r.x = rect.x;
-                    r.y = rect.y + rect.height-1;
-                    r.width = rect.width;
-                    rect.height -= 1;
-                }
-            }
-        }
+    fn recalc(&mut self, local: &mut Rect, new: &mut Rect){
+        local.height = new.height-1;
+        local.width = new.width;
+        local.x = new.x;
+        local.y = new.y;
     }
-    fn view_recalc(view: &mut View, rect: &mut Rect){
-        view.rect.height = rect.height-1;
-        view.rect.width = rect.width;
-        view.rect.x = rect.x;
-        view.rect.y = rect.y;
-    }
-    }
-    fn draw(&self, buffers: &Buffers, screen: &mut ScreenBuffer){
-        deco_draw(&self, buffers, screen);
-        text_draw(&self, buffers, screen);
-        fn text_draw(view: &View, buffers: &Buffers, screen: &mut ScreenBuffer){
-            for row in 0..view.rect.height+1{
+    fn draw(&self, buffers: &Buffers, rect: &Rect, screen: &mut ScreenBuffer){
+        deco_draw(&self, rect, buffers, screen);
+        text_draw(&self, rect, buffers, screen);
+        fn text_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer){
+            for row in 0..rect.height{
                 let line_idx = view.off + row as usize;
                 if let Some(line) = buffers.get(view.buf).buf.get_line(line_idx){
-                    let end = usize::min(view.rect.width as usize, line.len_chars());
+                    let end = usize::min(rect.width as usize, line.len_chars());
                     let s = line.slice(..end.saturating_sub(1));
-                    screen.set_string_xy(view.rect.x, view.rect.y + row, &s.to_string());
+                    screen.set_string_xy(rect.x+5, rect.y + row, &s.to_string());
                 }
             }
         }
-        fn deco_draw(view: &View, buffers: &Buffers, screen: &mut ScreenBuffer){
-            for d in &view.deco{
-                match d{
-                    Decoration::LineNumber(r)=>{
-                        for row in 0..r.height+1{
-                            let screen_y = r.y + row as u16;
-                            let line_num = view.off+row as usize;
-                            let s = format!("{:>width$} ", line_num,
-                                width = r.width as usize -1);
-                            screen.set_string_xy(r.x, screen_y, &s);
-                        }
-                    }
-                    Decoration::StatusBar(r)=>{
-                        let mut path = "SCRATCH";
-                        let buffer = buffers.get(view.buf);
-                        if !buffer.check_flag(Buffer::SCRATCH){
-                            if let Some(p) = &buffer.file{
-                                path = p.to_str().unwrap_or("NEW_FILE");
-                            }else{
-                                path = "NEW_FILE";
-                            }
-                        }
-                        let mode_str = match view.mode{
-                            Mode::Normal=>"NOR",
-                            Mode::Insert=>"INS",
-                        };
-                        let s = format!("{mode_str} {} {path}", view.buf.idx);
-                        let s = format!("{:width$}", s, width = r.width as usize);
-                        screen.set_string_xy(r.x, r.y, &s);
-                    }
+        fn deco_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer){
+            for row in 0..rect.height{
+                let screen_y = rect.y + row as u16;
+                let line_num = view.off+row as usize;
+                let s = format!("{:>width$} ", line_num,
+                    width = 4);
+                screen.set_string_xy(rect.x, screen_y, &s);
+            }
+            let mut path = "SCRATCH";
+            let buffer = buffers.get(view.buf);
+            if !buffer.check_flag(Buffer::SCRATCH){
+                if let Some(p) = &buffer.file{
+                    path = p.to_str().unwrap_or("NEW_FILE");
+                }else{
+                    path = "NEW_FILE";
                 }
             }
+            let mode_str = match view.mode{
+                Mode::Normal=>"NOR",
+                Mode::Insert=>"INS",
+            };
+            let s = format!("{mode_str} {} {path}", view.buf.idx);
+            let s = format!("{:width$}", s, width = rect.width as usize);
+            screen.set_string_xy(rect.x, rect.y + rect.height, &s);
         }
     }
-    fn new(buf: BufferIdx, deco: &[Decoration])->Self{
+    fn new(buf: BufferIdx)->Self{
         Self{
             buf,
             cursor: 0,
             prefered_x: 0,
             off: 0,
-            rect: Rect { x:0, y:0, height:0, width:0},
-            draw: View::draw,
-            // draw: View::draw,
-            recalc: View::recalc,
             mode: Mode::Normal,
-            deco: deco.to_vec(),
         }
     }
-    fn scroll(&mut self, buffer: &mut Buffer){
+    fn scroll(&mut self, rect: &Rect, buffer: &mut Buffer){
         let line = buffer.buf.char_to_line(self.cursor);
         let line_start = buffer.buf.line_to_char(line);
         if line < self.off{
             self.off = line;
-        } else if line > self.off + self.rect.height as usize{
-            self.off = line - self.rect.height as usize;
+        } else if line > self.off + (rect.height-1) as usize{
+            self.off = line - (rect.height-1) as usize;
         }
         let mut col = self.cursor - line_start;
         if let Some(line) = buffer.buf.get_line(line){
@@ -447,7 +414,6 @@ impl View{
         self.cursor = line_start + col;
     }
 }
-
 
 #[derive(Clone, Copy)]
 struct LeafIdx(usize);
@@ -536,17 +502,39 @@ impl Nodes{
                 x: 0,
                 y: 0,
                 height: 0,
-                width: 0
+                width: 0,
+                max_height:None,
+                max_width:None,
+                min_height:None,
+                min_width:None,
             }
         });
         self.splits[parent.0].children.push(NodeIdx::Split(new_parent));
-        let lidx = self.push_leaf(Leaf{parent: new_parent, vidx, rect: Rect { x: 0, y: 0, height: 0, width: 0}});
+        let lidx = self.push_leaf(Leaf{parent: new_parent, vidx, rect: Rect{
+            x: 0,
+            y: 0,
+            height: 0,
+            width: 0,
+            max_width:None,
+            max_height:None,
+            min_width:None,
+            min_height:None,
+        }});
         self.splits[new_parent.0].children.push(NodeIdx::Leaf(lidx));
         self.recalc(parent, views);
         (lidx, new_parent)
     }
     fn new_leaf(&mut self, vidx: ViewIdx, views: &mut Views, parent: SplitIdx)->LeafIdx{
-        let lidx = self.push_leaf(Leaf{parent, vidx, rect: Rect { x: 0, y: 0, height: 0, width: 0}});
+        let lidx = self.push_leaf(Leaf{parent, vidx, rect: Rect{
+            x: 0,
+            y: 0,
+            height: 0,
+            width: 0,
+            max_height:None,
+            max_width:None,
+            min_height:None,
+            min_width:None,
+        }});
         self.splits[parent.0].children.push(NodeIdx::Leaf(lidx));
         self.recalc(parent, views);
         lidx
@@ -558,19 +546,27 @@ impl Nodes{
             NodeIdx::Leaf(lidx)=>{
                 children.retain(|x| match x{
                     NodeIdx::Leaf(l)=>l.0 != lidx.0,
-                    _ => false,
+                    _ => true,
                 });
             }
             NodeIdx::Split(sidx)=>{
                 children.retain(|x| match x{
                     NodeIdx::Split(s)=>s.0 != sidx.0,
-                    _ => false,
+                    _ => true,
                 });
             }
         }
         if children.is_empty(){
             *f = 0;
         self.reflow(focus, views, parent);
+            let parent = {
+                let Focus::Leaf(l) = focus else{
+                    panic!();
+                };
+                let Leaf {parent, ..} = self.leaves.get(l.0).unwrap();
+                parent
+            };
+        self.recalc(*parent, views);
         }else{
             *f = (*f+children.len()-1)%children.len();
             self.recalc(parent, views);
@@ -622,10 +618,20 @@ impl Nodes{
             };
             match c{
                 NodeIdx::Leaf(l)=>{
-                    let Leaf {vidx, ..} = self.leaves.get(l.0).unwrap();
-                    let mut rect = Rect{x: pos_x, y:pos_y, width, height};
+                    let Leaf {vidx, rect:local, ..} = self.leaves.get_mut(l.0).unwrap();
+                    let mut new = Rect{
+                        x: pos_x,
+                        y:pos_y,
+                        width,
+                        height,
+                        max_width:None,
+                        max_height:None,
+                        min_width:None,
+                        min_height:None,
+                    };
                     let view = views.get_mut(*vidx);
-                    (view.recalc)(view, &mut rect);
+                    view.recalc(local, &mut new);
+                    // (view.recalc)(view, &mut rect);
                 }
                 NodeIdx::Split(s)=>{
                     let Split {rect, ..} = self.splits.get_mut(s.0).unwrap();
@@ -671,11 +677,7 @@ impl Nodes{
 
         let Split {children, focus:f, ..} = self.splits.get_mut(0).unwrap();
         if children.is_empty(){
-            let vidx = views.push(View::new(SCRATCH,
-                &[
-                    Decoration::StatusBar(Rect { x:0,y:0,height:0,width:0}),
-                    Decoration::LineNumber(Rect { x: 0, y: 0, height: 0, width: 0 }),
-                ]));
+            let vidx = views.push(View::new(SCRATCH));
             *f = 0;
             self.new_leaf(vidx, views, SplitIdx(0));
         }
@@ -707,16 +709,16 @@ impl Nodes{
         new.print(old)?;
         match focus{
             Focus::CmdLine=>{
-                queue!(stdout(), MoveTo(cmd_line.cursor as u16 +1, cmd_line.pos_y))?;
+                queue!(stdout(), MoveTo(cmd_line.cursor as u16 +1, cmd_line.rect.y))?;
             }
             Focus::Leaf(l)=>{
-                let Leaf{vidx, ..} = self.leaves.get(l.0).unwrap();
+                let Leaf{vidx, rect, ..} = self.leaves.get(l.0).unwrap();
                 let v = views.get(*vidx);
                 let b = buffers.get(v.buf);
                 let line = b.buf.char_to_line(v.cursor);
                 let line_start = b.buf.line_to_char(line);
-                let col = v.cursor - line_start;
-                queue!(stdout(), MoveTo(col as u16 + v.rect.x, line as u16 - v.off as u16 + v.rect.y))?;
+                let col = v.cursor - line_start +5;
+                queue!(stdout(), MoveTo(col as u16 + rect.x, line as u16 - v.off as u16 + rect.y))?;
             }
             _ => {},
         }
@@ -742,7 +744,7 @@ impl Nodes{
                 NodeIdx::Leaf(l)=>{
                     let l = &nodes.leaves[l.0];
                     let view = views.get(l.vidx);
-                    view.draw(buffers, new);
+                    view.draw(buffers, &l.rect, new);
                 }
             }
         }
@@ -789,7 +791,7 @@ impl Nodes{
         *focus = Focus::Leaf(*l);
     }
     fn focus_right(&mut self, focus: &mut Focus){
-        let Leaf { parent, rect, vidx } = {
+        let Leaf { parent, ..} = {
             let Focus::Leaf(l) = focus else{
                 panic!()
             };
@@ -1350,7 +1352,8 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                             let col = buffer.last_cursor - line_start;
                             view.cursor = buffer.last_cursor;
                             view.prefered_x = col;
-                            view.scroll(buffer);
+                            view.scroll(&nodes.leaves.get(lidx.0).unwrap().rect, buffer);
+                            // view.scroll(buffer);
                             enter_normal(focus, lidx, cmd_line);
                         }else{
                             return Err(EditorErr::InvalidBuffer);
@@ -1371,29 +1374,19 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                     }
                     Cmd::Split=>{
                         let vidx = views.push(View::new(
-                            SCRATCH,
-                            &[
-                                Decoration::StatusBar(Rect{x:0,y:0,height:0,width:0}),
-                                Decoration::LineNumber(Rect {x:0,y:0,height:0,width:0})
-                            ]));
+                            SCRATCH));
                         nodes.new_leaf(vidx, views, parent);
                         enter_normal(focus, lidx, cmd_line);
                     }
                     Cmd::SplitV=>{
                         let vidx = views.push(View::new(
-                            SCRATCH, &[
-                                Decoration::StatusBar(Rect { x: 0, y: 0, height: 0, width: 0 }),
-                                Decoration::LineNumber(Rect { x: 0, y: 0, height: 0, width: 0}),
-                            ]));
+                            SCRATCH));
                         let (_, _) = nodes.new_split(vidx, parent, Direction::Vertical, views);
                         enter_normal(focus, lidx, cmd_line);
                     }
                     Cmd::SplitH=>{
                         let vidx = views.push(View::new(
-                            SCRATCH, &[
-                                Decoration::StatusBar(Rect { x: 0, y: 0, height: 0, width: 0 }),
-                                Decoration::LineNumber(Rect { x: 0, y: 0, height: 0, width: 0}),
-                            ]));
+                            SCRATCH));
                         let (_, _) = nodes.new_split(vidx, parent, Direction::Horizontal, views);
                         enter_normal(focus, lidx, cmd_line);
                     }
@@ -1408,7 +1401,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
             let lidx = lidx.clone();
             let Leaf {vidx, ..} = nodes.leaves.get(lidx.0).unwrap();
             let cmd = key_to_cmd(key, views.get(*vidx));
-            exec_cmd(cmd, nodes, focus, lidx, cmd_line, views, buffers)?;
+            exec_cmd(cmd, nodes, focus, cmd_line, views, buffers)?;
             enum Cmd{
                 EnterNormal,
                 EnterInsert,
@@ -1462,7 +1455,6 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                 cmd: Cmd,
                 nodes: &mut Nodes,
                 focus: &mut Focus,
-                lidx: LeafIdx,
                 cmd_line: &mut CmdLine,
                 views: &mut Views,
                 buffers: &mut Buffers
@@ -1471,9 +1463,8 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                     view.mode = Mode::Normal;
                     queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
                     cmd_line.cursor = 0;
-                    // *focus = Focus::Leaf(nidx);
                 }
-                let (bidx, vidx, lidx, parent) = {
+                let (bidx, vidx, lidx) = {
                     let mut curr = NodeIdx::Split(SplitIdx(0));
                     let lidx = loop{
                         match curr {
@@ -1489,7 +1480,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                     };
                     let l = nodes.leaves.get(lidx.0).unwrap();
                     let view = views.get(l.vidx);
-                    (view.buf, l.vidx, lidx, l.parent)
+                    (view.buf, l.vidx, lidx)
                 };
                 match cmd{
                     Cmd::EnterCmd=>{
@@ -1530,7 +1521,8 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                             view.cursor = line_start + col;
                         }
                         let buffer = buffers.get_mut(bidx);
-                        View::scroll(view, buffer);
+                        View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
+                        // View::scroll(view, buffer);
                     }
                     Cmd::MoveDown=>{
                         let view = views.get_mut(vidx);
@@ -1543,7 +1535,8 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                             let len = buffer.buf.line(line).len_chars();
                             let col = view.prefered_x.min(len.saturating_sub(1));
                             view.cursor = start + col;
-                            View::scroll(view, buffers.get_mut(bidx));
+                            View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffers.get_mut(bidx));
+                            // View::scroll(view, buffers.get_mut(bidx));
                         }
                     }
                     Cmd::MoveRight=>{
@@ -1618,7 +1611,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                             view.prefered_x = col;
                             let view = views.get_mut(vidx);
                             let buffer = buffers.get_mut(bidx);
-                            View::scroll(view, buffer);
+                            View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
                             return Ok(());
                         }
                         return Err(EditorErr::Msg("redo stack is empty".to_string()))
@@ -1670,7 +1663,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                         let line = line.min(len_lines);
                         let line_start = buffer.buf.line_to_char(line);
                         view.cursor = line_start;
-                        View::scroll(view, buffer);
+                        View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
                     }
                     Cmd::BackSpace=>{
                         let view = views.get_mut(vidx);
@@ -1709,7 +1702,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                                 view.prefered_x = prev_len;
                                 view.cursor = prev_start + prev_len;
                             }
-                            View::scroll(view, buffer);
+                            View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
                         }
                     }
                     Cmd::Noop=>{},
@@ -1727,7 +1720,7 @@ fn main()->io::Result<()>{
     let mut buffers = Buffers::new();
     let mut nodes = Nodes::new();
     let (width, height) = terminal::size().unwrap();
-    let mut cmd_line = CmdLine::new(height-1);
+    let mut cmd_line = CmdLine::new(width, height-1);
     let base = SplitIdx(nodes.splits.len());
     nodes.splits.push(Split{
         parent: None,
@@ -1738,7 +1731,11 @@ fn main()->io::Result<()>{
             x: 0,
             y: 0,
             height: height-1,
-            width 
+            width, 
+            max_height:None,
+            max_width:None,
+            min_width:None,
+            min_height:None,
         }
     });
     let mut focus = {
@@ -1751,8 +1748,7 @@ fn main()->io::Result<()>{
                 buffers.push(Buffer::new(Some(&args[0]), 0).unwrap())
             }
         };
-        let rect = Rect{x:0, y:0, width:0, height:0};
-        let vidx = views.push(View::new(bidx, &[Decoration::StatusBar(rect.clone()), Decoration::LineNumber(rect)]));
+        let vidx = views.push(View::new(bidx));
         let l = nodes.new_leaf(vidx, &mut views, base);
         Focus::Leaf(l)
         // focus = Focus::Leaf(Nodes::new_leaf(&mut nodes, base, vidx, &mut views));
@@ -1763,7 +1759,7 @@ fn main()->io::Result<()>{
 
     //inital draw
     let mut old = ScreenBuffer{width, height, cells: vec![' '; (width * height) as usize]};
-    let mut new = ScreenBuffer{width, height, cells: vec![' '; (width * height)as usize]};
+    let mut new = ScreenBuffer{width, height, cells: vec![' '; (width * height) as usize]};
     nodes.paint(&focus, &cmd_line, &views, &buffers, &mut old, &mut new)?;
     stdout().flush().unwrap();
 

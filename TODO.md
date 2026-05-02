@@ -1,7 +1,10 @@
 # TODO
 
 ### current
-redo UI system again :(
+redo UI system
+    add logic for min width/height and max width/height in recalc
+    add componenets
+
 :splitv/splith replace the current leaf with a branch and move the leaf into the new branch instead of apending children
 
 
