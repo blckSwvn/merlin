@@ -129,21 +129,18 @@ impl Buffers{
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ViewIdx{
-    idx:usize,
-    generation:u64,
-}
+struct ViewIdx(usize);
 struct Views(Vec<View>);
 impl Views{
     fn new()->Self {Self(Vec::new())}
     fn get(&self, idx: ViewIdx)->&View{
-        &self.0[idx.idx]
+        &self.0[idx.0]
     }
     fn get_mut(&mut self, idx: ViewIdx)->&mut View{
-        &mut self.0[idx.idx]
+        &mut self.0[idx.0]
     }
     fn push(&mut self, view: View) -> ViewIdx{
-        let idx = ViewIdx{idx:self.0.len(), generation: 0};
+        let idx = ViewIdx(self.0.len());
         self.0.push(view);
         idx
     }
@@ -264,6 +261,7 @@ struct CmdLine{
     rect: Rect,
     cursor: usize,
     error: bool,
+    last_view: (LeafIdx, ViewIdx),
 }
 impl CmdLine{
     fn new(width:u16, height:u16)->Self{
@@ -281,7 +279,16 @@ impl CmdLine{
             },
             cursor: 0,
             error: false,
+            last_view: (LeafIdx(usize::MAX), ViewIdx(usize::MAX))
         }
+    }
+    fn enter_cmd_mode(&mut self, vidx: ViewIdx, focus: &mut Focus, views: &mut Views, lidx: LeafIdx){
+        self.last_view = (lidx, vidx);
+        views.get_mut(vidx).mode = Mode::Normal;
+        self.input.clear();
+        self.cursor = 0;
+        *focus = Focus::CmdLine;
+        queue!(stdout(), cursor::SetCursorStyle::SteadyBar).unwrap();
     }
     fn insert(&mut self, c: char){
         if self.error{
@@ -339,45 +346,6 @@ struct View{
 }
 
 impl View{
-    fn draw(&self, buffers: &Buffers, rect: &Rect, screen: &mut ScreenBuffer){
-        deco_draw(&self, rect, buffers, screen);
-        text_draw(&self, rect, buffers, screen);
-        fn text_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer){
-            for row in 0..rect.height.saturating_sub(1){
-                let line_idx = view.off + row as usize;
-                if let Some(line) = buffers.get(view.buf).buf.get_line(line_idx){
-                    let end = usize::min(rect.width as usize, line.len_chars());
-                    let s = line.slice(..end.saturating_sub(1));
-                    screen.set_string_xy(rect.x+5, rect.y + row, &s.to_string());
-                }
-            }
-        }
-        fn deco_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer){
-            for row in 0..rect.height{
-                let screen_y = rect.y + row as u16;
-                let line_num = view.off+row as usize;
-                let s = format!("{:>width$} ", line_num,
-                    width = 4);
-                screen.set_string_xy(rect.x, screen_y, &s);
-            }
-            let mut path = "SCRATCH";
-            let buffer = buffers.get(view.buf);
-            if !buffer.check_flag(Buffer::SCRATCH){
-                if let Some(p) = &buffer.file{
-                    path = p.to_str().unwrap_or("NEW_FILE");
-                }else{
-                    path = "NEW_FILE";
-                }
-            }
-            let mode_str = match view.mode{
-                Mode::Normal=>"NOR",
-                Mode::Insert=>"INS",
-            };
-            let s = format!("{mode_str} {} {path}", view.buf.idx);
-            let s = format!("{:width$}", s, width = rect.width as usize);
-            screen.set_string_xy(rect.x, rect.y + rect.height.saturating_sub(1), &s);
-        }
-    }
     fn new(buf: BufferIdx)->Self{
         Self{
             buf,
@@ -409,13 +377,409 @@ impl View{
     }
 }
 
+trait Component{
+    fn clone_comp(&self)->Box<dyn Component>;
+    fn draw(
+        &self,
+        rect: &Rect,
+        views: &Views,
+        buffers: &Buffers,
+        screen: &mut ScreenBuffer
+    );
+    fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers)->(u16, u16);
+    fn behaviour(
+        &self,
+        key: KeyEvent,
+        focus: &mut Focus,
+        cmd_line: &mut CmdLine,
+        views: &mut Views,
+        buffers: &mut Buffers,
+        nodes: &mut Nodes,
+    )->Result<(), EditorErr>;
+}
+
+impl Component for ViewIdx{
+    fn clone_comp(&self)->Box<dyn Component> {
+        Box::new(*self)
+    }
+    fn draw(
+        &self,
+        rect: &Rect,
+        views: &Views,
+        buffers: &Buffers,
+        screen: &mut ScreenBuffer
+    ){
+        let v = views.get(*self);
+        deco_draw(v, rect, buffers, screen);
+        text_draw(v, rect, buffers, screen);
+        fn text_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer){
+            for row in 0..rect.height.saturating_sub(1){
+                let line_idx = view.off + row as usize;
+                if let Some(line) = buffers.get(view.buf).buf.get_line(line_idx){
+                    let end = usize::min(rect.width as usize -4, line.len_chars());
+                    let s = line.slice(..end.saturating_sub(1));
+                    screen.set_string_xy(rect.x+5, rect.y + row, &s.to_string());
+                }
+            }
+        }
+        fn deco_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer){
+            for row in 0..rect.height{
+                let screen_y = rect.y + row as u16;
+                let line_num = view.off+row as usize;
+                let s = format!("{:>width$} ", line_num,
+                    width = 4);
+                screen.set_string_xy(rect.x, screen_y, &s);
+            }
+            let mut path = "SCRATCH";
+            let buffer = buffers.get(view.buf);
+            if !buffer.check_flag(Buffer::SCRATCH){
+                if let Some(p) = &buffer.file{
+                    path = p.to_str().unwrap_or("NEW_FILE");
+                }else{
+                    path = "NEW_FILE";
+                }
+            }
+            let mode_str = match view.mode{
+                Mode::Normal=>"NOR",
+                Mode::Insert=>"INS",
+            };
+            let s = format!("{mode_str} {} {path}", view.buf.idx);
+            let s = format!("{:width$}", s, width = rect.width as usize);
+            screen.set_string_xy(rect.x, rect.y + rect.height.saturating_sub(1), &s);
+        }
+    }
+    fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers)->(u16, u16) {
+        let v = views.get(*self);
+        let b = buffers.get(v.buf);
+        let line = b.buf.char_to_line(v.cursor);
+        let line_start = b.buf.line_to_char(line);
+        let x = v.cursor - line_start;
+        let y = line - v.off;
+        (x as u16 + 5 + rect.x as u16, y as u16 + rect.y as u16)
+    }
+    fn behaviour(
+        &self,
+        key: KeyEvent,
+        focus: &mut Focus,
+        cmd_line: &mut CmdLine,
+        views: &mut Views,
+        buffers: &mut Buffers,
+        nodes: &mut Nodes,
+    )->Result<(), EditorErr> {
+        let cmd = key_to_cmd(key, views.get(*self));
+        exec_cmd(cmd, *self, nodes, focus, cmd_line, views, buffers)?;
+        enum Cmd{
+            EnterNormal,
+            EnterInsert,
+            Insert(char),
+            NewLine,
+            BackSpace,
+            Undo,
+            Redo,
+            MoveUp,
+            MoveDown,
+            MoveRight,
+            MoveLeft,
+            FocusUp,
+            FocusDown,
+            FocusRight,
+            FocusLeft,
+            EnterCmd,
+            Noop,
+        }
+        fn key_to_cmd(key: KeyEvent, view: &View)->Cmd{
+            match view.mode{
+                Mode::Normal=>{
+                    match key.code{
+                        KeyCode::Char('i')=>Cmd::EnterInsert,
+                        KeyCode::Char(':')=>Cmd::EnterCmd,
+                        KeyCode::Char('u')=>Cmd::Undo,
+                        KeyCode::Char('U')=>Cmd::Redo,
+                        KeyCode::Char('h')=>Cmd::MoveLeft,
+                        KeyCode::Char('j')=>Cmd::MoveDown,
+                        KeyCode::Char('k')=>Cmd::MoveUp,
+                        KeyCode::Char('l')=>Cmd::MoveRight,
+                        KeyCode::Char('H')=>Cmd::FocusLeft,
+                        KeyCode::Char('J')=>Cmd::FocusDown,
+                        KeyCode::Char('K')=>Cmd::FocusUp,
+                        KeyCode::Char('L')=>Cmd::FocusRight,
+                        _ => Cmd::Noop,
+                    }
+                }
+                Mode::Insert=>{
+                    match key.code{
+                        KeyCode::Esc=>Cmd::EnterNormal,
+                        KeyCode::Backspace=>Cmd::BackSpace,
+                        KeyCode::Enter=>Cmd::NewLine,
+                        KeyCode::Char(c)=>Cmd::Insert(c),
+                        _ => Cmd::Noop,
+                    }
+                }
+            }
+        }
+        fn exec_cmd(
+            cmd: Cmd,
+            vidx: ViewIdx,
+            nodes: &mut Nodes,
+            focus: &mut Focus,
+            cmd_line: &mut CmdLine,
+            views: &mut Views,
+            buffers: &mut Buffers
+        )->Result<(), EditorErr>{
+            fn enter_normal(view: &mut View, cmd_line: &mut CmdLine){
+                view.mode = Mode::Normal;
+                queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
+                cmd_line.cursor = 0;
+            }
+            let (bidx, lidx) = {
+                let mut curr = NodeIdx::Split(SplitIdx(0));
+                let lidx = loop{
+                    match curr {
+                        NodeIdx::Split(s) =>{
+                            let Split {children, focus: f, ..} = nodes.splits.get(s.0).unwrap();
+                            curr = *children.get(*f).unwrap();
+                        }
+                        NodeIdx::Leaf(l)=>{
+                            break l
+
+                        }
+                    }
+                };
+                (views.get(vidx).buf, lidx)
+            };
+            match cmd{
+                Cmd::EnterCmd=>{
+                    cmd_line.enter_cmd_mode(vidx, focus, views, lidx);
+                }
+                Cmd::EnterInsert=>{
+                    queue!(stdout(), cursor::SetCursorStyle::SteadyBar)?;
+                    views.get_mut(vidx).mode = Mode::Insert;
+                }
+                Cmd::EnterNormal=>{
+                    enter_normal(views.get_mut(vidx), cmd_line);
+                }
+                Cmd::FocusUp=>{
+                    nodes.focus_up(focus);
+                }
+                Cmd::FocusDown=>{
+                    nodes.focus_down(focus);
+                }
+                Cmd::FocusRight=>{
+                    nodes.focus_right(focus);
+                }
+                Cmd::FocusLeft=>{
+                    nodes.focus_left(focus);
+                }
+                Cmd::MoveUp=>{
+                    let buffer = buffers.get(bidx);
+                    let view = views.get_mut(vidx);
+                    let line = buffer.buf.char_to_line(view.cursor);
+                    if line > 0 {
+                        let line = line - 1;
+                        let line_start = buffer.buf.line_to_char(line);
+                        let line_len = buffer.buf.line(line).len_chars();
+                        let col = view.prefered_x.min(line_len.saturating_sub(1));
+
+                        view.cursor = line_start + col;
+                    }
+                    let buffer = buffers.get_mut(bidx);
+                    View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
+                }
+                Cmd::MoveDown=>{
+                    let view = views.get_mut(vidx);
+                    let buffer = buffers.get(bidx);
+                    let len_lines = buffer.buf.len_lines();
+                    let line = buffer.buf.char_to_line(view.cursor);
+                    if line + 1 < len_lines{
+                        let line = line + 1;
+                        let start = buffer.buf.line_to_char(line);
+                        let len = buffer.buf.line(line).len_chars();
+                        let col = view.prefered_x.min(len.saturating_sub(1));
+                        view.cursor = start + col;
+                        View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffers.get_mut(bidx));
+                    }
+                }
+                Cmd::MoveRight=>{
+                    let buffer = buffers.get(bidx);
+                    let view = views.get_mut(vidx);
+                    let line = buffer.buf.char_to_line(view.cursor);
+                    let line_start = buffer.buf.line_to_char(line);
+                    let line_len = buffer.buf.line(line).len_chars();
+                    if view.cursor < line_start + line_len.saturating_sub(1){
+                        let col = view.cursor - line_start; 
+                        let col = col + 1;
+                        let col = col.min(buffer.buf.line(line).len_chars().saturating_sub(1));
+                        view.prefered_x = col;
+                        view.cursor = line_start + col;
+                    }
+                }
+                Cmd::MoveLeft=>{
+                    let buffer = buffers.get(bidx);
+                    let view = views.get_mut(vidx);
+                    let line = buffer.buf.char_to_line(view.cursor);
+                    let line_start = buffer.buf.line_to_char(line);
+                    let col = view.cursor - line_start;
+                    if view.cursor > line_start {
+                        let col = col - 1;
+                        view.prefered_x = col;
+                        view.cursor = line_start + col;
+                    }
+                }
+                Cmd::Undo=>{
+                    let view = views.get_mut(vidx);
+                    let buffer = buffers.get_mut(bidx);
+                    if let Some(edit) = buffer.undo.pop(){
+                        match edit{
+                            Edit::Insert { idx, text, }=>{
+                                buffer.redo.push(Edit::Delete { idx, text: text.clone() });
+                                buffer.buf.remove(idx..idx + text.chars().count());
+                                view.cursor = idx;
+                            },
+                            Edit::Delete { idx, text, }=>{
+                                buffer.redo.push(Edit::Insert {idx, text: text.clone()});
+                                buffer.buf.insert(idx, &text);
+                                view.cursor = idx;
+                            },
+                        }
+                        let line = buffer.buf.char_to_line(view.cursor);
+                        let line_start = buffer.buf.line_to_char(line);
+                        let col = view.cursor - line_start;
+                        view.prefered_x = col;
+                        return Ok(())
+                    }
+                    return Err(EditorErr::Msg("undo stack is empty".to_string()))
+                }
+                Cmd::Redo=>{
+                    let view = views.get_mut(vidx);
+                    let buffer = buffers.get_mut(bidx);
+                    if let Some(edit) = buffer.redo.pop() {
+                        match edit {
+                            Edit::Insert { idx, text } => {
+                                buffer.buf.remove(idx..idx + text.chars().count());
+                                view.cursor = idx;
+                                buffer.undo.push(Edit::Delete{idx, text});
+                            }
+                            Edit::Delete { idx, text } => {
+                                buffer.buf.insert(idx, &text);
+                                view.cursor = idx;
+                                buffer.undo.push(Edit::Insert{ idx, text });
+                            }
+                        }
+                        let line = buffer.buf.char_to_line(view.cursor);
+                        let line_start = buffer.buf.line_to_char(line);
+                        let col = view.cursor - line_start;
+                        view.prefered_x = col;
+                        let view = views.get_mut(vidx);
+                        let buffer = buffers.get_mut(bidx);
+                        View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
+                        return Ok(());
+                    }
+                    return Err(EditorErr::Msg("redo stack is empty".to_string()))
+                }
+                Cmd::Insert(c)=>{
+                    let buffer = buffers.get_mut(bidx);
+                    buffer.redo.clear();
+                    let view = views.get(vidx);
+                    if let Some(edit) = buffer.undo.last_mut(){
+                        match edit{
+                            Edit::Insert {idx: c_idx, text, ..}=>{
+                                if *c_idx <= view.cursor && view.cursor <= *c_idx+text.chars().count(){
+                                    let byte_idx = text.char_indices()
+                                        .nth(view.cursor - *c_idx)
+                                        .map(|(b_idx, _)| b_idx)
+                                        .unwrap_or(text.len());
+                                    text.insert_str(byte_idx, &c.to_string());
+                                }else{
+                                    buffer.undo.push(Edit::Insert{ idx: view.cursor, text: c.into() });
+                                }
+                            }
+                            Edit::Delete {..}=>{
+                                buffer.undo.push(Edit::Insert{ idx: view.cursor, text: c.into() });
+                            }
+                        }
+                    }else{
+                        buffer.undo.push(Edit::Insert { idx: view.cursor, text: c.into()});
+                    }
+                    buffer.insert(view.off, view.cursor, c);
+                    let view = views.get_mut(vidx);
+                    let line = buffer.buf.char_to_line(view.cursor);
+                    let line_start = buffer.buf.line_to_char(line);
+                    let col = view.cursor +1 - line_start;
+
+                    let line_end = buffer.buf.line(line).len_chars();
+                    let col = col.min(line_end.saturating_sub(1));
+
+                    view.cursor = line_start + col;
+                    view.prefered_x = view.cursor - line_start;
+                }
+                Cmd::NewLine=>{
+                    let view = views.get_mut(vidx);
+                    let buffer = buffers.get_mut(bidx);
+                    buffer.redo.clear();
+                    buffer.insert(view.off, view.cursor, '\n');
+                    buffer.redo.push(Edit::Insert { idx: view.cursor, text: "\n".to_string() });
+                    let line = buffer.buf.char_to_line(view.cursor)+1;
+                    let len_lines = buffer.buf.len_lines();
+                    let line = line.min(len_lines);
+                    let line_start = buffer.buf.line_to_char(line);
+                    view.cursor = line_start;
+                    View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
+                }
+                Cmd::BackSpace=>{
+                    let view = views.get_mut(vidx);
+                    let buffer = buffers.get_mut(bidx);
+                    buffer.redo.clear();
+                    if view.cursor != 0{
+                        let del = buffer.buf.slice(view.cursor-1..view.cursor).to_string();
+                        if let Some(edit) = buffer.undo.last_mut(){
+                            match edit{
+                                Edit::Insert {..}=>{
+                                    buffer.undo.push(Edit::Delete { idx:view.cursor-1, text: del });
+                                },
+                                Edit::Delete { idx: xidx, text, .. }=>{
+                                    if *xidx == view.cursor{
+                                        *xidx -= 1;
+                                        text.insert_str(0, &del);
+                                    }else{
+                                        buffer.undo.push(Edit::Delete { idx: view.cursor - 1, text: del});
+                                    }
+                                }
+                            }
+                        }else{
+                            buffer.undo.push(Edit::Delete { idx: view.cursor-1, text: del});
+                        }
+                        let line = buffer.buf.char_to_line(view.cursor);
+                        let line_start = buffer.buf.line_to_char(line);
+                        let col = view.cursor - line_start;
+                        let prev_start = buffer.buf.line_to_char(line.saturating_sub(1));
+                        let prev_len = buffer.buf.line(line.saturating_sub(1)).len_chars().saturating_sub(1);
+                        buffer.buf.remove(view.cursor- 1..view.cursor);
+                        if view.cursor > line_start{
+                            let col = col - 1;
+                            view.prefered_x = col;
+                            view.cursor = line_start + col;
+                        }else{
+                            view.prefered_x = prev_len;
+                            view.cursor = prev_start + prev_len;
+                        }
+                        View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
+                    }
+                }
+                Cmd::Noop=>{},
+            }
+            Ok(())
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LeafIdx(usize);
 
 struct Leaf{
     parent: SplitIdx,
     rect: Rect,
-    vidx: ViewIdx,
+    comp: Box<dyn Component>,
 }
 
 #[derive(Clone, Copy)]
@@ -486,7 +850,7 @@ impl Nodes{
         }
     }
 
-    fn new_split(&mut self, vidx: ViewIdx, parent: SplitIdx, direction: Direction, views: &mut Views)->(LeafIdx, SplitIdx){
+    fn new_split(&mut self, vidx: ViewIdx, parent: SplitIdx, direction: Direction)->(LeafIdx, SplitIdx){
         let new_parent = self.push_branch(Split{
             parent:Some(parent),
             children: vec![],
@@ -504,12 +868,13 @@ impl Nodes{
             }
         });
         self.splits[parent.0].children.push(NodeIdx::Split(new_parent));
-        let lidx = self.new_leaf(vidx, new_parent);
+        let comp: Box<dyn Component> = Box::new(vidx);
+        let lidx = self.new_leaf(comp, new_parent);
         self.recalc(parent);
         (lidx, new_parent)
     }
-    fn new_leaf(&mut self, vidx: ViewIdx, parent: SplitIdx)->LeafIdx{
-        let lidx = self.push_leaf(Leaf{parent, vidx, rect: Rect{
+    fn new_leaf(&mut self, comp: Box<dyn Component>, parent: SplitIdx)->LeafIdx{
+        let lidx = self.push_leaf(Leaf{parent, comp, rect: Rect{
             x: 0,
             y: 0,
             height: 0,
@@ -744,8 +1109,9 @@ impl Nodes{
         let Split {children, focus:f, ..} = self.splits.get_mut(0).unwrap();
         if children.is_empty(){
             let vidx = views.push(View::new(SCRATCH));
+            let comp: Box<dyn Component> = Box::new(vidx);
             *f = 0;
-            self.new_leaf(vidx, SplitIdx(0));
+            self.new_leaf(comp, SplitIdx(0));
         }
 
         let mut curr = NodeIdx::Split(SplitIdx(0));
@@ -778,13 +1144,9 @@ impl Nodes{
                 queue!(stdout(), MoveTo(cmd_line.cursor as u16 +1, cmd_line.rect.y))?;
             }
             Focus::Leaf(l)=>{
-                let Leaf{vidx, rect, ..} = self.leaves.get(l.0).unwrap();
-                let v = views.get(*vidx);
-                let b = buffers.get(v.buf);
-                let line = b.buf.char_to_line(v.cursor);
-                let line_start = b.buf.line_to_char(line);
-                let col = v.cursor - line_start +5;
-                queue!(stdout(), MoveTo(col as u16 + rect.x, line as u16 - v.off as u16 + rect.y))?;
+                let Leaf{comp, rect, ..} = self.leaves.get(l.0).unwrap();
+                let (x, y) = comp.cursor_xy(rect, views, buffers).clone();
+                queue!(stdout(), MoveTo(x, y))?;
             }
             _ => {},
         }
@@ -809,8 +1171,7 @@ impl Nodes{
                 }
                 NodeIdx::Leaf(l)=>{
                     let l = &nodes.leaves[l.0];
-                    let view = views.get(l.vidx);
-                    view.draw(buffers, &l.rect, new);
+                    l.comp.draw(&l.rect, views, buffers, new);
                 }
             }
         }
@@ -1256,22 +1617,8 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                 buffers: &mut Buffers
             )->Result<(), EditorErr>{
                 let (bidx, vidx, lidx, parent) = {
-                    let mut curr = NodeIdx::Split(SplitIdx(0));
-                    let lidx = loop{
-                        match curr {
-                            NodeIdx::Split(s) =>{
-                                let Split {children, focus: f, ..} = nodes.splits.get(s.0).unwrap();
-                                curr = *children.get(*f).unwrap();
-                            }
-                            NodeIdx::Leaf(l)=>{
-                                break l
-                                    
-                            }
-                        }
-                    };
-                    let l = nodes.leaves.get(lidx.0).unwrap();
-                    let view = views.get(l.vidx);
-                    (view.buf, l.vidx, lidx, l.parent)
+                    let l = nodes.leaves.get(cmd_line.last_view.0.0).expect(&format!("lidx invalid:{}",cmd_line.last_view.0.0));
+                    (views.get(cmd_line.last_view.1).buf, cmd_line.last_view.1, cmd_line.last_view.0, l.parent)
                 };
                 fn enter_normal(focus: &mut Focus, lidx: LeafIdx, cmd_line: &mut CmdLine){
                     queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
@@ -1285,7 +1632,6 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                                 exec_cmd(cmd, cmd_line, nodes, focus, views, buffers)?;
                             }
                             Err(s)=>{
-                                // *focus = Focus::Leaf(nidx);
                                 return Err(EditorErr::Msg(s))
                             }
                         }
@@ -1371,7 +1717,6 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                     Cmd::Save(f)=>{
                         let buffer = buffers.get_mut(bidx);
                         if buffer.check_flag(Buffer::READ_ONLY){
-                            // cmd_line.error("cannot save read only");
                             return Err(EditorErr::ReadOnly(bidx));
                         }
                         if buffer.check_flag(Buffer::SCRATCH){
@@ -1419,7 +1764,6 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                             view.cursor = buffer.last_cursor;
                             view.prefered_x = col;
                             view.scroll(&nodes.leaves.get(lidx.0).unwrap().rect, buffer);
-                            // view.scroll(buffer);
                             enter_normal(focus, lidx, cmd_line);
                         }else{
                             return Err(EditorErr::InvalidBuffer);
@@ -1441,19 +1785,20 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                     Cmd::Split=>{
                         let vidx = views.push(View::new(
                             SCRATCH));
-                        nodes.new_leaf(vidx, parent);
+                        let comp: Box<dyn Component> = Box::new(vidx);
+                        nodes.new_leaf(comp, parent);
                         enter_normal(focus, lidx, cmd_line);
                     }
                     Cmd::SplitV=>{
                         let vidx = views.push(View::new(
                             SCRATCH));
-                        let (_, _) = nodes.new_split(vidx, parent, Direction::Vertical, views);
+                        let (_, _) = nodes.new_split(vidx, parent, Direction::Vertical);
                         enter_normal(focus, lidx, cmd_line);
                     }
                     Cmd::SplitH=>{
                         let vidx = views.push(View::new(
                             SCRATCH));
-                        let (_, _) = nodes.new_split(vidx, parent, Direction::Horizontal, views);
+                        let (_, _) = nodes.new_split(vidx, parent, Direction::Horizontal);
                         enter_normal(focus, lidx, cmd_line);
                     }
                     Cmd::Noop=>{}
@@ -1464,317 +1809,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
             Ok(())
         }
         Focus::Leaf(lidx)=>{
-            let lidx = lidx.clone();
-            let Leaf {vidx, ..} = nodes.leaves.get(lidx.0).unwrap();
-            let cmd = key_to_cmd(key, views.get(*vidx));
-            exec_cmd(cmd, nodes, focus, cmd_line, views, buffers)?;
-            enum Cmd{
-                EnterNormal,
-                EnterInsert,
-                Insert(char),
-                NewLine,
-                BackSpace,
-                Undo,
-                Redo,
-                MoveUp,
-                MoveDown,
-                MoveRight,
-                MoveLeft,
-                FocusUp,
-                FocusDown,
-                FocusRight,
-                FocusLeft,
-                EnterCmd,
-                Noop,
-            }
-            fn key_to_cmd(key: KeyEvent, view: &View)->Cmd{
-                match view.mode{
-                    Mode::Normal=>{
-                        match key.code{
-                            KeyCode::Char('i')=>Cmd::EnterInsert,
-                            KeyCode::Char(':')=>Cmd::EnterCmd,
-                            KeyCode::Char('u')=>Cmd::Undo,
-                            KeyCode::Char('U')=>Cmd::Redo,
-                            KeyCode::Char('h')=>Cmd::MoveLeft,
-                            KeyCode::Char('j')=>Cmd::MoveDown,
-                            KeyCode::Char('k')=>Cmd::MoveUp,
-                            KeyCode::Char('l')=>Cmd::MoveRight,
-                            KeyCode::Char('H')=>Cmd::FocusLeft,
-                            KeyCode::Char('J')=>Cmd::FocusDown,
-                            KeyCode::Char('K')=>Cmd::FocusUp,
-                            KeyCode::Char('L')=>Cmd::FocusRight,
-                            _ => Cmd::Noop,
-                        }
-                    }
-                    Mode::Insert=>{
-                        match key.code{
-                            KeyCode::Esc=>Cmd::EnterNormal,
-                            KeyCode::Backspace=>Cmd::BackSpace,
-                            KeyCode::Enter=>Cmd::NewLine,
-                            KeyCode::Char(c)=>Cmd::Insert(c),
-                            _ => Cmd::Noop,
-                        }
-                    }
-                }
-            }
-            fn exec_cmd(
-                cmd: Cmd,
-                nodes: &mut Nodes,
-                focus: &mut Focus,
-                cmd_line: &mut CmdLine,
-                views: &mut Views,
-                buffers: &mut Buffers
-            )->Result<(), EditorErr>{
-                fn enter_normal(view: &mut View, cmd_line: &mut CmdLine){
-                    view.mode = Mode::Normal;
-                    queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
-                    cmd_line.cursor = 0;
-                }
-                let (bidx, vidx, lidx) = {
-                    let mut curr = NodeIdx::Split(SplitIdx(0));
-                    let lidx = loop{
-                        match curr {
-                            NodeIdx::Split(s) =>{
-                                let Split {children, focus: f, ..} = nodes.splits.get(s.0).unwrap();
-                                curr = *children.get(*f).unwrap();
-                            }
-                            NodeIdx::Leaf(l)=>{
-                                break l
-                                    
-                            }
-                        }
-                    };
-                    let l = nodes.leaves.get(lidx.0).unwrap();
-                    let view = views.get(l.vidx);
-                    (view.buf, l.vidx, lidx)
-                };
-                match cmd{
-                    Cmd::EnterCmd=>{
-                        cmd_line.cursor = 0;
-                        cmd_line.input.clear();
-                        queue!(stdout(), cursor::SetCursorStyle::SteadyBar)?;
-                        *focus = Focus::CmdLine;
-                    }
-                    Cmd::EnterInsert=>{
-                        queue!(stdout(), cursor::SetCursorStyle::SteadyBar)?;
-                        views.get_mut(vidx).mode = Mode::Insert;
-                    }
-                    Cmd::EnterNormal=>{
-                        enter_normal(views.get_mut(vidx), cmd_line);
-                    }
-                    Cmd::FocusUp=>{
-                        nodes.focus_up(focus);
-                    }
-                    Cmd::FocusDown=>{
-                        nodes.focus_down(focus);
-                    }
-                    Cmd::FocusRight=>{
-                        nodes.focus_right(focus);
-                    }
-                    Cmd::FocusLeft=>{
-                        nodes.focus_left(focus);
-                    }
-                    Cmd::MoveUp=>{
-                        let buffer = buffers.get(bidx);
-                        let view = views.get_mut(vidx);
-                        let line = buffer.buf.char_to_line(view.cursor);
-                        if line > 0 {
-                            let line = line - 1;
-                            let line_start = buffer.buf.line_to_char(line);
-                            let line_len = buffer.buf.line(line).len_chars();
-                            let col = view.prefered_x.min(line_len.saturating_sub(1));
-
-                            view.cursor = line_start + col;
-                        }
-                        let buffer = buffers.get_mut(bidx);
-                        View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
-                        // View::scroll(view, buffer);
-                    }
-                    Cmd::MoveDown=>{
-                        let view = views.get_mut(vidx);
-                        let buffer = buffers.get(bidx);
-                        let len_lines = buffer.buf.len_lines();
-                        let line = buffer.buf.char_to_line(view.cursor);
-                        if line + 1 < len_lines{
-                            let line = line + 1;
-                            let start = buffer.buf.line_to_char(line);
-                            let len = buffer.buf.line(line).len_chars();
-                            let col = view.prefered_x.min(len.saturating_sub(1));
-                            view.cursor = start + col;
-                            View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffers.get_mut(bidx));
-                            // View::scroll(view, buffers.get_mut(bidx));
-                        }
-                    }
-                    Cmd::MoveRight=>{
-                        let buffer = buffers.get(bidx);
-                        let view = views.get_mut(vidx);
-                        let line = buffer.buf.char_to_line(view.cursor);
-                        let line_start = buffer.buf.line_to_char(line);
-                        let line_len = buffer.buf.line(line).len_chars();
-                        if view.cursor < line_start + line_len.saturating_sub(1){
-                            let col = view.cursor - line_start; 
-                            let col = col + 1;
-                            let col = col.min(buffer.buf.line(line).len_chars().saturating_sub(1));
-                            view.prefered_x = col;
-                            view.cursor = line_start + col;
-                        }
-                    }
-                    Cmd::MoveLeft=>{
-                        let buffer = buffers.get(bidx);
-                        let view = views.get_mut(vidx);
-                        let line = buffer.buf.char_to_line(view.cursor);
-                        let line_start = buffer.buf.line_to_char(line);
-                        let col = view.cursor - line_start;
-                        if view.cursor > line_start {
-                            let col = col - 1;
-                            view.prefered_x = col;
-                            view.cursor = line_start + col;
-                        }
-                    }
-                    Cmd::Undo=>{
-                        let view = views.get_mut(vidx);
-                        let buffer = buffers.get_mut(bidx);
-                        if let Some(edit) = buffer.undo.pop(){
-                            match edit{
-                                Edit::Insert { idx, text, }=>{
-                                    buffer.redo.push(Edit::Delete { idx, text: text.clone() });
-                                    buffer.buf.remove(idx..idx + text.chars().count());
-                                    view.cursor = idx;
-                                },
-                                Edit::Delete { idx, text, }=>{
-                                    buffer.redo.push(Edit::Insert {idx, text: text.clone()});
-                                    buffer.buf.insert(idx, &text);
-                                    view.cursor = idx;
-                                },
-                            }
-                            let line = buffer.buf.char_to_line(view.cursor);
-                            let line_start = buffer.buf.line_to_char(line);
-                            let col = view.cursor - line_start;
-                            view.prefered_x = col;
-                            return Ok(())
-                        }
-                        return Err(EditorErr::Msg("undo stack is empty".to_string()))
-                    }
-                    Cmd::Redo=>{
-                        let view = views.get_mut(vidx);
-                        let buffer = buffers.get_mut(bidx);
-                        if let Some(edit) = buffer.redo.pop() {
-                            match edit {
-                                Edit::Insert { idx, text } => {
-                                    buffer.buf.remove(idx..idx + text.chars().count());
-                                    view.cursor = idx;
-                                    buffer.undo.push(Edit::Delete{idx, text});
-                                }
-                                Edit::Delete { idx, text } => {
-                                    buffer.buf.insert(idx, &text);
-                                    view.cursor = idx;
-                                    buffer.undo.push(Edit::Insert{ idx, text });
-                                }
-                            }
-                            let line = buffer.buf.char_to_line(view.cursor);
-                            let line_start = buffer.buf.line_to_char(line);
-                            let col = view.cursor - line_start;
-                            view.prefered_x = col;
-                            let view = views.get_mut(vidx);
-                            let buffer = buffers.get_mut(bidx);
-                            View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
-                            return Ok(());
-                        }
-                        return Err(EditorErr::Msg("redo stack is empty".to_string()))
-                    }
-                    Cmd::Insert(c)=>{
-                        let buffer = buffers.get_mut(bidx);
-                        buffer.redo.clear();
-                        let view = views.get(vidx);
-                        if let Some(edit) = buffer.undo.last_mut(){
-                            match edit{
-                                Edit::Insert {idx: c_idx, text, ..}=>{
-                                    if *c_idx <= view.cursor && view.cursor <= *c_idx+text.chars().count(){
-                                        let byte_idx = text.char_indices()
-                                            .nth(view.cursor - *c_idx)
-                                            .map(|(b_idx, _)| b_idx)
-                                            .unwrap_or(text.len());
-                                        text.insert_str(byte_idx, &c.to_string());
-                                    }else{
-                                        buffer.undo.push(Edit::Insert{ idx: view.cursor, text: c.into() });
-                                    }
-                                }
-                                Edit::Delete {..}=>{
-                                    buffer.undo.push(Edit::Insert{ idx: view.cursor, text: c.into() });
-                                }
-                            }
-                        }else{
-                            buffer.undo.push(Edit::Insert { idx: view.cursor, text: c.into()});
-                        }
-                        buffer.insert(view.off, view.cursor, c);
-                        let view = views.get_mut(vidx);
-                        let line = buffer.buf.char_to_line(view.cursor);
-                        let line_start = buffer.buf.line_to_char(line);
-                        let col = view.cursor +1 - line_start;
-
-            let line_end = buffer.buf.line(line).len_chars();
-            let col = col.min(line_end.saturating_sub(1));
-
-                        view.cursor = line_start + col;
-                        view.prefered_x = view.cursor - line_start;
-                    }
-                    Cmd::NewLine=>{
-                        let view = views.get_mut(vidx);
-                        let buffer = buffers.get_mut(bidx);
-                        buffer.redo.clear();
-                        buffer.insert(view.off, view.cursor, '\n');
-                        buffer.redo.push(Edit::Insert { idx: view.cursor, text: "\n".to_string() });
-                        let line = buffer.buf.char_to_line(view.cursor)+1;
-                        let len_lines = buffer.buf.len_lines();
-                        let line = line.min(len_lines);
-                        let line_start = buffer.buf.line_to_char(line);
-                        view.cursor = line_start;
-                        View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
-                    }
-                    Cmd::BackSpace=>{
-                        let view = views.get_mut(vidx);
-                        let buffer = buffers.get_mut(bidx);
-                        buffer.redo.clear();
-                        if view.cursor != 0{
-                            let del = buffer.buf.slice(view.cursor-1..view.cursor).to_string();
-                            if let Some(edit) = buffer.undo.last_mut(){
-                                match edit{
-                                    Edit::Insert {..}=>{
-                                        buffer.undo.push(Edit::Delete { idx:view.cursor-1, text: del });
-                                    },
-                                    Edit::Delete { idx: xidx, text, .. }=>{
-                                        if *xidx == view.cursor{
-                                            *xidx -= 1;
-                                            text.insert_str(0, &del);
-                                        }else{
-                                            buffer.undo.push(Edit::Delete { idx: view.cursor - 1, text: del});
-                                        }
-                                    }
-                                }
-                            }else{
-                                buffer.undo.push(Edit::Delete { idx: view.cursor-1, text: del});
-                            }
-                            let line = buffer.buf.char_to_line(view.cursor);
-                            let line_start = buffer.buf.line_to_char(line);
-                            let col = view.cursor - line_start;
-                            let prev_start = buffer.buf.line_to_char(line.saturating_sub(1));
-                            let prev_len = buffer.buf.line(line.saturating_sub(1)).len_chars().saturating_sub(1);
-                            buffer.buf.remove(view.cursor- 1..view.cursor);
-                            if view.cursor > line_start{
-                                let col = col - 1;
-                                view.prefered_x = col;
-                                view.cursor = line_start + col;
-                            }else{
-                                view.prefered_x = prev_len;
-                                view.cursor = prev_start + prev_len;
-                            }
-                            View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
-                        }
-                    }
-                    Cmd::Noop=>{},
-                }
-                Ok(())
-            }
+            nodes.leaves.get(lidx.0).unwrap().comp.clone_comp().behaviour(key, focus, cmd_line, views, buffers, nodes)?;
             Ok(())
         }
     }
@@ -1815,7 +1850,8 @@ fn main()->io::Result<()>{
             }
         };
         let vidx = views.push(View::new(bidx));
-        let l = nodes.new_leaf(vidx, base);
+        let comp: Box<dyn Component> = Box::new(vidx);
+        let l = nodes.new_leaf(comp, base);
         Focus::Leaf(l)
     };
     enable_raw_mode()?;
@@ -1853,9 +1889,6 @@ fn main()->io::Result<()>{
                             }
                         }
                     };
-                    let Leaf {vidx,..} = nodes.leaves.get(l.0).unwrap();
-                    let v = views.get_mut(*vidx);
-                    v.mode = Mode::Normal;
                     focus = Focus::Leaf(l);
                     cmd_line.error = false;
                     queue!(stdout(), SetCursorStyle::SteadyBlock)?;
