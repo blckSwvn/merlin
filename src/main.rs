@@ -5,6 +5,7 @@ use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::stdout;
 use std::path::Path;
+use std::ptr;
 use std::sync::Mutex;
 use std::usize;
 use std::vec;
@@ -378,7 +379,6 @@ impl View{
 }
 
 trait Component{
-    fn clone_comp(&self)->Box<dyn Component>;
     fn draw(
         &self,
         rect: &Rect,
@@ -388,7 +388,7 @@ trait Component{
     );
     fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers)->(u16, u16);
     fn behaviour(
-        &self,
+        &mut self,
         key: KeyEvent,
         focus: &mut Focus,
         cmd_line: &mut CmdLine,
@@ -399,9 +399,6 @@ trait Component{
 }
 
 impl Component for ViewIdx{
-    fn clone_comp(&self)->Box<dyn Component> {
-        Box::new(*self)
-    }
     fn draw(
         &self,
         rect: &Rect,
@@ -458,7 +455,7 @@ impl Component for ViewIdx{
         (x as u16 + 5 + rect.x as u16, y as u16 + rect.y as u16)
     }
     fn behaviour(
-        &self,
+        &mut self,
         key: KeyEvent,
         focus: &mut Focus,
         cmd_line: &mut CmdLine,
@@ -773,6 +770,83 @@ impl Component for ViewIdx{
     }
 }
 
+struct BufferList{
+}
+
+impl Component for BufferList{
+    fn draw(
+        &self,
+        rect: &Rect,
+        _views: &Views,
+        buffers: &Buffers,
+        screen: &mut ScreenBuffer
+    ){
+        let dirty = {
+            if buffers.data.get(0).unwrap().undo.is_empty(){
+                ""
+            }else{
+                "Dirty"
+            }
+        };
+        screen.set_string_xy(rect.x, rect.y+0, &format!("{} {} {}",0, "SCRATCH", dirty));
+        for y in rect.y+1..rect.height+rect.y{
+            let (file_path, dirty) = {
+                if y as usize > buffers.data.len()-1{
+                    return
+                }
+                let dirty = {
+                    if buffers.data.get(y as usize).unwrap().undo.is_empty(){
+                        ""
+                    }else{
+                        "Dirty"
+                    }
+                };
+                match buffers.data.get(y as usize){
+                    None=>{
+                        ("NEW_FILE".to_string(), dirty)
+                    }
+                    Some(b)=>{
+                        match &b.file{
+                            Some(b)=>{
+                                (b.to_string_lossy().to_string(), dirty)
+                            }
+                            None=>("NEW_FILE".to_string(), dirty)
+                        }
+                    }
+                }
+            };
+            let s = format!("{} {} {}",y, file_path, dirty);
+            screen.set_string_xy(rect.x, y, &s);
+        }
+    }
+    fn cursor_xy(&self, rect: &Rect, _views: &Views, _buffers: &Buffers)->(u16, u16) {
+        (rect.x, rect.y)
+    }
+    fn behaviour(
+            &mut self,
+            key: KeyEvent,
+            focus: &mut Focus,
+            _cmd_line: &mut CmdLine,
+            views: &mut Views,
+            _buffers: &mut Buffers,
+            nodes: &mut Nodes,
+        )->Result<(), EditorErr> {
+        match key.code{
+            KeyCode::Esc=>{
+                let (l, lidx) = {
+                    let Focus::Leaf(lidx) = focus else {
+                        panic!()
+                    };
+                    (nodes.leaves.get(lidx.0).unwrap(), lidx.clone())
+                };
+                nodes.remove_child(l.parent, views, focus, NodeIdx::Leaf(lidx));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LeafIdx(usize);
 
@@ -921,6 +995,19 @@ impl Nodes{
             self.recalc(parent);
         }
         self.remove(child);
+        let mut curr = NodeIdx::Split(SplitIdx(0));
+        let lidx = loop{
+            match curr{
+                NodeIdx::Split(s)=>{
+                    let Split {children, focus:f, ..} = self.splits.get(s.0).unwrap();
+                    curr = *children.get(*f).unwrap();
+                }
+                NodeIdx::Leaf(l)=>{
+                    break l
+                }
+            }
+        };
+        *focus = Focus::Leaf(lidx);
     }
     fn remove(&mut self, nidx: NodeIdx){
         match nidx{
@@ -1512,6 +1599,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
             };
             exec_cmd(cmd, cmd_line, nodes, focus, views, buffers)?;
             enum Cmd{
+                BufferList,
                 EnterNormal,
                 Exec,
                 Insert(char),
@@ -1557,6 +1645,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                 let cmd = parts.next().ok_or(format!("unknown command: {}",s))?;
                 let rest = parts.next().unwrap_or("");
                 match cmd{
+                    "bufferlist" | "bl" =>Ok(Cmd::BufferList),
                     "q"  => Ok(Cmd::Quit(false)),
                     "Q" => Ok(Cmd::Quit(true)),
                     "w"  =>{
@@ -1626,6 +1715,11 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                     *focus = Focus::Leaf(lidx);
                 }
                 match cmd{
+                    Cmd::BufferList=>{
+                        let comp: Box<dyn Component> = Box::new(BufferList{});
+                        *focus = Focus::Leaf(nodes.new_leaf(comp, parent));
+                        queue!(stdout(), cursor::SetCursorStyle::SteadyBlock)?;
+                    }
                     Cmd::Exec=>{
                         match parse_cmd(cmd_line.input.clone()){
                             Ok(cmd)=>{
@@ -1704,12 +1798,10 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                         let lidx = loop{
                             match curr{
                                 NodeIdx::Split(s)=>{
-                                    let Split {children, focus:f, ..} = nodes.splits.get(s.0).unwrap();
+                                    let Split{children, focus:f, ..} = nodes.splits.get(s.0).unwrap();
                                     curr = *children.get(*f).unwrap();
                                 }
-                                NodeIdx::Leaf(l)=>{
-                                    break l
-                                }
+                                NodeIdx::Leaf(l)=>break l,
                             }
                         };
                         enter_normal(focus, lidx, cmd_line);
@@ -1808,8 +1900,15 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
             }
             Ok(())
         }
-        Focus::Leaf(lidx)=>{
-            nodes.leaves.get(lidx.0).unwrap().comp.clone_comp().behaviour(key, focus, cmd_line, views, buffers, nodes)?;
+        Focus::Leaf(lidx)=>{//UNSAFE but its fine probably :D
+            unsafe {
+                let l = nodes.leaves.get_unchecked_mut(lidx.0);
+                let mut comp = ptr::read(&l.comp);
+                let lidx = lidx.clone();
+                let r = comp.behaviour(key, focus, cmd_line, views, buffers, nodes);
+                ptr::write(&mut nodes.leaves.get_unchecked_mut(lidx.0).comp, comp);
+                r?
+            }
             Ok(())
         }
     }
