@@ -1027,7 +1027,7 @@ impl Nodes{
             let (mut size_left, mut remainder) = {
                 match direction{
                     Direction::Vertical=>(rect.width, rect.width%children.len() as u16),
-                    Direction::Horizontal=>(rect.height, rect.width%children.len() as u16),
+                    Direction::Horizontal=>(rect.height, rect.height%children.len() as u16),
                 }
             };
             let mut resize: Vec<(u16, NodeIdx)> = vec![];//main axis either width or height
@@ -1921,7 +1921,7 @@ fn main()->io::Result<()>{
     let mut nodes = Nodes::new();
     let (width, height) = terminal::size().unwrap();
     let mut cmd_line = CmdLine::new(width, height-1);
-    let base = SplitIdx(nodes.splits.len());
+    let root = SplitIdx(nodes.splits.len());
     nodes.splits.push(Split{
         parent: None,
         children: vec![],
@@ -1950,7 +1950,7 @@ fn main()->io::Result<()>{
         };
         let vidx = views.push(View::new(bidx));
         let comp: Box<dyn Component> = Box::new(vidx);
-        let l = nodes.new_leaf(comp, base);
+        let l = nodes.new_leaf(comp, root);
         Focus::Leaf(l)
     };
     enable_raw_mode()?;
