@@ -774,51 +774,49 @@ struct BufferList{
 }
 
 impl Component for BufferList{
-    fn draw(
-        &self,
-        rect: &Rect,
-        _views: &Views,
-        buffers: &Buffers,
-        screen: &mut ScreenBuffer
-    ){
-        let dirty = {
-            if buffers.data.get(0).unwrap().undo.is_empty(){
-                ""
-            }else{
-                "Dirty"
-            }
-        };
-        screen.set_string_xy(rect.x, rect.y+0, &format!("{} {} {}",0, "SCRATCH", dirty));
-        for y in rect.y+1..rect.height+rect.y{
-            let (file_path, dirty) = {
-                if y as usize > buffers.data.len()-1{
-                    return
-                }
-                let dirty = {
-                    if buffers.data.get(y as usize).unwrap().undo.is_empty(){
-                        ""
-                    }else{
-                        "Dirty"
-                    }
-                };
-                match buffers.data.get(y as usize){
-                    None=>{
-                        ("NEW_FILE".to_string(), dirty)
-                    }
-                    Some(b)=>{
-                        match &b.file{
-                            Some(b)=>{
-                                (b.to_string_lossy().to_string(), dirty)
-                            }
-                            None=>("NEW_FILE".to_string(), dirty)
-                        }
-                    }
-                }
-            };
-            let s = format!("{} {} {}",y, file_path, dirty);
-            screen.set_string_xy(rect.x, y, &s);
+fn draw(
+    &self,
+    rect: &Rect,
+    _views: &Views,
+    buffers: &Buffers,
+    screen: &mut ScreenBuffer
+) {
+    let dirty = if buffers.data.get(0).unwrap().undo.is_empty() {
+        ""
+    } else {
+        "Dirty"
+    };
+
+    let s = format!("{} {} {}", 0, "SCRATCH", dirty);
+    let s = format!("{:<width$}", s, width = rect.width as usize);
+
+    screen.set_string_xy(rect.x, rect.y, &s);
+
+    for y in rect.y + 1..rect.y + rect.height {
+        if y as usize > buffers.data.len() - 1 {
+            return;
         }
+
+        let dirty = if buffers.data.get(y as usize).unwrap().undo.is_empty() {
+            ""
+        } else {
+            "Dirty"
+        };
+
+        let file_path = match buffers.data.get(y as usize) {
+            None => "NEW_FILE".to_string(),
+            Some(b) => match &b.file {
+                Some(path) => path.to_string_lossy().to_string(),
+                None => "NEW_FILE".to_string(),
+            },
+        };
+
+        let s = format!("{} {} {}", y, file_path, dirty);
+        let s = format!("{:<width$}", s, width = rect.width as usize);
+        // s.truncate(rect.width as usize);
+        screen.set_string_xy(rect.x, y, &s);
     }
+}
     fn cursor_xy(&self, rect: &Rect, _views: &Views, _buffers: &Buffers)->(u16, u16) {
         (rect.x, rect.y)
     }
@@ -884,7 +882,11 @@ enum Focus{
     CmdLine,
 }
 
-struct Nodes{//root is branches[0] for now later switch to roots vec
+//index into nodes.roots
+const ROOT_OVERLAY: usize = 1;
+const ROOT_TEXT_VIEW: usize = 0;
+struct Nodes{
+    roots:Vec<SplitIdx>,
     splits:Vec<Split>,
     leaves:Vec<Leaf>,
     free_splits:Vec<usize>,
@@ -894,6 +896,7 @@ struct Nodes{//root is branches[0] for now later switch to roots vec
 impl Nodes{
     fn new()->Self{
         Nodes{
+            roots: vec![],
             splits: vec![],
             leaves: vec![],
             free_splits: vec![],
@@ -924,6 +927,17 @@ impl Nodes{
         }
     }
 
+    fn new_root(&mut self, rect: Rect, direction: Direction)->SplitIdx{
+        let new_root = self.push_branch(Split{
+            parent:None,
+            children:vec![],
+            focus:0,
+            direction,
+            rect,
+        });
+        self.roots.push(new_root);
+        new_root
+    }
     fn new_split(&mut self, vidx: ViewIdx, parent: SplitIdx, direction: Direction)->(LeafIdx, SplitIdx){
         let new_parent = self.push_branch(Split{
             parent:Some(parent),
@@ -1023,7 +1037,7 @@ impl Nodes{
     fn recalc(&mut self, sidx: SplitIdx){
         let curr = sidx;
         let Split {children, direction, rect, ..} = self.splits.get(curr.0).unwrap();
-        let resize: Vec<(u16, NodeIdx)> = {//width height, x y
+        let resize: Vec<(u16, NodeIdx)> = {
             let (mut size_left, mut remainder) = {
                 match direction{
                     Direction::Vertical=>(rect.width, rect.width%children.len() as u16),
@@ -1193,15 +1207,16 @@ impl Nodes{
             self.remove(*n);
         }
 
-        let Split {children, focus:f, ..} = self.splits.get_mut(0).unwrap();
+        //only root 0 can never be empty
+        let Split{children, focus:f, ..} = &mut self.splits[self.roots[ROOT_TEXT_VIEW].0];
         if children.is_empty(){
             let vidx = views.push(View::new(SCRATCH));
             let comp: Box<dyn Component> = Box::new(vidx);
             *f = 0;
-            self.new_leaf(comp, SplitIdx(0));
+            self.new_leaf(comp, self.roots[ROOT_TEXT_VIEW]);
         }
 
-        let mut curr = NodeIdx::Split(SplitIdx(0));
+        let mut curr = NodeIdx::Split(self.roots[ROOT_TEXT_VIEW]);
         while let NodeIdx::Split(s) = curr{
             let Split{children, focus:f, ..} = &self.splits[s.0];
             curr = *children.get(*f).unwrap();
@@ -1223,7 +1238,9 @@ impl Nodes{
         old: &mut ScreenBuffer,
         new: &mut ScreenBuffer
     )->io::Result<()>{
-        draw(&self, NodeIdx::Split(SplitIdx(0)), views, buffers, old, new);
+        for r in &self.roots{
+            draw(&self, NodeIdx::Split(*r), views, buffers, old, new);
+        }
         cmd_line.draw(focus, new);
         new.print(old)?;
         match focus{
@@ -1253,8 +1270,9 @@ impl Nodes{
                             draw(nodes, *n, views, buffers, old, new);
                         }
                     }
-                    let nidx = *s.children.get(s.focus).unwrap();
-                    draw(nodes, nidx, views, buffers, old, new);
+                    if let Some(nidx) = s.children.get(s.focus){
+                        draw(nodes, *nidx, views, buffers, old, new);
+                    }
                 }
                 NodeIdx::Leaf(l)=>{
                     let l = &nodes.leaves[l.0];
@@ -1717,7 +1735,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                 match cmd{
                     Cmd::BufferList=>{
                         let comp: Box<dyn Component> = Box::new(BufferList{});
-                        *focus = Focus::Leaf(nodes.new_leaf(comp, parent));
+                        *focus = Focus::Leaf(nodes.new_leaf(comp, nodes.roots[ROOT_OVERLAY]));
                         queue!(stdout(), cursor::SetCursorStyle::SteadyBlock)?;
                     }
                     Cmd::Exec=>{
@@ -1921,23 +1939,30 @@ fn main()->io::Result<()>{
     let mut nodes = Nodes::new();
     let (width, height) = terminal::size().unwrap();
     let mut cmd_line = CmdLine::new(width, height-1);
-    let root = SplitIdx(nodes.splits.len());
-    nodes.splits.push(Split{
-        parent: None,
-        children: vec![],
-        direction: Direction::Vertical,
-        focus: 0,
-        rect:Rect{
-            x: 0,
-            y: 0,
-            height: height-1,
-            width, 
-            max_height:None,
-            max_width:None,
-            min_width:None,
-            min_height:None,
-        }
-    });
+    let root = nodes.new_root(Rect{
+        x: 0,
+        y: 0,
+        height: height-1,
+        width,
+        min_height: None,
+        min_width: None,
+        max_height: None,
+        max_width: None, 
+    },
+        Direction::Vertical
+    );
+    nodes.new_root(Rect{
+        x: 0,
+        y: 0,
+        height: height-1,
+        width: width,
+        min_height: None,
+        min_width: None,
+        max_height: None,
+        max_width: None
+    },
+        Direction::Vertical
+    );
     let mut focus = {
         buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
         let args: Vec<String> = env::args().skip(1).collect();

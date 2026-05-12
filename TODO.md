@@ -1,10 +1,8 @@
 # TODO
 
-### current
-    add floating/layers to UI system
-
-:splitv/splith replace the current leaf with a branch and move the leaf into the new branch instead of apending children
+# Current
 handle resizing of term
+:splitv/splith replace the current leaf with a branch and move the leaf into the new branch instead of apending children
 
 ---
 
