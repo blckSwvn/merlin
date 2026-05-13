@@ -413,7 +413,7 @@ impl Component for ViewIdx{
             for row in 0..rect.height.saturating_sub(1){
                 let line_idx = view.off + row as usize;
                 if let Some(line) = buffers.get(view.buf).buf.get_line(line_idx){
-                    let end = usize::min(rect.width as usize -4, line.len_chars());
+                    let end = usize::min(rect.width.saturating_sub(4) as usize, line.len_chars());
                     let s = line.slice(..end.saturating_sub(1));
                     screen.set_string_xy(rect.x+5, rect.y + row, &s.to_string());
                 }
@@ -845,7 +845,7 @@ fn draw(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct LeafIdx(usize);
 
 struct Leaf{
@@ -854,13 +854,13 @@ struct Leaf{
     comp: Box<dyn Component>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum NodeIdx{
     Leaf(LeafIdx),
     Split(SplitIdx),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct SplitIdx(usize);
 
 struct Split{
@@ -1037,6 +1037,9 @@ impl Nodes{
     fn recalc(&mut self, sidx: SplitIdx){
         let curr = sidx;
         let Split {children, direction, rect, ..} = self.splits.get(curr.0).unwrap();
+        // if children.is_empty(){
+        //     return;
+        // }
         let resize: Vec<(u16, NodeIdx)> = {
             let (mut size_left, mut remainder) = {
                 match direction{
@@ -1203,11 +1206,11 @@ impl Nodes{
         for (p, c, n) in to_remove.iter(){
             let Split {children, focus:f, ..}  = &mut self.splits[p.0];
             children.remove(*c);
-            *f = (*f+children.len()-1)%children.len();
+            *f = f.saturating_sub(1);
             self.remove(*n);
         }
 
-        //only root 0 can never be empty
+        //root can never be empty
         let Split{children, focus:f, ..} = &mut self.splits[self.roots[ROOT_TEXT_VIEW].0];
         if children.is_empty(){
             let vidx = views.push(View::new(SCRATCH));
@@ -1812,7 +1815,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                     },
                     Cmd::ViewClose=>{
                         nodes.remove_child(parent, views, focus, NodeIdx::Leaf(lidx));
-                        let mut curr = NodeIdx::Split(SplitIdx(0));
+                        let mut curr = NodeIdx::Split(*nodes.roots.get(ROOT_TEXT_VIEW).unwrap());
                         let lidx = loop{
                             match curr{
                                 NodeIdx::Split(s)=>{
@@ -1822,6 +1825,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                                 NodeIdx::Leaf(l)=>break l,
                             }
                         };
+                        *focus = Focus::Leaf(lidx);
                         enter_normal(focus, lidx, cmd_line);
                     },
                     Cmd::Save(f)=>{
@@ -1892,6 +1896,28 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                         }
                         return Err(EditorErr::Quit)
                     }
+                    Cmd::SplitV=>{
+                        if let Some(idx) = nodes.splits.get(parent.0).unwrap().children.iter().position(|x| *x == NodeIdx::Leaf(lidx)){
+                            let (l, new_parent) = nodes.new_split(vidx, parent, Direction::Vertical);
+                            let vidx = views.push(View::new(SCRATCH));
+                            let comp: Box<dyn  Component> = Box::new(vidx);
+                            nodes.new_leaf(comp, new_parent);
+                            nodes.splits.get_mut(parent.0).unwrap().children.swap_remove(idx);
+                            nodes.recalc(parent);
+                            enter_normal(focus, l, cmd_line);
+                        }
+                    }
+                    Cmd::SplitH=>{
+                        if let Some(idx) = nodes.splits.get(parent.0).unwrap().children.iter().position(|x| *x == NodeIdx::Leaf(lidx)){
+                            let (l, new_parent) = nodes.new_split(vidx, parent, Direction::Horizontal);
+                            let vidx = views.push(View::new(SCRATCH));
+                            let comp: Box<dyn  Component> = Box::new(vidx);
+                            nodes.new_leaf(comp, new_parent);
+                            nodes.splits.get_mut(parent.0).unwrap().children.swap_remove(idx);
+                            nodes.recalc(parent);
+                            enter_normal(focus, l, cmd_line);
+                        }
+                    }
                     Cmd::Split=>{
                         let vidx = views.push(View::new(
                             SCRATCH));
@@ -1899,27 +1925,14 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                         nodes.new_leaf(comp, parent);
                         enter_normal(focus, lidx, cmd_line);
                     }
-                    Cmd::SplitV=>{
-                        let vidx = views.push(View::new(
-                            SCRATCH));
-                        let (_, _) = nodes.new_split(vidx, parent, Direction::Vertical);
-                        enter_normal(focus, lidx, cmd_line);
-                    }
-                    Cmd::SplitH=>{
-                        let vidx = views.push(View::new(
-                            SCRATCH));
-                        let (_, _) = nodes.new_split(vidx, parent, Direction::Horizontal);
-                        enter_normal(focus, lidx, cmd_line);
-                    }
-                    Cmd::Noop=>{}
-
+                    Cmd::Noop=>{},
                 }
                 Ok(())
             }
             Ok(())
         }
-        Focus::Leaf(lidx)=>{//UNSAFE but its fine probably :D
-            unsafe {
+        Focus::Leaf(lidx)=>{
+            unsafe {//UNSAFE but its fine probably :D
                 let l = nodes.leaves.get_unchecked_mut(lidx.0);
                 let mut comp = ptr::read(&l.comp);
                 let lidx = lidx.clone();
@@ -1988,42 +2001,75 @@ fn main()->io::Result<()>{
     stdout().flush().unwrap();
 
     loop{
-        if let Event::Key(event) = read()?{
-            match key_to_exec(event, &mut nodes, &mut focus, &mut cmd_line, &mut views, &mut buffers){
-                Err(e)=> {
-                    match e{
-                        EditorErr::Msg(msg)=>cmd_line.error(&msg),
-                        EditorErr::Dirty(idx)=>cmd_line.error(&format!("buffer:{} is dirty",idx.idx)),
-                        EditorErr::InvalidBuffer=>cmd_line.error("index is invalid"),
-                        EditorErr::ReadOnly(idx)=>cmd_line.error(&format!("buffer:{}is read only",idx.idx)),
-                        EditorErr::InvalidFocus=>cmd_line.error("invalid focus"),
-                        EditorErr::Log(msg)=>log(&msg),
-                        EditorErr::Io(_)=>{log("IO error"); break},
-                        EditorErr::Quit=>break,
-                    }
-                    let l = {
-                        let mut curr = NodeIdx::Split(SplitIdx(0));
-                        loop{
-                            match curr{
-                                NodeIdx::Split(s)=>{
-                                    let Split {children, focus:f, ..} = nodes.splits.get(s.0).unwrap();
-                                    curr = *children.get(*f).unwrap();
-                                }
-                                NodeIdx::Leaf(l)=>break l
-                            }
+        match read()?{
+            Event::Key(event) =>{
+                match key_to_exec(event, &mut nodes, &mut focus, &mut cmd_line, &mut views, &mut buffers){
+                    Err(e)=> {
+                        match e{
+                            EditorErr::Msg(msg)=>cmd_line.error(&msg),
+                            EditorErr::Dirty(idx)=>cmd_line.error(&format!("buffer:{} is dirty",idx.idx)),
+                            EditorErr::InvalidBuffer=>cmd_line.error("index is invalid"),
+                            EditorErr::ReadOnly(idx)=>cmd_line.error(&format!("buffer:{}is read only",idx.idx)),
+                            EditorErr::InvalidFocus=>cmd_line.error("invalid focus"),
+                            EditorErr::Log(msg)=>log(&msg),
+                            EditorErr::Io(_)=>{log("IO error"); break},
+                            EditorErr::Quit=>break,
                         }
-                    };
-                    focus = Focus::Leaf(l);
-                    cmd_line.error = false;
-                    queue!(stdout(), SetCursorStyle::SteadyBlock)?;
+                        let l = {
+                            let mut curr = NodeIdx::Split(SplitIdx(0));
+                            loop{
+                                match curr{
+                                    NodeIdx::Split(s)=>{
+                                        let Split {children, focus:f, ..} = nodes.splits.get(s.0).unwrap();
+                                        curr = *children.get(*f).unwrap();
+                                    }
+                                    NodeIdx::Leaf(l)=>break l
+                                }
+                            }
+                        };
+                        focus = Focus::Leaf(l);
+                        cmd_line.error = false;
+                        queue!(stdout(), SetCursorStyle::SteadyBlock)?;
+                    }
+                    Ok(_) => {},
                 }
-                Ok(_) => {},
+                queue!(stdout(), cursor::Hide)?;
+                nodes.paint(&focus, &cmd_line, &views, &buffers, &mut old, &mut new)?;
+                queue!(stdout(), cursor::Show)?;
+                stdout().flush()?;
             }
-            queue!(stdout(), cursor::Hide)?;
-            nodes.paint(&focus, &cmd_line, &views, &buffers, &mut old, &mut new)?;
-            queue!(stdout(), cursor::Show)?;
+            Event::Resize(width, height)=>{
+                cmd_line.rect = Rect{
+                    x: 0,
+                    y: height-1,
+                    height:1,
+                    width,
+                    min_height: Some(1),
+                    min_width: Some(width),
+                    max_height: Some(1),
+                    max_width: Some(width) 
+                };
+                old = ScreenBuffer {
+                    width, height,
+                    cells: vec!['_'; (width * height) as usize]//some placeholder
+                };
+                    new = ScreenBuffer {
+                    width, height,
+                        cells: vec![' '; (width * height) as usize]
+                };
+                for r in nodes.roots.clone(){
+                    let root = nodes.splits.get_mut(r.0).unwrap();
+                    root.rect.width = width;
+                    root.rect.height = height-1;
+                    nodes.recalc(r);
+                }
+                queue!(stdout(), cursor::Hide)?;
+                nodes.paint(&focus, &cmd_line, &views, &buffers, &mut old, &mut new)?;
+                queue!(stdout(), cursor::Show)?;
+                stdout().flush()?;
+            }
+            _ => {},
         }
-        stdout().flush()?;
     }
     disable_raw_mode().unwrap();
     execute!(stdout(), terminal::LeaveAlternateScreen).unwrap();

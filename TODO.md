@@ -1,8 +1,7 @@
 # TODO
 
 # Current
-handle resizing of term
-:splitv/splith replace the current leaf with a branch and move the leaf into the new branch instead of apending children
+fix bug where if nested split it doesnt detect that root is empty after reflow and therefore panics
 
 ---
 
@@ -11,6 +10,7 @@ copy paste, visual mode
 add help cmd
 vim motions
 color highlighting
+add anchoring in nodes
 autocompletion for cmd line like filepaths and commands
 replacing arrays of structs(Aos) with struct of arrays(Soa)
 
