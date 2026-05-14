@@ -1,7 +1,7 @@
 # TODO
 
 # Current
-fix bug where if nested split it doesnt detect that root is empty after reflow and therefore panics
+make move focus follow screen geometry
 
 ---
 

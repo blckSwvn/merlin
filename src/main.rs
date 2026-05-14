@@ -1185,32 +1185,30 @@ impl Nodes{
     }
 
     fn reflow(&mut self, focus: &mut Focus, views: &mut Views, parent: SplitIdx){
-        let mut to_remove: Vec<(SplitIdx, usize, NodeIdx)> = vec![];//parent, child, node
+        let mut to_remove: Option<(SplitIdx, usize, NodeIdx)> = None;//parent, child, node
         let mut curr = parent;
         loop{
             let Split { parent, children, ..} = self.splits.get(curr.0).unwrap();
-            for (c, n) in children.iter().enumerate(){
-                if let NodeIdx::Split(s) = n{
-                    if self.splits.get(s.0).unwrap().children.is_empty(){
-                        to_remove.push((curr, c, *n));
-                    }
+            if children.is_empty(){
+                if let Some(p) = parent{
+                    let Split {children, ..} = self.splits.get(p.0).unwrap();
+                    to_remove = Some((*p, children.iter().position(|x| *x == NodeIdx::Split(curr)).unwrap(), NodeIdx::Split(curr)));
+                    curr = *p
                 }
             }
-            if let Some(p) = parent{
-                curr = *p;
-            }else{
-                break;
+            match to_remove{
+                Some(s)=>{
+                    let Split{children, focus, ..} = &mut self.splits[s.0.0];
+                    children.remove(s.1);
+                    *focus = focus.saturating_sub(1);
+                    self.remove(s.2);
+                    to_remove = None;
+                }
+                None=>break,
             }
         }
 
-        for (p, c, n) in to_remove.iter(){
-            let Split {children, focus:f, ..}  = &mut self.splits[p.0];
-            children.remove(*c);
-            *f = f.saturating_sub(1);
-            self.remove(*n);
-        }
-
-        //root can never be empty
+        //root cannot be empty
         let Split{children, focus:f, ..} = &mut self.splits[self.roots[ROOT_TEXT_VIEW].0];
         if children.is_empty(){
             let vidx = views.push(View::new(SCRATCH));
