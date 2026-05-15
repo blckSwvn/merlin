@@ -1,37 +1,37 @@
 use core::panic;
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::fs::OpenOptions;
-use std::fs::{self, File};
-use std::io::stdout;
-use std::path::Path;
-use std::ptr;
-use std::sync::Mutex;
-use std::usize;
-use std::vec;
 use crossterm::cursor;
 use crossterm::cursor::MoveTo;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::KeyEvent;
+use crossterm::event::{Event, KeyCode, read};
 use crossterm::execute;
 use crossterm::queue;
 use crossterm::style::Print;
 use crossterm::terminal;
 use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
-use crossterm::event::{read, Event, KeyCode};
 use ropey::Rope;
-use std::path::PathBuf;
-use std::{env, io};
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::fs::OpenOptions;
+use std::fs::{self, File};
+use std::io::stdout;
 use std::io::{BufReader, Write};
+use std::path::Path;
+use std::path::PathBuf;
+use std::ptr;
+use std::sync::Mutex;
+use std::usize;
+use std::vec;
+use std::{env, io};
 
-impl From<std::io::Error> for EditorErr{
-    fn from(e: std::io::Error)->Self{
+impl From<std::io::Error> for EditorErr {
+    fn from(e: std::io::Error) -> Self {
         EditorErr::Io(e)
     }
 }
 #[derive(Debug)]
-enum EditorErr{
+enum EditorErr {
     Io(std::io::Error),
     ReadOnly(BufferIdx),
     InvalidBuffer,
@@ -42,10 +42,10 @@ enum EditorErr{
     Quit,
 }
 
-struct Logger{
+struct Logger {
     file: &'static str,
 }
-impl Logger{
+impl Logger {
     fn log(&self, msg: &str) {
         let mut file = OpenOptions::new()
             .create(true)
@@ -55,76 +55,76 @@ impl Logger{
         writeln!(file, "{}", msg).expect("failed to write log");
     }
 }
-fn log(msg: &str){
+fn log(msg: &str) {
     LOGGER.lock().unwrap().log(msg);
 }
-static LOGGER: Mutex<Logger> = Mutex::new(Logger {
-    file: "log",
-});
+static LOGGER: Mutex<Logger> = Mutex::new(Logger { file: "log" });
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BufferIdx{
-    idx:usize,
+struct BufferIdx {
+    idx: usize,
 }
-struct Buffers{
-    data:Vec<Buffer>,
-    free:VecDeque<BufferIdx>,
-    path_map:HashMap<PathBuf, BufferIdx>,
+struct Buffers {
+    data: Vec<Buffer>,
+    free: VecDeque<BufferIdx>,
+    path_map: HashMap<PathBuf, BufferIdx>,
 }
-impl Buffers{
-    fn new()->Self{
-        Self{
+impl Buffers {
+    fn new() -> Self {
+        Self {
             data: Vec::new(),
             free: VecDeque::new(),
             path_map: HashMap::new(),
         }
     }
-    fn get(&self, idx: BufferIdx)->&Buffer{
+    fn get(&self, idx: BufferIdx) -> &Buffer {
         &self.data[idx.idx]
     }
-    fn get_mut(&mut self, idx: BufferIdx)->&mut Buffer{
+    fn get_mut(&mut self, idx: BufferIdx) -> &mut Buffer {
         &mut self.data[idx.idx]
     }
     fn push(&mut self, buf: Buffer) -> BufferIdx {
         let path = buf.file.clone();
-        let idx = if self.free.is_empty(){
-            let idx = BufferIdx{idx:self.data.len()};
+        let idx = if self.free.is_empty() {
+            let idx = BufferIdx {
+                idx: self.data.len(),
+            };
             self.data.push(buf);
             idx
-        }else{
+        } else {
             let idx = self.free.pop_front().unwrap();
             let element = self.get_mut(idx);
             *element = buf;
             idx
         };
-        if let Some(p) = path{
-            if let Ok(path) = p.canonicalize(){
+        if let Some(p) = path {
+            if let Ok(path) = p.canonicalize() {
                 self.path_map.insert(path, idx);
             }
         }
         idx
     }
-    fn get_by_path(&self, path: &str)->Option<&BufferIdx>{
-        if let Ok(p) = Path::new(path).canonicalize(){
+    fn get_by_path(&self, path: &str) -> Option<&BufferIdx> {
+        if let Ok(p) = Path::new(path).canonicalize() {
             let buffer = self.path_map.get(&p);
-            if let Some(idx) = buffer{
-                return Some(idx)
+            if let Some(idx) = buffer {
+                return Some(idx);
             }
         }
         None
     }
-    fn remove(&mut self, idx: &mut BufferIdx){
+    fn remove(&mut self, idx: &mut BufferIdx) {
         self.get_mut(*idx).generation += 1;
         self.data[idx.idx].partial_reset();
         self.free.push_back(*idx);
     }
-    fn len(&self)->usize{
+    fn len(&self) -> usize {
         self.data.len()
     }
-    fn iter(&self)->impl Iterator<Item = &Buffer>{
+    fn iter(&self) -> impl Iterator<Item = &Buffer> {
         self.data.iter()
     }
-    fn iter_mut(&mut self)->impl Iterator<Item = &mut Buffer>{
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Buffer> {
         self.data.iter_mut()
     }
 }
@@ -132,53 +132,49 @@ impl Buffers{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ViewIdx(usize);
 struct Views(Vec<View>);
-impl Views{
-    fn new()->Self {Self(Vec::new())}
-    fn get(&self, idx: ViewIdx)->&View{
+impl Views {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+    fn get(&self, idx: ViewIdx) -> &View {
         &self.0[idx.0]
     }
-    fn get_mut(&mut self, idx: ViewIdx)->&mut View{
+    fn get_mut(&mut self, idx: ViewIdx) -> &mut View {
         &mut self.0[idx.0]
     }
-    fn push(&mut self, view: View) -> ViewIdx{
+    fn push(&mut self, view: View) -> ViewIdx {
         let idx = ViewIdx(self.0.len());
         self.0.push(view);
         idx
     }
-    fn len(&self)->usize{
+    fn len(&self) -> usize {
         self.0.len()
     }
-    fn iter(&self)->impl Iterator<Item = &View>{
+    fn iter(&self) -> impl Iterator<Item = &View> {
         self.0.iter()
     }
-    fn iter_mut(&mut self)->impl Iterator<Item = &mut View>{
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut View> {
         self.0.iter_mut()
     }
 }
 
 #[derive(Clone)]
-struct Rect{
-    x:u16,
-    y:u16,
-    height:u16,
-    width:u16,
-    min_height:Option<u16>,
-    min_width:Option<u16>,
-    max_height:Option<u16>,
-    max_width:Option<u16>,
+struct Rect {
+    x: u16,
+    y: u16,
+    height: u16,
+    width: u16,
+    min_height: Option<u16>,
+    min_width: Option<u16>,
+    max_height: Option<u16>,
+    max_width: Option<u16>,
 }
 
-enum Edit{
-    Insert{
-        idx:usize,
-        text:String,
-    },
-    Delete{
-        idx:usize,
-        text:String,
-    },
+enum Edit {
+    Insert { idx: usize, text: String },
+    Delete { idx: usize, text: String },
 }
-struct Buffer{
+struct Buffer {
     generation: u64,
     flags: u64,
     file: Option<PathBuf>,
@@ -189,45 +185,45 @@ struct Buffer{
     redo: Vec<Edit>,
 }
 
-impl Buffer{
-    const READ_ONLY:       u64 = 1 << 0;
-    const SCRATCH:         u64 = 1 << 1;
-    const NEW_FILE:        u64 = 1 << 2;
+impl Buffer {
+    const READ_ONLY: u64 = 1 << 0;
+    const SCRATCH: u64 = 1 << 1;
+    const NEW_FILE: u64 = 1 << 2;
     const NON_NAVIGATABLE: u64 = 1 << 3;
-    fn partial_reset(&mut self){
+    fn partial_reset(&mut self) {
         self.buf = Rope::new();
         self.undo = Vec::new();
         self.redo = Vec::new();
         //does not reset flags or pathbuf
     }
-    fn set_flag(&mut self, flag: u64){
+    fn set_flag(&mut self, flag: u64) {
         self.flags |= flag
     }
-    fn clear_flag(&mut self, flag: u64){
+    fn clear_flag(&mut self, flag: u64) {
         self.flags &= !flag
     }
-    fn check_flag(&self, flag: u64)->bool{
+    fn check_flag(&self, flag: u64) -> bool {
         self.flags & flag != 0
     }
-    fn new(path: Option<&str>, flags: u64)->std::io::Result<Buffer>{
+    fn new(path: Option<&str>, flags: u64) -> std::io::Result<Buffer> {
         let mut f = flags;
         let buf = if let Some(p) = path {
             let path = PathBuf::from(p);
-            if path.exists(){
+            if path.exists() {
                 let cont = fs::read_to_string(&path)?;
-                if fs::metadata(&path)?.permissions().readonly(){
+                if fs::metadata(&path)?.permissions().readonly() {
                     f |= Self::READ_ONLY;
                 }
                 Rope::from_str(&cont)
-            }else{
+            } else {
                 f |= Self::NEW_FILE;
                 Rope::new()
             }
-        }else{
-                f |= Self::NEW_FILE;
-                Rope::new()
+        } else {
+            f |= Self::NEW_FILE;
+            Rope::new()
         };
-        Ok(Buffer{
+        Ok(Buffer {
             generation: 0,
             flags: f,
             buf: buf,
@@ -238,17 +234,17 @@ impl Buffer{
             undo: Vec::new(),
         })
     }
-    fn insert(&mut self, off: usize, cursor: usize, c: char){
+    fn insert(&mut self, off: usize, cursor: usize, c: char) {
         self.last_cursor = cursor;
         self.last_off = off;
         self.buf.insert_char(cursor, c);
     }
-    fn save(&mut self, new: Option<String>)->io::Result<()>{
-        if let Some(new) = new{
+    fn save(&mut self, new: Option<String>) -> io::Result<()> {
+        if let Some(new) = new {
             let file = File::create(new)?;
             self.buf.write_to(file)?;
-        }else{
-            if let Some(path) = &self.file{
+        } else {
+            if let Some(path) = &self.file {
                 let file = File::create(path)?;
                 self.buf.write_to(file)?;
             }
@@ -257,33 +253,39 @@ impl Buffer{
     }
 }
 
-struct CmdLine{
+struct CmdLine {
     input: String,
     rect: Rect,
     cursor: usize,
     error: bool,
     last_view: (LeafIdx, ViewIdx),
 }
-impl CmdLine{
-    fn new(width:u16, height:u16)->Self{
-        Self{
+impl CmdLine {
+    fn new(width: u16, height: u16) -> Self {
+        Self {
             input: String::new(),
             rect: Rect {
                 x: 0,
                 y: height,
-                height:1,
+                height: 1,
                 width: width,
                 min_height: Some(1),
                 min_width: Some(width),
                 max_height: Some(1),
-                max_width: Some(width)
+                max_width: Some(width),
             },
             cursor: 0,
             error: false,
-            last_view: (LeafIdx(usize::MAX), ViewIdx(usize::MAX))
+            last_view: (LeafIdx(usize::MAX), ViewIdx(usize::MAX)),
         }
     }
-    fn enter_cmd_mode(&mut self, vidx: ViewIdx, focus: &mut Focus, views: &mut Views, lidx: LeafIdx){
+    fn enter_cmd_mode(
+        &mut self,
+        vidx: ViewIdx,
+        focus: &mut Focus,
+        views: &mut Views,
+        lidx: LeafIdx,
+    ) {
         self.last_view = (lidx, vidx);
         views.get_mut(vidx).mode = Mode::Normal;
         self.input.clear();
@@ -291,8 +293,8 @@ impl CmdLine{
         *focus = Focus::CmdLine;
         queue!(stdout(), cursor::SetCursorStyle::SteadyBar).unwrap();
     }
-    fn insert(&mut self, c: char){
-        if self.error{
+    fn insert(&mut self, c: char) {
+        if self.error {
             self.cursor = 0;
             self.input.clear();
             self.error = false;
@@ -301,35 +303,40 @@ impl CmdLine{
         self.input.insert(byte_idx, c);
         self.cursor += c.len_utf8();
     }
-    fn backspace(&mut self){
-        if self.error{
+    fn backspace(&mut self) {
+        if self.error {
             self.cursor = 0;
             self.input.clear();
             self.error = false;
         }
         if self.cursor > 0 {
-            let char_len = self.input[..self.cursor].chars().rev().next().unwrap().len_utf8();
+            let char_len = self.input[..self.cursor]
+                .chars()
+                .rev()
+                .next()
+                .unwrap()
+                .len_utf8();
             self.cursor -= char_len as usize;
             self.input.remove(self.cursor);
         }
     }
-    fn error(&mut self, s: &str){
+    fn error(&mut self, s: &str) {
         self.error = true;
         self.input.clear();
         self.input = s.to_string();
     }
-    fn draw(&self, focus: &Focus, screen: &mut ScreenBuffer){
+    fn draw(&self, focus: &Focus, screen: &mut ScreenBuffer) {
         let s = {
-            if self.error{
-                format!("{}",self.input)
-            }else{
-                if let Focus::CmdLine = focus{
-                    format!(":{}",self.input)
-                }else{
-                    if self.input.is_empty(){
+            if self.error {
+                format!("{}", self.input)
+            } else {
+                if let Focus::CmdLine = focus {
+                    format!(":{}", self.input)
+                } else {
+                    if self.input.is_empty() {
                         "".to_string()
-                    }else{
-                        format!(":{}",self.input)
+                    } else {
+                        format!(":{}", self.input)
                     }
                 }
             }
@@ -338,7 +345,7 @@ impl CmdLine{
     }
 }
 
-struct View{
+struct View {
     buf: BufferIdx,
     cursor: usize,
     prefered_x: usize,
@@ -346,9 +353,9 @@ struct View{
     mode: Mode,
 }
 
-impl View{
-    fn new(buf: BufferIdx)->Self{
-        Self{
+impl View {
+    fn new(buf: BufferIdx) -> Self {
+        Self {
             buf,
             cursor: 0,
             prefered_x: 0,
@@ -356,37 +363,31 @@ impl View{
             mode: Mode::Normal,
         }
     }
-    fn scroll(&mut self, rect: &Rect, buffer: &mut Buffer){
+    fn scroll(&mut self, rect: &Rect, buffer: &mut Buffer) {
         let line = buffer.buf.char_to_line(self.cursor);
         let line_start = buffer.buf.line_to_char(line);
-        if line < self.off{
+        if line < self.off {
             self.off = line;
-        } else if line > self.off + (rect.height.saturating_sub(2)) as usize{
+        } else if line > self.off + (rect.height.saturating_sub(2)) as usize {
             self.off = line - (rect.height.saturating_sub(2)) as usize;
         }
         let mut col = self.cursor - line_start;
-        if let Some(line) = buffer.buf.get_line(line){
+        if let Some(line) = buffer.buf.get_line(line) {
             if line.len_chars() > 0 {
                 col = col.min(line.len_chars().saturating_sub(1));
-            }else{
+            } else {
                 col = 0;
             }
-        }else{
+        } else {
             col = 0;
         }
         self.cursor = line_start + col;
     }
 }
 
-trait Component{
-    fn draw(
-        &self,
-        rect: &Rect,
-        views: &Views,
-        buffers: &Buffers,
-        screen: &mut ScreenBuffer
-    );
-    fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers)->(u16, u16);
+trait Component {
+    fn draw(&self, rect: &Rect, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer);
+    fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers) -> (u16, u16);
     fn behaviour(
         &mut self,
         key: KeyEvent,
@@ -395,57 +396,50 @@ trait Component{
         views: &mut Views,
         buffers: &mut Buffers,
         nodes: &mut Nodes,
-    )->Result<(), EditorErr>;
+    ) -> Result<(), EditorErr>;
 }
 
-impl Component for ViewIdx{
-    fn draw(
-        &self,
-        rect: &Rect,
-        views: &Views,
-        buffers: &Buffers,
-        screen: &mut ScreenBuffer
-    ){
+impl Component for ViewIdx {
+    fn draw(&self, rect: &Rect, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
         let v = views.get(*self);
         deco_draw(v, rect, buffers, screen);
         text_draw(v, rect, buffers, screen);
-        fn text_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer){
-            for row in 0..rect.height.saturating_sub(1){
+        fn text_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
+            for row in 0..rect.height.saturating_sub(1) {
                 let line_idx = view.off + row as usize;
-                if let Some(line) = buffers.get(view.buf).buf.get_line(line_idx){
+                if let Some(line) = buffers.get(view.buf).buf.get_line(line_idx) {
                     let end = usize::min(rect.width.saturating_sub(4) as usize, line.len_chars());
                     let s = line.slice(..end.saturating_sub(1));
-                    screen.set_string_xy(rect.x+5, rect.y + row, &s.to_string());
+                    screen.set_string_xy(rect.x + 5, rect.y + row, &s.to_string());
                 }
             }
         }
-        fn deco_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer){
-            for row in 0..rect.height{
+        fn deco_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
+            for row in 0..rect.height {
                 let screen_y = rect.y + row as u16;
-                let line_num = view.off+row as usize;
-                let s = format!("{:>width$} ", line_num,
-                    width = 4);
+                let line_num = view.off + row as usize;
+                let s = format!("{:>width$} ", line_num, width = 4);
                 screen.set_string_xy(rect.x, screen_y, &s);
             }
             let mut path = "SCRATCH";
             let buffer = buffers.get(view.buf);
-            if !buffer.check_flag(Buffer::SCRATCH){
-                if let Some(p) = &buffer.file{
+            if !buffer.check_flag(Buffer::SCRATCH) {
+                if let Some(p) = &buffer.file {
                     path = p.to_str().unwrap_or("NEW_FILE");
-                }else{
+                } else {
                     path = "NEW_FILE";
                 }
             }
-            let mode_str = match view.mode{
-                Mode::Normal=>"NOR",
-                Mode::Insert=>"INS",
+            let mode_str = match view.mode {
+                Mode::Normal => "NOR",
+                Mode::Insert => "INS",
             };
             let s = format!("{mode_str} {} {path}", view.buf.idx);
             let s = format!("{:width$}", s, width = rect.width as usize);
             screen.set_string_xy(rect.x, rect.y + rect.height.saturating_sub(1), &s);
         }
     }
-    fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers)->(u16, u16) {
+    fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers) -> (u16, u16) {
         let v = views.get(*self);
         let b = buffers.get(v.buf);
         let line = b.buf.char_to_line(v.cursor);
@@ -462,10 +456,10 @@ impl Component for ViewIdx{
         views: &mut Views,
         buffers: &mut Buffers,
         nodes: &mut Nodes,
-    )->Result<(), EditorErr> {
+    ) -> Result<(), EditorErr> {
         let cmd = key_to_cmd(key, views.get(*self));
         exec_cmd(cmd, *self, nodes, focus, cmd_line, views, buffers)?;
-        enum Cmd{
+        enum Cmd {
             EnterNormal,
             EnterInsert,
             Insert(char),
@@ -484,34 +478,30 @@ impl Component for ViewIdx{
             EnterCmd,
             Noop,
         }
-        fn key_to_cmd(key: KeyEvent, view: &View)->Cmd{
-            match view.mode{
-                Mode::Normal=>{
-                    match key.code{
-                        KeyCode::Char('i')=>Cmd::EnterInsert,
-                        KeyCode::Char(':')=>Cmd::EnterCmd,
-                        KeyCode::Char('u')=>Cmd::Undo,
-                        KeyCode::Char('U')=>Cmd::Redo,
-                        KeyCode::Char('h')=>Cmd::MoveLeft,
-                        KeyCode::Char('j')=>Cmd::MoveDown,
-                        KeyCode::Char('k')=>Cmd::MoveUp,
-                        KeyCode::Char('l')=>Cmd::MoveRight,
-                        KeyCode::Char('H')=>Cmd::FocusLeft,
-                        KeyCode::Char('J')=>Cmd::FocusDown,
-                        KeyCode::Char('K')=>Cmd::FocusUp,
-                        KeyCode::Char('L')=>Cmd::FocusRight,
-                        _ => Cmd::Noop,
-                    }
-                }
-                Mode::Insert=>{
-                    match key.code{
-                        KeyCode::Esc=>Cmd::EnterNormal,
-                        KeyCode::Backspace=>Cmd::BackSpace,
-                        KeyCode::Enter=>Cmd::NewLine,
-                        KeyCode::Char(c)=>Cmd::Insert(c),
-                        _ => Cmd::Noop,
-                    }
-                }
+        fn key_to_cmd(key: KeyEvent, view: &View) -> Cmd {
+            match view.mode {
+                Mode::Normal => match key.code {
+                    KeyCode::Char('i') => Cmd::EnterInsert,
+                    KeyCode::Char(':') => Cmd::EnterCmd,
+                    KeyCode::Char('u') => Cmd::Undo,
+                    KeyCode::Char('U') => Cmd::Redo,
+                    KeyCode::Char('h') => Cmd::MoveLeft,
+                    KeyCode::Char('j') => Cmd::MoveDown,
+                    KeyCode::Char('k') => Cmd::MoveUp,
+                    KeyCode::Char('l') => Cmd::MoveRight,
+                    KeyCode::Char('H') => Cmd::FocusLeft,
+                    KeyCode::Char('J') => Cmd::FocusDown,
+                    KeyCode::Char('K') => Cmd::FocusUp,
+                    KeyCode::Char('L') => Cmd::FocusRight,
+                    _ => Cmd::Noop,
+                },
+                Mode::Insert => match key.code {
+                    KeyCode::Esc => Cmd::EnterNormal,
+                    KeyCode::Backspace => Cmd::BackSpace,
+                    KeyCode::Enter => Cmd::NewLine,
+                    KeyCode::Char(c) => Cmd::Insert(c),
+                    _ => Cmd::Noop,
+                },
             }
         }
         fn exec_cmd(
@@ -521,53 +511,52 @@ impl Component for ViewIdx{
             focus: &mut Focus,
             cmd_line: &mut CmdLine,
             views: &mut Views,
-            buffers: &mut Buffers
-        )->Result<(), EditorErr>{
-            fn enter_normal(view: &mut View, cmd_line: &mut CmdLine){
+            buffers: &mut Buffers,
+        ) -> Result<(), EditorErr> {
+            fn enter_normal(view: &mut View, cmd_line: &mut CmdLine) {
                 view.mode = Mode::Normal;
                 queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
                 cmd_line.cursor = 0;
             }
             let (bidx, lidx) = {
                 let mut curr = NodeIdx::Split(SplitIdx(0));
-                let lidx = loop{
+                let lidx = loop {
                     match curr {
-                        NodeIdx::Split(s) =>{
-                            let Split {children, focus: f, ..} = nodes.splits.get(s.0).unwrap();
+                        NodeIdx::Split(s) => {
+                            let Split {
+                                children, focus: f, ..
+                            } = nodes.splits.get(s.0).unwrap();
                             curr = *children.get(*f).unwrap();
                         }
-                        NodeIdx::Leaf(l)=>{
-                            break l
-
-                        }
+                        NodeIdx::Leaf(l) => break l,
                     }
                 };
                 (views.get(vidx).buf, lidx)
             };
-            match cmd{
-                Cmd::EnterCmd=>{
+            match cmd {
+                Cmd::EnterCmd => {
                     cmd_line.enter_cmd_mode(vidx, focus, views, lidx);
                 }
-                Cmd::EnterInsert=>{
+                Cmd::EnterInsert => {
                     queue!(stdout(), cursor::SetCursorStyle::SteadyBar)?;
                     views.get_mut(vidx).mode = Mode::Insert;
                 }
-                Cmd::EnterNormal=>{
+                Cmd::EnterNormal => {
                     enter_normal(views.get_mut(vidx), cmd_line);
                 }
-                Cmd::FocusUp=>{
+                Cmd::FocusUp => {
                     nodes.focus_up(focus);
                 }
-                Cmd::FocusDown=>{
+                Cmd::FocusDown => {
                     nodes.focus_down(focus);
                 }
-                Cmd::FocusRight=>{
+                Cmd::FocusRight => {
                     nodes.focus_right(focus);
                 }
-                Cmd::FocusLeft=>{
+                Cmd::FocusLeft => {
                     nodes.focus_left(focus);
                 }
-                Cmd::MoveUp=>{
+                Cmd::MoveUp => {
                     let buffer = buffers.get(bidx);
                     let view = views.get_mut(vidx);
                     let line = buffer.buf.char_to_line(view.cursor);
@@ -582,35 +571,39 @@ impl Component for ViewIdx{
                     let buffer = buffers.get_mut(bidx);
                     View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
                 }
-                Cmd::MoveDown=>{
+                Cmd::MoveDown => {
                     let view = views.get_mut(vidx);
                     let buffer = buffers.get(bidx);
                     let len_lines = buffer.buf.len_lines();
                     let line = buffer.buf.char_to_line(view.cursor);
-                    if line + 1 < len_lines{
+                    if line + 1 < len_lines {
                         let line = line + 1;
                         let start = buffer.buf.line_to_char(line);
                         let len = buffer.buf.line(line).len_chars();
                         let col = view.prefered_x.min(len.saturating_sub(1));
                         view.cursor = start + col;
-                        View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffers.get_mut(bidx));
+                        View::scroll(
+                            view,
+                            &nodes.leaves.get(lidx.0).unwrap().rect,
+                            buffers.get_mut(bidx),
+                        );
                     }
                 }
-                Cmd::MoveRight=>{
+                Cmd::MoveRight => {
                     let buffer = buffers.get(bidx);
                     let view = views.get_mut(vidx);
                     let line = buffer.buf.char_to_line(view.cursor);
                     let line_start = buffer.buf.line_to_char(line);
                     let line_len = buffer.buf.line(line).len_chars();
-                    if view.cursor < line_start + line_len.saturating_sub(1){
-                        let col = view.cursor - line_start; 
+                    if view.cursor < line_start + line_len.saturating_sub(1) {
+                        let col = view.cursor - line_start;
                         let col = col + 1;
                         let col = col.min(buffer.buf.line(line).len_chars().saturating_sub(1));
                         view.prefered_x = col;
                         view.cursor = line_start + col;
                     }
                 }
-                Cmd::MoveLeft=>{
+                Cmd::MoveLeft => {
                     let buffer = buffers.get(bidx);
                     let view = views.get_mut(vidx);
                     let line = buffer.buf.char_to_line(view.cursor);
@@ -622,31 +615,37 @@ impl Component for ViewIdx{
                         view.cursor = line_start + col;
                     }
                 }
-                Cmd::Undo=>{
+                Cmd::Undo => {
                     let view = views.get_mut(vidx);
                     let buffer = buffers.get_mut(bidx);
-                    if let Some(edit) = buffer.undo.pop(){
-                        match edit{
-                            Edit::Insert { idx, text, }=>{
-                                buffer.redo.push(Edit::Delete { idx, text: text.clone() });
+                    if let Some(edit) = buffer.undo.pop() {
+                        match edit {
+                            Edit::Insert { idx, text } => {
+                                buffer.redo.push(Edit::Delete {
+                                    idx,
+                                    text: text.clone(),
+                                });
                                 buffer.buf.remove(idx..idx + text.chars().count());
                                 view.cursor = idx;
-                            },
-                            Edit::Delete { idx, text, }=>{
-                                buffer.redo.push(Edit::Insert {idx, text: text.clone()});
+                            }
+                            Edit::Delete { idx, text } => {
+                                buffer.redo.push(Edit::Insert {
+                                    idx,
+                                    text: text.clone(),
+                                });
                                 buffer.buf.insert(idx, &text);
                                 view.cursor = idx;
-                            },
+                            }
                         }
                         let line = buffer.buf.char_to_line(view.cursor);
                         let line_start = buffer.buf.line_to_char(line);
                         let col = view.cursor - line_start;
                         view.prefered_x = col;
-                        return Ok(())
+                        return Ok(());
                     }
-                    return Err(EditorErr::Msg("undo stack is empty".to_string()))
+                    return Err(EditorErr::Msg("undo stack is empty".to_string()));
                 }
-                Cmd::Redo=>{
+                Cmd::Redo => {
                     let view = views.get_mut(vidx);
                     let buffer = buffers.get_mut(bidx);
                     if let Some(edit) = buffer.redo.pop() {
@@ -654,12 +653,12 @@ impl Component for ViewIdx{
                             Edit::Insert { idx, text } => {
                                 buffer.buf.remove(idx..idx + text.chars().count());
                                 view.cursor = idx;
-                                buffer.undo.push(Edit::Delete{idx, text});
+                                buffer.undo.push(Edit::Delete { idx, text });
                             }
                             Edit::Delete { idx, text } => {
                                 buffer.buf.insert(idx, &text);
                                 view.cursor = idx;
-                                buffer.undo.push(Edit::Insert{ idx, text });
+                                buffer.undo.push(Edit::Insert { idx, text });
                             }
                         }
                         let line = buffer.buf.char_to_line(view.cursor);
@@ -671,37 +670,51 @@ impl Component for ViewIdx{
                         View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
                         return Ok(());
                     }
-                    return Err(EditorErr::Msg("redo stack is empty".to_string()))
+                    return Err(EditorErr::Msg("redo stack is empty".to_string()));
                 }
-                Cmd::Insert(c)=>{
+                Cmd::Insert(c) => {
                     let buffer = buffers.get_mut(bidx);
                     buffer.redo.clear();
                     let view = views.get(vidx);
-                    if let Some(edit) = buffer.undo.last_mut(){
-                        match edit{
-                            Edit::Insert {idx: c_idx, text, ..}=>{
-                                if *c_idx <= view.cursor && view.cursor <= *c_idx+text.chars().count(){
-                                    let byte_idx = text.char_indices()
+                    if let Some(edit) = buffer.undo.last_mut() {
+                        match edit {
+                            Edit::Insert {
+                                idx: c_idx, text, ..
+                            } => {
+                                if *c_idx <= view.cursor
+                                    && view.cursor <= *c_idx + text.chars().count()
+                                {
+                                    let byte_idx = text
+                                        .char_indices()
                                         .nth(view.cursor - *c_idx)
                                         .map(|(b_idx, _)| b_idx)
                                         .unwrap_or(text.len());
                                     text.insert_str(byte_idx, &c.to_string());
-                                }else{
-                                    buffer.undo.push(Edit::Insert{ idx: view.cursor, text: c.into() });
+                                } else {
+                                    buffer.undo.push(Edit::Insert {
+                                        idx: view.cursor,
+                                        text: c.into(),
+                                    });
                                 }
                             }
-                            Edit::Delete {..}=>{
-                                buffer.undo.push(Edit::Insert{ idx: view.cursor, text: c.into() });
+                            Edit::Delete { .. } => {
+                                buffer.undo.push(Edit::Insert {
+                                    idx: view.cursor,
+                                    text: c.into(),
+                                });
                             }
                         }
-                    }else{
-                        buffer.undo.push(Edit::Insert { idx: view.cursor, text: c.into()});
+                    } else {
+                        buffer.undo.push(Edit::Insert {
+                            idx: view.cursor,
+                            text: c.into(),
+                        });
                     }
                     buffer.insert(view.off, view.cursor, c);
                     let view = views.get_mut(vidx);
                     let line = buffer.buf.char_to_line(view.cursor);
                     let line_start = buffer.buf.line_to_char(line);
-                    let col = view.cursor +1 - line_start;
+                    let col = view.cursor + 1 - line_start;
 
                     let line_end = buffer.buf.line(line).len_chars();
                     let col = col.min(line_end.saturating_sub(1));
@@ -709,60 +722,78 @@ impl Component for ViewIdx{
                     view.cursor = line_start + col;
                     view.prefered_x = view.cursor - line_start;
                 }
-                Cmd::NewLine=>{
+                Cmd::NewLine => {
                     let view = views.get_mut(vidx);
                     let buffer = buffers.get_mut(bidx);
                     buffer.redo.clear();
                     buffer.insert(view.off, view.cursor, '\n');
-                    buffer.redo.push(Edit::Insert { idx: view.cursor, text: "\n".to_string() });
-                    let line = buffer.buf.char_to_line(view.cursor)+1;
+                    buffer.redo.push(Edit::Insert {
+                        idx: view.cursor,
+                        text: "\n".to_string(),
+                    });
+                    let line = buffer.buf.char_to_line(view.cursor) + 1;
                     let len_lines = buffer.buf.len_lines();
                     let line = line.min(len_lines);
                     let line_start = buffer.buf.line_to_char(line);
                     view.cursor = line_start;
                     View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
                 }
-                Cmd::BackSpace=>{
+                Cmd::BackSpace => {
                     let view = views.get_mut(vidx);
                     let buffer = buffers.get_mut(bidx);
                     buffer.redo.clear();
-                    if view.cursor != 0{
-                        let del = buffer.buf.slice(view.cursor-1..view.cursor).to_string();
-                        if let Some(edit) = buffer.undo.last_mut(){
-                            match edit{
-                                Edit::Insert {..}=>{
-                                    buffer.undo.push(Edit::Delete { idx:view.cursor-1, text: del });
-                                },
-                                Edit::Delete { idx: xidx, text, .. }=>{
-                                    if *xidx == view.cursor{
+                    if view.cursor != 0 {
+                        let del = buffer.buf.slice(view.cursor - 1..view.cursor).to_string();
+                        if let Some(edit) = buffer.undo.last_mut() {
+                            match edit {
+                                Edit::Insert { .. } => {
+                                    buffer.undo.push(Edit::Delete {
+                                        idx: view.cursor - 1,
+                                        text: del,
+                                    });
+                                }
+                                Edit::Delete {
+                                    idx: xidx, text, ..
+                                } => {
+                                    if *xidx == view.cursor {
                                         *xidx -= 1;
                                         text.insert_str(0, &del);
-                                    }else{
-                                        buffer.undo.push(Edit::Delete { idx: view.cursor - 1, text: del});
+                                    } else {
+                                        buffer.undo.push(Edit::Delete {
+                                            idx: view.cursor - 1,
+                                            text: del,
+                                        });
                                     }
                                 }
                             }
-                        }else{
-                            buffer.undo.push(Edit::Delete { idx: view.cursor-1, text: del});
+                        } else {
+                            buffer.undo.push(Edit::Delete {
+                                idx: view.cursor - 1,
+                                text: del,
+                            });
                         }
                         let line = buffer.buf.char_to_line(view.cursor);
                         let line_start = buffer.buf.line_to_char(line);
                         let col = view.cursor - line_start;
                         let prev_start = buffer.buf.line_to_char(line.saturating_sub(1));
-                        let prev_len = buffer.buf.line(line.saturating_sub(1)).len_chars().saturating_sub(1);
-                        buffer.buf.remove(view.cursor- 1..view.cursor);
-                        if view.cursor > line_start{
+                        let prev_len = buffer
+                            .buf
+                            .line(line.saturating_sub(1))
+                            .len_chars()
+                            .saturating_sub(1);
+                        buffer.buf.remove(view.cursor - 1..view.cursor);
+                        if view.cursor > line_start {
                             let col = col - 1;
                             view.prefered_x = col;
                             view.cursor = line_start + col;
-                        }else{
+                        } else {
                             view.prefered_x = prev_len;
                             view.cursor = prev_start + prev_len;
                         }
                         View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
                     }
                 }
-                Cmd::Noop=>{},
+                Cmd::Noop => {}
             }
             Ok(())
         }
@@ -770,71 +801,62 @@ impl Component for ViewIdx{
     }
 }
 
-struct BufferList{
-}
+struct BufferList {}
 
-impl Component for BufferList{
-fn draw(
-    &self,
-    rect: &Rect,
-    _views: &Views,
-    buffers: &Buffers,
-    screen: &mut ScreenBuffer
-) {
-    let dirty = if buffers.data.get(0).unwrap().undo.is_empty() {
-        ""
-    } else {
-        "Dirty"
-    };
-
-    let s = format!("{} {} {}", 0, "SCRATCH", dirty);
-    let s = format!("{:<width$}", s, width = rect.width as usize);
-
-    screen.set_string_xy(rect.x, rect.y, &s);
-
-    for y in rect.y + 1..rect.y + rect.height {
-        if y as usize > buffers.data.len() - 1 {
-            return;
-        }
-
-        let dirty = if buffers.data.get(y as usize).unwrap().undo.is_empty() {
+impl Component for BufferList {
+    fn draw(&self, rect: &Rect, _views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
+        let dirty = if buffers.data.get(0).unwrap().undo.is_empty() {
             ""
         } else {
             "Dirty"
         };
 
-        let file_path = match buffers.data.get(y as usize) {
-            None => "NEW_FILE".to_string(),
-            Some(b) => match &b.file {
-                Some(path) => path.to_string_lossy().to_string(),
-                None => "NEW_FILE".to_string(),
-            },
-        };
-
-        let s = format!("{} {} {}", y, file_path, dirty);
+        let s = format!("{} {} {}", 0, "SCRATCH", dirty);
         let s = format!("{:<width$}", s, width = rect.width as usize);
-        // s.truncate(rect.width as usize);
-        screen.set_string_xy(rect.x, y, &s);
+
+        screen.set_string_xy(rect.x, rect.y, &s);
+
+        for y in rect.y + 1..rect.y + rect.height {
+            if y as usize > buffers.data.len() - 1 {
+                return;
+            }
+
+            let dirty = if buffers.data.get(y as usize).unwrap().undo.is_empty() {
+                ""
+            } else {
+                "Dirty"
+            };
+
+            let file_path = match buffers.data.get(y as usize) {
+                None => "NEW_FILE".to_string(),
+                Some(b) => match &b.file {
+                    Some(path) => path.to_string_lossy().to_string(),
+                    None => "NEW_FILE".to_string(),
+                },
+            };
+
+            let s = format!("{} {} {}", y, file_path, dirty);
+            let s = format!("{:<width$}", s, width = rect.width as usize);
+            // s.truncate(rect.width as usize);
+            screen.set_string_xy(rect.x, y, &s);
+        }
     }
-}
-    fn cursor_xy(&self, rect: &Rect, _views: &Views, _buffers: &Buffers)->(u16, u16) {
+    fn cursor_xy(&self, rect: &Rect, _views: &Views, _buffers: &Buffers) -> (u16, u16) {
         (rect.x, rect.y)
     }
     fn behaviour(
-            &mut self,
-            key: KeyEvent,
-            focus: &mut Focus,
-            _cmd_line: &mut CmdLine,
-            views: &mut Views,
-            _buffers: &mut Buffers,
-            nodes: &mut Nodes,
-        )->Result<(), EditorErr> {
-        match key.code{
-            KeyCode::Esc=>{
+        &mut self,
+        key: KeyEvent,
+        focus: &mut Focus,
+        _cmd_line: &mut CmdLine,
+        views: &mut Views,
+        _buffers: &mut Buffers,
+        nodes: &mut Nodes,
+    ) -> Result<(), EditorErr> {
+        match key.code {
+            KeyCode::Esc => {
                 let (l, lidx) = {
-                    let Focus::Leaf(lidx) = focus else {
-                        panic!()
-                    };
+                    let Focus::Leaf(lidx) = focus else { panic!() };
                     (nodes.leaves.get(lidx.0).unwrap(), lidx.clone())
                 };
                 nodes.remove_child(l.parent, views, focus, NodeIdx::Leaf(lidx));
@@ -848,14 +870,14 @@ fn draw(
 #[derive(Clone, Copy, PartialEq)]
 struct LeafIdx(usize);
 
-struct Leaf{
+struct Leaf {
     parent: SplitIdx,
     rect: Rect,
     comp: Box<dyn Component>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum NodeIdx{
+enum NodeIdx {
     Leaf(LeafIdx),
     Split(SplitIdx),
 }
@@ -863,7 +885,7 @@ enum NodeIdx{
 #[derive(Clone, Copy, PartialEq)]
 struct SplitIdx(usize);
 
-struct Split{
+struct Split {
     parent: Option<SplitIdx>,
     children: Vec<NodeIdx>,
     direction: Direction,
@@ -871,13 +893,13 @@ struct Split{
     rect: Rect,
 }
 
-#[derive(Clone)]
-enum Direction{
+#[derive(Clone, PartialEq, Eq)]
+enum Direction {
     Horizontal,
     Vertical,
 }
 
-enum Focus{
+enum Focus {
     Leaf(LeafIdx),
     CmdLine,
 }
@@ -885,183 +907,207 @@ enum Focus{
 //index into nodes.roots
 const ROOT_OVERLAY: usize = 1;
 const ROOT_TEXT_VIEW: usize = 0;
-struct Nodes{
-    roots:Vec<SplitIdx>,
-    splits:Vec<Split>,
-    leaves:Vec<Leaf>,
-    free_splits:Vec<usize>,
-    free_leaves:Vec<usize>,
+struct Nodes {
+    roots: Vec<SplitIdx>,
+    splits: Vec<Split>,
+    leaves: Vec<Leaf>,
+    free_splits: Vec<usize>,
+    free_leaves: Vec<usize>,
 }
 
-impl Nodes{
-    fn new()->Self{
-        Nodes{
+impl Nodes {
+    fn new() -> Self {
+        Nodes {
             roots: vec![],
             splits: vec![],
             leaves: vec![],
             free_splits: vec![],
-            free_leaves: vec![]
+            free_leaves: vec![],
         }
     }
 
-    fn push_leaf(&mut self, leaf: Leaf)->LeafIdx{
-        if self.free_leaves.is_empty(){
+    fn push_leaf(&mut self, leaf: Leaf) -> LeafIdx {
+        if self.free_leaves.is_empty() {
             let lidx = self.leaves.len();
             self.leaves.push(leaf);
             LeafIdx(lidx)
-        }else{
+        } else {
             let lidx = self.free_leaves.pop().unwrap();
             self.leaves[lidx] = leaf;
             LeafIdx(lidx)
         }
     }
-    fn push_branch(&mut self, split: Split)->SplitIdx{
-        if self.free_splits.is_empty(){
+    fn push_branch(&mut self, split: Split) -> SplitIdx {
+        if self.free_splits.is_empty() {
             let sidx = self.splits.len();
             self.splits.push(split);
             SplitIdx(sidx)
-        }else{
+        } else {
             let sidx = self.free_splits.pop().unwrap();
             self.splits[sidx] = split;
             SplitIdx(sidx)
         }
     }
 
-    fn new_root(&mut self, rect: Rect, direction: Direction)->SplitIdx{
-        let new_root = self.push_branch(Split{
-            parent:None,
-            children:vec![],
-            focus:0,
+    fn new_root(&mut self, rect: Rect, direction: Direction) -> SplitIdx {
+        let new_root = self.push_branch(Split {
+            parent: None,
+            children: vec![],
+            focus: 0,
             direction,
             rect,
         });
         self.roots.push(new_root);
         new_root
     }
-    fn new_split(&mut self, vidx: ViewIdx, parent: SplitIdx, direction: Direction)->(LeafIdx, SplitIdx){
-        let new_parent = self.push_branch(Split{
-            parent:Some(parent),
+    fn new_split(
+        &mut self,
+        vidx: ViewIdx,
+        parent: SplitIdx,
+        direction: Direction,
+    ) -> (LeafIdx, SplitIdx) {
+        let new_parent = self.push_branch(Split {
+            parent: Some(parent),
             children: vec![],
-            focus:0,
+            focus: 0,
             direction,
-            rect:Rect{
+            rect: Rect {
                 x: 0,
                 y: 0,
                 height: 0,
                 width: 0,
-                max_height:None,
-                max_width:None,
-                min_height:None,
-                min_width:None,
-            }
+                max_height: None,
+                max_width: None,
+                min_height: None,
+                min_width: None,
+            },
         });
-        self.splits[parent.0].children.push(NodeIdx::Split(new_parent));
+        self.splits[parent.0]
+            .children
+            .push(NodeIdx::Split(new_parent));
         let comp: Box<dyn Component> = Box::new(vidx);
         let lidx = self.new_leaf(comp, new_parent);
         self.recalc(parent);
         (lidx, new_parent)
     }
-    fn new_leaf(&mut self, comp: Box<dyn Component>, parent: SplitIdx)->LeafIdx{
-        let lidx = self.push_leaf(Leaf{parent, comp, rect: Rect{
-            x: 0,
-            y: 0,
-            height: 0,
-            width: 0,
-            max_height:None,
-            max_width:None,
-            min_height:None,
-            min_width:None,
-        }});
+    fn new_leaf(&mut self, comp: Box<dyn Component>, parent: SplitIdx) -> LeafIdx {
+        let lidx = self.push_leaf(Leaf {
+            parent,
+            comp,
+            rect: Rect {
+                x: 0,
+                y: 0,
+                height: 0,
+                width: 0,
+                max_height: None,
+                max_width: None,
+                min_height: None,
+                min_width: None,
+            },
+        });
         self.splits[parent.0].children.push(NodeIdx::Leaf(lidx));
         self.recalc(parent);
         lidx
     }
 
-    fn remove_child(&mut self, parent: SplitIdx, views: &mut Views, focus: &mut Focus, child: NodeIdx){
-        let Split{children, focus: f, ..} = &mut self.splits[parent.0];
-        match child{
-            NodeIdx::Leaf(lidx)=>{
-                children.retain(|x| match x{
-                    NodeIdx::Leaf(l)=>l.0 != lidx.0,
+    fn remove_child(
+        &mut self,
+        parent: SplitIdx,
+        views: &mut Views,
+        focus: &mut Focus,
+        child: NodeIdx,
+    ) {
+        let Split {
+            children, focus: f, ..
+        } = &mut self.splits[parent.0];
+        match child {
+            NodeIdx::Leaf(lidx) => {
+                children.retain(|x| match x {
+                    NodeIdx::Leaf(l) => l.0 != lidx.0,
                     _ => true,
                 });
             }
-            NodeIdx::Split(sidx)=>{
-                children.retain(|x| match x{
-                    NodeIdx::Split(s)=>s.0 != sidx.0,
+            NodeIdx::Split(sidx) => {
+                children.retain(|x| match x {
+                    NodeIdx::Split(s) => s.0 != sidx.0,
                     _ => true,
                 });
             }
         }
-        if children.is_empty(){
+        if children.is_empty() {
             *f = 0;
-        self.reflow(focus, views, parent);
+            self.reflow(focus, views, parent);
             let parent = {
-                let Focus::Leaf(l) = focus else{
+                let Focus::Leaf(l) = focus else {
                     panic!();
                 };
-                let Leaf {parent, ..} = self.leaves.get(l.0).unwrap();
+                let Leaf { parent, .. } = self.leaves.get(l.0).unwrap();
                 parent
             };
-        self.recalc(*parent);
-        }else{
-            *f = (*f+children.len()-1)%children.len();
+            self.recalc(*parent);
+        } else {
+            *f = (*f + children.len() - 1) % children.len();
             self.recalc(parent);
         }
         self.remove(child);
         let mut curr = NodeIdx::Split(SplitIdx(0));
-        let lidx = loop{
-            match curr{
-                NodeIdx::Split(s)=>{
-                    let Split {children, focus:f, ..} = self.splits.get(s.0).unwrap();
+        let lidx = loop {
+            match curr {
+                NodeIdx::Split(s) => {
+                    let Split {
+                        children, focus: f, ..
+                    } = self.splits.get(s.0).unwrap();
                     curr = *children.get(*f).unwrap();
                 }
-                NodeIdx::Leaf(l)=>{
-                    break l
-                }
+                NodeIdx::Leaf(l) => break l,
             }
         };
         *focus = Focus::Leaf(lidx);
     }
-    fn remove(&mut self, nidx: NodeIdx){
-        match nidx{
-            NodeIdx::Leaf(lidx)=>{
+    fn remove(&mut self, nidx: NodeIdx) {
+        match nidx {
+            NodeIdx::Leaf(lidx) => {
                 self.free_leaves.push(lidx.0);
             }
-            NodeIdx::Split(sidx)=>{
+            NodeIdx::Split(sidx) => {
                 self.free_splits.push(sidx.0);
             }
         }
     }
 
-    fn recalc(&mut self, sidx: SplitIdx){
+    fn recalc(&mut self, sidx: SplitIdx) {
         let curr = sidx;
-        let Split {children, direction, rect, ..} = self.splits.get(curr.0).unwrap();
+        let Split {
+            children,
+            direction,
+            rect,
+            ..
+        } = self.splits.get(curr.0).unwrap();
         // if children.is_empty(){
         //     return;
         // }
         let resize: Vec<(u16, NodeIdx)> = {
             let (mut size_left, mut remainder) = {
-                match direction{
-                    Direction::Vertical=>(rect.width, rect.width%children.len() as u16),
-                    Direction::Horizontal=>(rect.height, rect.height%children.len() as u16),
+                match direction {
+                    Direction::Vertical => (rect.width, rect.width % children.len() as u16),
+                    Direction::Horizontal => (rect.height, rect.height % children.len() as u16),
                 }
             };
-            let mut resize: Vec<(u16, NodeIdx)> = vec![];//main axis either width or height
-            for n in children.iter(){
-                match n{
-                    NodeIdx::Leaf(l)=>{
+            let mut resize: Vec<(u16, NodeIdx)> = vec![]; //main axis either width or height
+            for n in children.iter() {
+                match n {
+                    NodeIdx::Leaf(l) => {
                         let l = self.leaves.get(l.0).unwrap();
                         let mut min = 0;
-                        match direction{
-                            Direction::Horizontal=>{
-                                if let Some(h) = l.rect.min_height{
+                        match direction {
+                            Direction::Horizontal => {
+                                if let Some(h) = l.rect.min_height {
                                     min = h;
                                     size_left -= h;
                                 }
                             }
-                            Direction::Vertical=>{
-                                if let Some(w) = l.rect.min_width{
+                            Direction::Vertical => {
+                                if let Some(w) = l.rect.min_width {
                                     min = w;
                                     size_left -= w;
                                 }
@@ -1069,18 +1115,18 @@ impl Nodes{
                         }
                         resize.push((min, *n));
                     }
-                    NodeIdx::Split(s)=>{
+                    NodeIdx::Split(s) => {
                         let s = self.splits.get(s.0).unwrap();
                         let mut min = 0;
-                        match direction{
-                            Direction::Horizontal=>{
-                                if let Some(h) = s.rect.min_height{
+                        match direction {
+                            Direction::Horizontal => {
+                                if let Some(h) = s.rect.min_height {
                                     min = h;
                                     size_left -= h;
                                 }
                             }
-                            Direction::Vertical=>{
-                                if let Some(w) = s.rect.min_width{
+                            Direction::Vertical => {
+                                if let Some(w) = s.rect.min_width {
                                     min = w;
                                     size_left -= w;
                                 }
@@ -1092,36 +1138,32 @@ impl Nodes{
             }
 
             let mut non_maxed: Vec<usize> = (0..resize.len()).collect();
-            while !non_maxed.is_empty() && size_left != 0{
-                let width_per_child = size_left/non_maxed.len() as u16;
+            while !non_maxed.is_empty() && size_left != 0 {
+                let width_per_child = size_left / non_maxed.len() as u16;
                 size_left = 0;
                 let mut i = 0;
-                while i < non_maxed.len(){
+                while i < non_maxed.len() {
                     let idx = non_maxed[i];
                     let (s, n) = &mut resize[idx];
                     let max = {
-                        match direction{
-                            Direction::Vertical=>{
-                                match n{
-                                    NodeIdx::Leaf(l)=>self.leaves.get(l.0).unwrap().rect.max_width,
-                                    NodeIdx::Split(s)=>self.splits.get(s.0).unwrap().rect.max_width,
-                                }
-                            }
-                            Direction::Horizontal=>{
-                                match n{
-                                    NodeIdx::Leaf(l)=>self.leaves.get(l.0).unwrap().rect.max_height,
-                                    NodeIdx::Split(s)=>self.leaves.get(s.0).unwrap().rect.max_height,
-                                }
-                            }
+                        match direction {
+                            Direction::Vertical => match n {
+                                NodeIdx::Leaf(l) => self.leaves.get(l.0).unwrap().rect.max_width,
+                                NodeIdx::Split(s) => self.splits.get(s.0).unwrap().rect.max_width,
+                            },
+                            Direction::Horizontal => match n {
+                                NodeIdx::Leaf(l) => self.leaves.get(l.0).unwrap().rect.max_height,
+                                NodeIdx::Split(s) => self.leaves.get(s.0).unwrap().rect.max_height,
+                            },
                         }
                     };
                     *s += width_per_child;
-                    if remainder > 0{
+                    if remainder > 0 {
                         *s += 1;
                         remainder -= 1;
                     }
-                    if let Some(max) = max{
-                        if *s >= max{
+                    if let Some(max) = max {
+                        if *s >= max {
                             size_left += s.saturating_sub(max);
                             *s = max;
                             non_maxed.swap_remove(i);
@@ -1136,81 +1178,90 @@ impl Nodes{
         let (mut x, mut y) = (rect.x, rect.y);
         let direction = direction.clone();
         let rect = rect.clone();
-        for (len, n) in resize{
-            match direction{
-                Direction::Vertical=>{
-                    match n{
-                        NodeIdx::Leaf(l)=>{
-                            let l = self.leaves.get_mut(l.0).unwrap();
-                            l.rect.x = x;
-                            l.rect.y = y;
-                            l.rect.width = len;
-                            x += l.rect.width;
-                            l.rect.height = l.rect.max_height.unwrap_or(rect.height);
-                        }
-                        NodeIdx::Split(sidx)=>{
-                            let s = self.splits.get_mut(sidx.0).unwrap();
-                            s.rect.x = x;
-                            s.rect.y = y;
-                            s.rect.width = len;
-                            x += s.rect.width;
-                            s.rect.height = s.rect.max_height.unwrap_or(rect.height);
-                            self.recalc(sidx);
-                        }
+        for (len, n) in resize {
+            match direction {
+                Direction::Vertical => match n {
+                    NodeIdx::Leaf(l) => {
+                        let l = self.leaves.get_mut(l.0).unwrap();
+                        l.rect.x = x;
+                        l.rect.y = y;
+                        l.rect.width = len;
+                        x += l.rect.width;
+                        l.rect.height = l.rect.max_height.unwrap_or(rect.height);
                     }
-                }
-                Direction::Horizontal=>{
-                    match n{
-                        NodeIdx::Leaf(l)=>{
-                            let l = self.leaves.get_mut(l.0).unwrap();
-                            l.rect.x = x;
-                            l.rect.y = y;
-                            l.rect.height = len;
-                            y += l.rect.height;
-                            l.rect.width = l.rect.max_width.unwrap_or(rect.width);
-                        }
-                        NodeIdx::Split(sidx)=>{
-                            let s = self.splits.get_mut(sidx.0).unwrap();
-                            s.rect.x = x;
-                            s.rect.y = y;
-                            s.rect.height = len;
-                            y += s.rect.height;
-                            s.rect.width = s.rect.max_width.unwrap_or(rect.width);
-                            self.recalc(sidx);
-                        }
+                    NodeIdx::Split(sidx) => {
+                        let s = self.splits.get_mut(sidx.0).unwrap();
+                        s.rect.x = x;
+                        s.rect.y = y;
+                        s.rect.width = len;
+                        x += s.rect.width;
+                        s.rect.height = s.rect.max_height.unwrap_or(rect.height);
+                        self.recalc(sidx);
                     }
-                }
+                },
+                Direction::Horizontal => match n {
+                    NodeIdx::Leaf(l) => {
+                        let l = self.leaves.get_mut(l.0).unwrap();
+                        l.rect.x = x;
+                        l.rect.y = y;
+                        l.rect.height = len;
+                        y += l.rect.height;
+                        l.rect.width = l.rect.max_width.unwrap_or(rect.width);
+                    }
+                    NodeIdx::Split(sidx) => {
+                        let s = self.splits.get_mut(sidx.0).unwrap();
+                        s.rect.x = x;
+                        s.rect.y = y;
+                        s.rect.height = len;
+                        y += s.rect.height;
+                        s.rect.width = s.rect.max_width.unwrap_or(rect.width);
+                        self.recalc(sidx);
+                    }
+                },
             }
         }
     }
 
-    fn reflow(&mut self, focus: &mut Focus, views: &mut Views, parent: SplitIdx){
-        let mut to_remove: Option<(SplitIdx, usize, NodeIdx)> = None;//parent, child, node
+    fn reflow(&mut self, focus: &mut Focus, views: &mut Views, parent: SplitIdx) {
+        let mut to_remove: Option<(SplitIdx, usize, NodeIdx)> = None; //parent, child, node
         let mut curr = parent;
-        loop{
-            let Split { parent, children, ..} = self.splits.get(curr.0).unwrap();
-            if children.is_empty(){
-                if let Some(p) = parent{
-                    let Split {children, ..} = self.splits.get(p.0).unwrap();
-                    to_remove = Some((*p, children.iter().position(|x| *x == NodeIdx::Split(curr)).unwrap(), NodeIdx::Split(curr)));
+        loop {
+            let Split {
+                parent, children, ..
+            } = self.splits.get(curr.0).unwrap();
+            if children.is_empty() {
+                if let Some(p) = parent {
+                    let Split { children, .. } = self.splits.get(p.0).unwrap();
+                    to_remove = Some((
+                        *p,
+                        children
+                            .iter()
+                            .position(|x| *x == NodeIdx::Split(curr))
+                            .unwrap(),
+                        NodeIdx::Split(curr),
+                    ));
                     curr = *p
                 }
             }
-            match to_remove{
-                Some(s)=>{
-                    let Split{children, focus, ..} = &mut self.splits[s.0.0];
+            match to_remove {
+                Some(s) => {
+                    let Split {
+                        children, focus, ..
+                    } = &mut self.splits[s.0.0];
                     children.remove(s.1);
                     *focus = focus.saturating_sub(1);
                     self.remove(s.2);
                     to_remove = None;
                 }
-                None=>break,
+                None => break,
             }
         }
 
         //root cannot be empty
-        let Split{children, focus:f, ..} = &mut self.splits[self.roots[ROOT_TEXT_VIEW].0];
-        if children.is_empty(){
+        let Split {
+            children, focus: f, ..
+        } = &mut self.splits[self.roots[ROOT_TEXT_VIEW].0];
+        if children.is_empty() {
             let vidx = views.push(View::new(SCRATCH));
             let comp: Box<dyn Component> = Box::new(vidx);
             *f = 0;
@@ -1218,42 +1269,48 @@ impl Nodes{
         }
 
         let mut curr = NodeIdx::Split(self.roots[ROOT_TEXT_VIEW]);
-        while let NodeIdx::Split(s) = curr{
-            let Split{children, focus:f, ..} = &self.splits[s.0];
+        while let NodeIdx::Split(s) = curr {
+            let Split {
+                children, focus: f, ..
+            } = &self.splits[s.0];
             curr = *children.get(*f).unwrap();
         }
         let curr = {
-            match curr{
-                NodeIdx::Leaf(l)=>l,
+            match curr {
+                NodeIdx::Leaf(l) => l,
                 _ => panic!(),
             }
         };
         *focus = Focus::Leaf(curr)
     }
 
-    fn paint(&self,
+    fn paint(
+        &self,
         focus: &Focus,
         cmd_line: &CmdLine,
         views: &Views,
         buffers: &Buffers,
         old: &mut ScreenBuffer,
-        new: &mut ScreenBuffer
-    )->io::Result<()>{
-        for r in &self.roots{
+        new: &mut ScreenBuffer,
+    ) -> io::Result<()> {
+        for r in &self.roots {
             draw(&self, NodeIdx::Split(*r), views, buffers, old, new);
         }
         cmd_line.draw(focus, new);
         new.print(old)?;
-        match focus{
-            Focus::CmdLine=>{
-                queue!(stdout(), MoveTo(cmd_line.cursor as u16 +1, cmd_line.rect.y))?;
+        match focus {
+            Focus::CmdLine => {
+                queue!(
+                    stdout(),
+                    MoveTo(cmd_line.cursor as u16 + 1, cmd_line.rect.y)
+                )?;
             }
-            Focus::Leaf(l)=>{
-                let Leaf{comp, rect, ..} = self.leaves.get(l.0).unwrap();
+            Focus::Leaf(l) => {
+                let Leaf { comp, rect, .. } = self.leaves.get(l.0).unwrap();
                 let (x, y) = comp.cursor_xy(rect, views, buffers).clone();
                 queue!(stdout(), MoveTo(x, y))?;
             }
-            _ => {},
+            _ => {}
         }
         fn draw(
             nodes: &Nodes,
@@ -1261,21 +1318,21 @@ impl Nodes{
             views: &Views,
             buffers: &Buffers,
             old: &mut ScreenBuffer,
-            new: &mut ScreenBuffer
-        ){
-            match nidx{
-                NodeIdx::Split(s)=>{
+            new: &mut ScreenBuffer,
+        ) {
+            match nidx {
+                NodeIdx::Split(s) => {
                     let s = &nodes.splits[s.0];
-                    for (i, n) in s.children.iter().enumerate(){
-                        if i != s.focus{
+                    for (i, n) in s.children.iter().enumerate() {
+                        if i != s.focus {
                             draw(nodes, *n, views, buffers, old, new);
                         }
                     }
-                    if let Some(nidx) = s.children.get(s.focus){
+                    if let Some(nidx) = s.children.get(s.focus) {
                         draw(nodes, *nidx, views, buffers, old, new);
                     }
                 }
-                NodeIdx::Leaf(l)=>{
+                NodeIdx::Leaf(l) => {
                     let l = &nodes.leaves[l.0];
                     l.comp.draw(&l.rect, views, buffers, new);
                 }
@@ -1284,277 +1341,261 @@ impl Nodes{
         Ok(())
     }
 
-    fn focus_next(&mut self, focus: &mut Focus){
-        let Focus::Leaf(l) = focus else{
-            panic!("called focus next on non leaf")
+    fn focus_right(&mut self, focus: &mut Focus) {
+        let l = {
+            let Focus::Leaf(l) = focus else { panic!() };
+            l
         };
-        let Leaf { parent, ..} = self.leaves.get(l.0).unwrap();
-        let Split {children, focus: f, ..} = self.splits.get_mut(parent.0).unwrap();
-        *f = (*f+1)%children.len();
-
-        let Split {children, focus:f, ..} = self.splits.get(parent.0).unwrap();
-        let mut curr = children.get(*f).unwrap();
-        while let NodeIdx::Split(s) = curr{
-            let Split {children, focus:f, ..} = self.splits.get(s.0).unwrap();
-            curr = children.get(*f).unwrap();
+        let Leaf { parent, rect, .. } = &self.leaves[l.0];
+        let x = rect.x + rect.width;
+        let mut curr = *parent;
+        let target_split = 'search: loop {
+            let Split {
+                parent, children, ..
+            } = &self.splits[curr.0];
+            for (i, c) in children.iter().enumerate() {
+                match c {
+                    NodeIdx::Leaf(l) => {
+                        let Leaf { rect, .. } = &self.leaves[l.0];
+                        if rect.x >= x {
+                            let c = c.clone();
+                            let Split { focus, .. } = &mut self.splits[curr.0];
+                            *focus = i;
+                            break 'search c;
+                        }
+                    }
+                    NodeIdx::Split(s) => {
+                        let Split { rect, .. } = &self.splits[s.0];
+                        if rect.x >= x {
+                            let c = c.clone();
+                            let Split { focus, .. } = &mut self.splits[curr.0];
+                            *focus = i;
+                            break 'search c;
+                        }
+                    }
+                }
+            }
+            if let Some(p) = parent {
+                curr = *p;
+            } else {
+                return;
+            }
+        };
+        *focus = {
+            let mut curr = target_split;
+            loop {
+                match curr {
+                    NodeIdx::Leaf(l) => {
+                        break Focus::Leaf(l);
+                    }
+                    NodeIdx::Split(s) => {
+                        let Split {
+                            children, focus: f, ..
+                        } = &self.splits[s.0];
+                        curr = children[*f];
+                    }
+                }
+            }
         }
-
-        let NodeIdx::Leaf(l) = curr else {
-            panic!("focus cannot be split")
-        };
-        *focus = Focus::Leaf(*l);
     }
-    fn focus_prev(&mut self, focus: &mut Focus){
-        let Focus::Leaf(l) = focus else{
-            panic!("called focus left on non leaf")
-        };
-        let Leaf { parent, ..} = self.leaves.get(l.0).unwrap();
-        let Split {children, focus:f, ..} = self.splits.get_mut(parent.0).unwrap();
-        *f = (*f+children.len()-1)%children.len();
 
-        let Split {children, focus:f, ..} = self.splits.get(parent.0).unwrap();
-        let mut curr = children.get(*f).unwrap();
-        while let NodeIdx::Split(s) = curr{
-            let Split{children, focus:f, ..} = self.splits.get(s.0).unwrap();
-            curr = children.get(*f).unwrap();
+    fn focus_left(&mut self, focus: &mut Focus) {
+        let l = {
+            let Focus::Leaf(l) = focus else { panic!() };
+            l
+        };
+        let Leaf { parent, rect, .. } = &self.leaves[l.0];
+        let x = rect.x;
+        let mut curr = *parent;
+        let target_split = 'search: loop {
+            let Split {
+                parent, children, ..
+            } = &self.splits[curr.0];
+            for (i, c) in children.iter().enumerate().rev() {
+                match c {
+                    NodeIdx::Leaf(l) => {
+                        let Leaf { rect, .. } = &self.leaves[l.0];
+                        if rect.x + rect.width <= x {
+                            let c = c.clone();
+                            let Split { focus, .. } = &mut self.splits[curr.0];
+                            *focus = i;
+                            break 'search c;
+                        }
+                    }
+                    NodeIdx::Split(s) => {
+                        let Split { rect, .. } = &self.splits[s.0];
+                        if rect.x + rect.width <= x {
+                            let c = c.clone();
+                            let Split { focus, .. } = &mut self.splits[curr.0];
+                            *focus = i;
+                            break 'search c;
+                        }
+                    }
+                }
+            }
+            if let Some(p) = parent {
+                curr = *p;
+            } else {
+                return;
+            }
+        };
+        *focus = {
+            let mut curr = target_split;
+            loop {
+                match curr {
+                    NodeIdx::Leaf(l) => {
+                        break Focus::Leaf(l);
+                    }
+                    NodeIdx::Split(s) => {
+                        let Split {
+                            children, focus: f, ..
+                        } = &self.splits[s.0];
+                        curr = children[*f];
+                    }
+                }
+            }
         }
-        let NodeIdx::Leaf(l) = curr else{
-            panic!("focus cannt be split")
-        };
-        *focus = Focus::Leaf(*l);
     }
-    fn focus_right(&mut self, focus: &mut Focus){
-        let Leaf { parent, ..} = {
-            let Focus::Leaf(l) = focus else{
-                panic!()
-            };
-            self.leaves.get(l.0).unwrap()
+
+    fn focus_up(&mut self, focus: &mut Focus) {
+        let l = {
+            let Focus::Leaf(l) = focus else { panic!() };
+            l
         };
-        let Split{direction, focus:f, children, ..} = self.splits.get_mut(parent.0).unwrap();
-        match direction{
-            Direction::Vertical=>{
-                *f = (*f+1)%children.len();
-                *focus = {
-                    let Split{focus:f, children, ..} = self.splits.get(parent.0).unwrap();
-                    let mut curr = children.get(*f).unwrap();
-                    loop{
-                        match curr{
-                            NodeIdx::Split(s)=>{
-                                let Split{children, focus:f, ..} = self.splits.get(s.0).unwrap();
-                                    curr = children.get(*f).unwrap();
-                            }
-                            NodeIdx::Leaf(s)=>{
-                                break Focus::Leaf(*s)
-                            }
+        let Leaf { parent, rect, .. } = &self.leaves[l.0];
+        let y = rect.y;
+        let mut curr = *parent;
+        let target_split = 'search: loop {
+            let Split {
+                parent, children, ..
+            } = &self.splits[curr.0];
+            for (i, c) in children.iter().enumerate().rev() {
+                match c {
+                    NodeIdx::Leaf(l) => {
+                        let Leaf { rect, .. } = &self.leaves[l.0];
+                        if rect.y + rect.height <= y {
+                            let c = c.clone();
+                            let Split { focus, .. } = &mut self.splits[curr.0];
+                            *focus = i;
+                            break 'search c;
+                        }
+                    }
+                    NodeIdx::Split(s) => {
+                        let Split { rect, .. } = &self.splits[s.0];
+                        if rect.y + rect.height <= y {
+                            let c = c.clone();
+                            let Split { focus, .. } = &mut self.splits[curr.0];
+                            *focus = i;
+                            break 'search c;
                         }
                     }
                 }
             }
-            Direction::Horizontal=>{
-                let Split{parent, ..} = self.splits.get(parent.0).unwrap();
-                if let Some(p) = parent{
-                    let p = p.clone();
-                    let Split {children, focus:f, ..} = self.splits.get_mut(p.0).unwrap();
-                    *f = (*f+1)%children.len();
-                    *focus = {
-                        let Split{focus:f, children, ..} = self.splits.get(p.0).unwrap();
-                        let mut curr = children.get(*f).unwrap();
-                        loop{
-                            match curr{
-                                NodeIdx::Split(s)=>{
-                                    let Split{children, focus:f, ..} = self.splits.get(s.0).unwrap();
-                                    curr = children.get(*f).unwrap();
-                                }
-                                NodeIdx::Leaf(s)=>{
-                                    break Focus::Leaf(*s)
-                                }
-                            }
-                        }
+            if let Some(p) = parent {
+                curr = *p;
+            } else {
+                return;
+            }
+        };
+        *focus = {
+            let mut curr = target_split;
+            loop {
+                match curr {
+                    NodeIdx::Leaf(l) => {
+                        break Focus::Leaf(l);
+                    }
+                    NodeIdx::Split(s) => {
+                        let Split {
+                            children, focus: f, ..
+                        } = &self.splits[s.0];
+                        curr = children[*f];
                     }
                 }
             }
-        };
+        }
     }
-    fn focus_left(&mut self, focus: &mut Focus){
-        let Leaf { parent, ..} = {
-            let Focus::Leaf(l) = focus else{
-                panic!()
-            };
-            self.leaves.get(l.0).unwrap()
+
+    fn focus_down(&mut self, focus: &mut Focus) {
+        let l = {
+            let Focus::Leaf(l) = focus else { panic!() };
+            l
         };
-        let Split{direction, focus:f, children, ..} = self.splits.get_mut(parent.0).unwrap();
-        match direction{
-            Direction::Vertical=>{
-                *f = (*f+children.len()-1)%children.len();
-                *focus = {
-                    let Split{focus:f, children, ..} = self.splits.get(parent.0).unwrap();
-                    let mut curr = children.get(*f).unwrap();
-                    loop{
-                        match curr{
-                            NodeIdx::Split(s)=>{
-                                let Split{children, focus:f, ..} = self.splits.get(s.0).unwrap();
-                                curr = children.get(*f).unwrap();
-                            }
-                            NodeIdx::Leaf(s)=>{
-                                break Focus::Leaf(*s)
-                            }
+        let Leaf { parent, rect, .. } = &self.leaves[l.0];
+        let y = rect.y + rect.height;
+        let mut curr = *parent;
+        let target_split = 'search: loop {
+            let Split {
+                parent, children, ..
+            } = &self.splits[curr.0];
+            for (i, c) in children.iter().enumerate() {
+                match c {
+                    NodeIdx::Leaf(l) => {
+                        let Leaf { rect, .. } = &self.leaves[l.0];
+                        if rect.y >= y {
+                            let c = c.clone();
+                            let Split { focus, .. } = &mut self.splits[curr.0];
+                            *focus = i;
+                            break 'search c;
+                        }
+                    }
+                    NodeIdx::Split(s) => {
+                        let Split { rect, .. } = &self.splits[s.0];
+                        if rect.y >= y {
+                            let c = c.clone();
+                            let Split { focus, .. } = &mut self.splits[curr.0];
+                            *focus = i;
+                            break 'search c;
                         }
                     }
                 }
             }
-            Direction::Horizontal=>{
-                let Split{parent, ..} = self.splits.get(parent.0).unwrap();
-                if let Some(p) = parent{
-                    let p = p.clone();
-                    let Split {children, focus:f, ..} = self.splits.get_mut(p.0).unwrap();
-                    *f = (*f+children.len()-1)%children.len();
-                    *focus = {
-                        let Split{focus:f, children, ..} = self.splits.get(p.0).unwrap();
-                        let mut curr = children.get(*f).unwrap();
-                        loop{
-                            match curr{
-                                NodeIdx::Split(s)=>{
-                                    let Split{children, focus:f, ..} = self.splits.get(s.0).unwrap();
-                                    curr = children.get(*f).unwrap();
-                                }
-                                NodeIdx::Leaf(s)=>{
-                                    break Focus::Leaf(*s)
-                                }
-                            }
-                        }
+            if let Some(p) = parent {
+                curr = *p;
+            } else {
+                return;
+            }
+        };
+        *focus = {
+            let mut curr = target_split;
+            loop {
+                match curr {
+                    NodeIdx::Leaf(l) => {
+                        break Focus::Leaf(l);
+                    }
+                    NodeIdx::Split(s) => {
+                        let Split {
+                            children, focus: f, ..
+                        } = &self.splits[s.0];
+                        curr = children[*f];
                     }
                 }
             }
-        };
-    }
-    fn focus_up(&mut self, focus: &mut Focus){
-        let Leaf { parent, ..} = {
-            let Focus::Leaf(l) = focus else{
-                panic!()
-            };
-            self.leaves.get(l.0).unwrap()
-        };
-        let Split{direction, focus:f, children, ..} = self.splits.get_mut(parent.0).unwrap();
-        match direction{
-            Direction::Horizontal=>{
-                *f = (*f+children.len()-1)%children.len();
-                *focus = {
-                    let Split{focus:f, children, ..} = self.splits.get(parent.0).unwrap();
-                    let mut curr = children.get(*f).unwrap();
-                    loop{
-                        match curr{
-                            NodeIdx::Split(s)=>{
-                                let Split{children, focus:f, ..} = self.splits.get(s.0).unwrap();
-                                curr = children.get(*f).unwrap();
-                            }
-                            NodeIdx::Leaf(s)=>{
-                                break Focus::Leaf(*s)
-                            }
-                        }
-                    }
-                }
-            }
-            Direction::Vertical=>{
-                let Split{parent, ..} = self.splits.get(parent.0).unwrap();
-                if let Some(p) = parent{
-                    let p = p.clone();
-                    let Split {children, focus:f, ..} = self.splits.get_mut(p.0).unwrap();
-                    *f = (*f+children.len()-1)%children.len();
-                    *focus = {
-                        let Split{focus:f, children, ..} = self.splits.get(p.0).unwrap();
-                        let mut curr = children.get(*f).unwrap();
-                        loop{
-                            match curr{
-                                NodeIdx::Split(s)=>{
-                                    let Split{children, focus:f, ..} = self.splits.get(s.0).unwrap();
-                                    curr = children.get(*f).unwrap();
-                                }
-                                NodeIdx::Leaf(s)=>{
-                                    break Focus::Leaf(*s)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        };
-    }
-    fn focus_down(&mut self, focus: &mut Focus){
-        let Leaf { parent, ..} = {
-            let Focus::Leaf(l) = focus else{
-                panic!()
-            };
-            self.leaves.get(l.0).unwrap()
-        };
-        let Split{direction, focus:f, children, ..} = self.splits.get_mut(parent.0).unwrap();
-        match direction{
-            Direction::Horizontal=>{
-                *f = (*f+1)%children.len();
-                *focus = {
-                    let Split{focus:f, children, ..} = self.splits.get(parent.0).unwrap();
-                    let mut curr = children.get(*f).unwrap();
-                    loop{
-                        match curr{
-                            NodeIdx::Split(s)=>{
-                                let Split{children, focus:f, ..} = self.splits.get(s.0).unwrap();
-                                curr = children.get(*f).unwrap();
-                            }
-                            NodeIdx::Leaf(s)=>{
-                                break Focus::Leaf(*s)
-                            }
-                        }
-                    }
-                }
-            }
-            Direction::Vertical=>{
-                let Split{parent, ..} = self.splits.get(parent.0).unwrap();
-                if let Some(p) = parent{
-                    let p = p.clone();
-                    let Split {children, focus:f, ..} = self.splits.get_mut(p.0).unwrap();
-                    *f = (*f+1)%children.len();
-                    *focus = {
-                        let Split{focus:f, children, ..} = self.splits.get(p.0).unwrap();
-                        let mut curr = children.get(*f).unwrap();
-                        loop{
-                            match curr{
-                                NodeIdx::Split(s)=>{
-                                    let Split{children, focus:f, ..} = self.splits.get(s.0).unwrap();
-                                    curr = children.get(*f).unwrap();
-                                }
-                                NodeIdx::Leaf(s)=>{
-                                    break Focus::Leaf(*s)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        };
+        }
     }
 }
 
-struct ScreenBuffer{
+struct ScreenBuffer {
     cells: Vec<char>,
     width: u16,
     height: u16,
 }
-impl ScreenBuffer{
-    fn set_cell_xy(&mut self, x: u16, y: u16, cell: char){
+impl ScreenBuffer {
+    fn set_cell_xy(&mut self, x: u16, y: u16, cell: char) {
         let idx = y * self.width + x;
         self.cells[idx as usize] = cell;
     }
-    fn set_cell(&mut self, idx: usize, cell: char){
+    fn set_cell(&mut self, idx: usize, cell: char) {
         self.cells[idx as usize] = cell;
     }
-    fn get_cell_xy(&mut self, x: u16, y: u16)->char{
+    fn get_cell_xy(&mut self, x: u16, y: u16) -> char {
         let idx = y * self.width + x;
         self.cells[idx as usize]
     }
-    fn get_cell(&mut self, idx: usize)->char{
+    fn get_cell(&mut self, idx: usize) -> char {
         self.cells[idx as usize]
     }
-    fn set_string_xy(&mut self, x: u16, y: u16, s: &str){
-        for (i, cell) in s.chars().enumerate(){
+    fn set_string_xy(&mut self, x: u16, y: u16, s: &str) {
+        for (i, cell) in s.chars().enumerate() {
             let xx = x + i as u16;
             if xx >= self.width || y >= self.height {
                 break;
@@ -1562,32 +1603,32 @@ impl ScreenBuffer{
             self.set_cell_xy(xx, y, cell);
         }
     }
-    fn clear_buffer(&mut self){
+    fn clear_buffer(&mut self) {
         self.cells.fill(' ');
     }
-    fn print(&mut self, prev: &mut ScreenBuffer)->io::Result<()>{
+    fn print(&mut self, prev: &mut ScreenBuffer) -> io::Result<()> {
         let mut out = stdout().lock();
-        for y in 0..self.height{
+        for y in 0..self.height {
             let mut x = 0;
-            while x < self.width{
+            while x < self.width {
                 let idx = y * self.width + x;
                 let old = prev.cells[idx as usize];
                 let new = self.cells[idx as usize];
-                if new != old{
+                if new != old {
                     let start_x = x;
                     let mut line = String::with_capacity(self.width as usize);
-                    while x < self.width{
+                    while x < self.width {
                         let idx = y * self.width + x;
                         let old = prev.cells[idx as usize];
                         let new = self.cells[idx as usize];
-                        if new == old{
+                        if new == old {
                             break;
                         }
                         line.push(new);
                         x += 1;
                     }
                     queue!(out, MoveTo(start_x, y), Print(line))?;
-                }else{
+                } else {
                     x += 1;
                 }
             }
@@ -1599,25 +1640,32 @@ impl ScreenBuffer{
 }
 
 #[derive(Clone, Copy)]
-enum Mode{
+enum Mode {
     Normal,
     Insert,
 }
 
-fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &mut CmdLine, views: &mut Views, buffers: &mut Buffers)->Result<(), EditorErr>{
-    match focus{
-        Focus::CmdLine=>{
-            let cmd = match key.code{
-                KeyCode::Char(c)=>Cmd::Insert(c),
-                KeyCode::Esc=>Cmd::EnterNormal,
-                KeyCode::Backspace=>Cmd::BackSpace,
-                KeyCode::Left=>Cmd::MoveLeft,
-                KeyCode::Right=>Cmd::MoveRight,
-                KeyCode::Enter=>Cmd::Exec,
+fn key_to_exec(
+    key: KeyEvent,
+    nodes: &mut Nodes,
+    focus: &mut Focus,
+    cmd_line: &mut CmdLine,
+    views: &mut Views,
+    buffers: &mut Buffers,
+) -> Result<(), EditorErr> {
+    match focus {
+        Focus::CmdLine => {
+            let cmd = match key.code {
+                KeyCode::Char(c) => Cmd::Insert(c),
+                KeyCode::Esc => Cmd::EnterNormal,
+                KeyCode::Backspace => Cmd::BackSpace,
+                KeyCode::Left => Cmd::MoveLeft,
+                KeyCode::Right => Cmd::MoveRight,
+                KeyCode::Enter => Cmd::Exec,
                 _ => Cmd::Noop,
             };
             exec_cmd(cmd, cmd_line, nodes, focus, views, buffers)?;
-            enum Cmd{
+            enum Cmd {
                 BufferList,
                 EnterNormal,
                 Exec,
@@ -1636,7 +1684,7 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                 ViewClose,
                 Noop,
             }
-            fn parse_cmd(s: String)->Result<Cmd, String>{
+            fn parse_cmd(s: String) -> Result<Cmd, String> {
                 fn parse_args(s: &str) -> Vec<String> {
                     let mut args = Vec::new();
                     let mut current = String::new();
@@ -1661,59 +1709,59 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                 }
                 let s = s.trim();
                 let mut parts = s.splitn(2, ' ');
-                let cmd = parts.next().ok_or(format!("unknown command: {}",s))?;
+                let cmd = parts.next().ok_or(format!("unknown command: {}", s))?;
                 let rest = parts.next().unwrap_or("");
-                match cmd{
-                    "bufferlist" | "bl" =>Ok(Cmd::BufferList),
-                    "q"  => Ok(Cmd::Quit(false)),
+                match cmd {
+                    "bufferlist" | "bl" => Ok(Cmd::BufferList),
+                    "q" => Ok(Cmd::Quit(false)),
                     "Q" => Ok(Cmd::Quit(true)),
-                    "w"  =>{
+                    "w" => {
                         let args = parse_args(rest);
                         Ok(Cmd::Save(args.get(0).cloned()))
                     }
                     "open" | "o" => {
                         let args = parse_args(rest);
-                        if let Some(arg) = args.get(0){
-                            if let Ok(idx) = arg.parse::<usize>(){
-                                Ok(Cmd::SwitchBuffer(BufferIdx {idx}))
-                            }else{
+                        if let Some(arg) = args.get(0) {
+                            if let Ok(idx) = arg.parse::<usize>() {
+                                Ok(Cmd::SwitchBuffer(BufferIdx { idx }))
+                            } else {
                                 Ok(Cmd::Open(Some(arg.clone())))
                             }
-                        }else{
+                        } else {
                             Ok(Cmd::Open(None))
                         }
                     }
-                    "split"  | "s"  =>Ok(Cmd::Split),
-                    "splitv" | "sv" =>Ok(Cmd::SplitV),
-                    "splith" | "sh" =>Ok(Cmd::SplitH),
+                    "split" | "s" => Ok(Cmd::Split),
+                    "splitv" | "sv" => Ok(Cmd::SplitV),
+                    "splith" | "sh" => Ok(Cmd::SplitH),
                     "close" | "c" => {
                         let mut args = Vec::new();
                         args.push(rest);
-                        if let Some(arg) = args.get(0){
-                            if let Ok(idx) = arg.parse::<usize>(){
-                                Ok(Cmd::Close(Some(BufferIdx {idx}), false))
-                            }else{
+                        if let Some(arg) = args.get(0) {
+                            if let Ok(idx) = arg.parse::<usize>() {
+                                Ok(Cmd::Close(Some(BufferIdx { idx }), false))
+                            } else {
                                 Ok(Cmd::Close(None, false))
                             }
-                        }else{
+                        } else {
                             Ok(Cmd::Close(None, false))
                         }
-                    } 
-                    "CLOSE"| "C" => {
+                    }
+                    "CLOSE" | "C" => {
                         let mut args = Vec::new();
                         args.push(rest);
-                        if let Some(arg) = args.get(0){
-                            if let Ok(idx) = arg.parse::<usize>(){
-                                Ok(Cmd::Close(Some(BufferIdx {idx}), true))
-                            }else{
+                        if let Some(arg) = args.get(0) {
+                            if let Ok(idx) = arg.parse::<usize>() {
+                                Ok(Cmd::Close(Some(BufferIdx { idx }), true))
+                            } else {
                                 Ok(Cmd::Close(None, true))
                             }
-                        }else{
+                        } else {
                             Ok(Cmd::Close(None, true))
                         }
                     }
-                    "viewclose" | "vc"=> Ok(Cmd::ViewClose),
-                    _ => Err(format!("unknown command: {}",cmd)),
+                    "viewclose" | "vc" => Ok(Cmd::ViewClose),
+                    _ => Err(format!("unknown command: {}", cmd)),
                 }
             }
             fn exec_cmd(
@@ -1722,47 +1770,59 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                 nodes: &mut Nodes,
                 focus: &mut Focus,
                 views: &mut Views,
-                buffers: &mut Buffers
-            )->Result<(), EditorErr>{
+                buffers: &mut Buffers,
+            ) -> Result<(), EditorErr> {
                 let (bidx, vidx, lidx, parent) = {
-                    let l = nodes.leaves.get(cmd_line.last_view.0.0).expect(&format!("lidx invalid:{}",cmd_line.last_view.0.0));
-                    (views.get(cmd_line.last_view.1).buf, cmd_line.last_view.1, cmd_line.last_view.0, l.parent)
+                    let l = nodes
+                        .leaves
+                        .get(cmd_line.last_view.0.0)
+                        .expect(&format!("lidx invalid:{}", cmd_line.last_view.0.0));
+                    (
+                        views.get(cmd_line.last_view.1).buf,
+                        cmd_line.last_view.1,
+                        cmd_line.last_view.0,
+                        l.parent,
+                    )
                 };
-                fn enter_normal(focus: &mut Focus, lidx: LeafIdx, cmd_line: &mut CmdLine){
+                fn enter_normal(focus: &mut Focus, lidx: LeafIdx, cmd_line: &mut CmdLine) {
                     queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
                     cmd_line.cursor = 0;
                     *focus = Focus::Leaf(lidx);
                 }
-                match cmd{
-                    Cmd::BufferList=>{
-                        let comp: Box<dyn Component> = Box::new(BufferList{});
+                match cmd {
+                    Cmd::BufferList => {
+                        let comp: Box<dyn Component> = Box::new(BufferList {});
                         *focus = Focus::Leaf(nodes.new_leaf(comp, nodes.roots[ROOT_OVERLAY]));
                         queue!(stdout(), cursor::SetCursorStyle::SteadyBlock)?;
                     }
-                    Cmd::Exec=>{
-                        match parse_cmd(cmd_line.input.clone()){
-                            Ok(cmd)=>{
-                                exec_cmd(cmd, cmd_line, nodes, focus, views, buffers)?;
-                            }
-                            Err(s)=>{
-                                return Err(EditorErr::Msg(s))
-                            }
+                    Cmd::Exec => match parse_cmd(cmd_line.input.clone()) {
+                        Ok(cmd) => {
+                            exec_cmd(cmd, cmd_line, nodes, focus, views, buffers)?;
                         }
-                    }
-                    Cmd::EnterNormal=>{
-                        enter_normal(focus, lidx, cmd_line);
+                        Err(s) => return Err(EditorErr::Msg(s)),
                     },
-                    Cmd::Insert(c)=>{cmd_line.insert(c);},
-                    Cmd::BackSpace=>{cmd_line.backspace();},
-                    Cmd::MoveLeft=>{cmd_line.cursor = cmd_line.cursor.saturating_sub(1);},
-                    Cmd::MoveRight=>{cmd_line.cursor = cmd_line.cursor.saturating_add(1);},
-                    Cmd::Open(file)=>{
+                    Cmd::EnterNormal => {
+                        enter_normal(focus, lidx, cmd_line);
+                    }
+                    Cmd::Insert(c) => {
+                        cmd_line.insert(c);
+                    }
+                    Cmd::BackSpace => {
+                        cmd_line.backspace();
+                    }
+                    Cmd::MoveLeft => {
+                        cmd_line.cursor = cmd_line.cursor.saturating_sub(1);
+                    }
+                    Cmd::MoveRight => {
+                        cmd_line.cursor = cmd_line.cursor.saturating_add(1);
+                    }
+                    Cmd::Open(file) => {
                         let view = views.get_mut(vidx);
                         view.off = 0;
                         view.cursor = 0;
                         view.prefered_x = 0;
-                        let buffer = if let Some(f) = file{
-                            if let Some(b) = buffers.get_by_path(&f){
+                        let buffer = if let Some(f) = file {
+                            if let Some(b) = buffers.get_by_path(&f) {
                                 let buffer = buffers.get(*b);
                                 let line = buffer.buf.char_to_line(buffer.last_cursor);
                                 let line_start = buffer.buf.line_to_char(line);
@@ -1771,33 +1831,27 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                                 view.prefered_x = col;
                                 view.off = buffer.last_off;
                                 *b
-                            }else{
+                            } else {
                                 buffers.push(Buffer::new(Some(&f), 0)?)
                             }
-                        }else{
+                        } else {
                             buffers.push(Buffer::new(None, 0)?)
                         };
                         view.buf = buffer;
                         enter_normal(focus, lidx, cmd_line);
-                    },
-                    Cmd::Close(bidx, force)=>{
+                    }
+                    Cmd::Close(bidx, force) => {
                         let view = views.get_mut(vidx);
-                        let mut bidx = {
-                            if let Some(idx) = bidx{
-                                idx
-                            }else{
-                                view.buf
-                            }
-                        };
+                        let mut bidx = { if let Some(idx) = bidx { idx } else { view.buf } };
                         let curr_buffer = buffers.get(bidx);
-                        if bidx != SCRATCH{
-                            if curr_buffer.check_flag(Buffer::READ_ONLY){
+                        if bidx != SCRATCH {
+                            if curr_buffer.check_flag(Buffer::READ_ONLY) {
                                 return Err(EditorErr::ReadOnly(bidx));
                             }
-                            if !curr_buffer.undo.is_empty() && force == false{
+                            if !curr_buffer.undo.is_empty() && force == false {
                                 return Err(EditorErr::Dirty(bidx));
-                            }else{
-                                if view.buf == bidx{
+                            } else {
+                                if view.buf == bidx {
                                     view.buf = SCRATCH;
                                     cmd_line.input.clear();
                                     view.off = 0;
@@ -1806,62 +1860,73 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                                 }
                                 buffers.remove(&mut bidx);
                             }
-                        }else{
+                        } else {
                             return Err(EditorErr::Msg("will not close special buffer: 0".into()));
                         }
                         enter_normal(focus, lidx, cmd_line);
-                    },
-                    Cmd::ViewClose=>{
+                    }
+                    Cmd::ViewClose => {
                         nodes.remove_child(parent, views, focus, NodeIdx::Leaf(lidx));
                         let mut curr = NodeIdx::Split(*nodes.roots.get(ROOT_TEXT_VIEW).unwrap());
-                        let lidx = loop{
-                            match curr{
-                                NodeIdx::Split(s)=>{
-                                    let Split{children, focus:f, ..} = nodes.splits.get(s.0).unwrap();
+                        let lidx = loop {
+                            match curr {
+                                NodeIdx::Split(s) => {
+                                    let Split {
+                                        children, focus: f, ..
+                                    } = nodes.splits.get(s.0).unwrap();
                                     curr = *children.get(*f).unwrap();
                                 }
-                                NodeIdx::Leaf(l)=>break l,
+                                NodeIdx::Leaf(l) => break l,
                             }
                         };
                         *focus = Focus::Leaf(lidx);
                         enter_normal(focus, lidx, cmd_line);
-                    },
-                    Cmd::Save(f)=>{
+                    }
+                    Cmd::Save(f) => {
                         let buffer = buffers.get_mut(bidx);
-                        if buffer.check_flag(Buffer::READ_ONLY){
+                        if buffer.check_flag(Buffer::READ_ONLY) {
                             return Err(EditorErr::ReadOnly(bidx));
                         }
-                        if buffer.check_flag(Buffer::SCRATCH){
-                            return Err(EditorErr::Msg(format!("cant save, buffer: {} is scratch",bidx.idx)));
+                        if buffer.check_flag(Buffer::SCRATCH) {
+                            return Err(EditorErr::Msg(format!(
+                                "cant save, buffer: {} is scratch",
+                                bidx.idx
+                            )));
                         }
-                        if let Some(new) = f{
+                        if let Some(new) = f {
                             buffer.save(Some(new))?;
                             buffer.undo.clear();
                             buffer.redo.clear();
-                        }else{
-                            if let Some(_) = &buffer.file{
-                                match buffer.save(None){
-                                    Err(error)=>return Err(EditorErr::Io(error)),
-                                    Ok(_)=>{buffer.undo.clear(); buffer.redo.clear();},
+                        } else {
+                            if let Some(_) = &buffer.file {
+                                match buffer.save(None) {
+                                    Err(error) => return Err(EditorErr::Io(error)),
+                                    Ok(_) => {
+                                        buffer.undo.clear();
+                                        buffer.redo.clear();
+                                    }
                                 }
-                            }else{
+                            } else {
                                 return Err(EditorErr::Msg("new file needs name".into()));
                             }
                         }
                         enter_normal(focus, lidx, cmd_line);
-                    },
-                    Cmd::SwitchBuffer(idx)=>{
-                        if idx.idx < buffers.len(){
-                            if buffers.get(idx).check_flag(Buffer::NON_NAVIGATABLE){
-                                return Err(EditorErr::Msg(format!("buffer {} is non navigatable",idx.idx)))?;
+                    }
+                    Cmd::SwitchBuffer(idx) => {
+                        if idx.idx < buffers.len() {
+                            if buffers.get(idx).check_flag(Buffer::NON_NAVIGATABLE) {
+                                return Err(EditorErr::Msg(format!(
+                                    "buffer {} is non navigatable",
+                                    idx.idx
+                                )))?;
                             }
                             let view = views.get_mut(vidx);
                             let buffer = buffers.get_mut(view.buf);
                             buffer.last_off = view.off;
                             buffer.last_cursor = view.cursor;
                             let buffer = buffers.get_mut(idx);
-                            if buffer.buf.len_chars() == 0{
-                                if let Some(p) = &buffer.file{
+                            if buffer.buf.len_chars() == 0 {
+                                if let Some(p) = &buffer.file {
                                     let file = File::open(p)?;
                                     let reader = BufReader::new(file);
                                     buffer.buf = Rope::from_reader(reader)?;
@@ -1877,60 +1942,90 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
                             view.prefered_x = col;
                             view.scroll(&nodes.leaves.get(lidx.0).unwrap().rect, buffer);
                             enter_normal(focus, lidx, cmd_line);
-                        }else{
+                        } else {
                             return Err(EditorErr::InvalidBuffer);
                         }
-                    },
-                    Cmd::Quit(force)=>{
-                        if !force{
-                            let dirty: Vec<_> = buffers.iter()
+                    }
+                    Cmd::Quit(force) => {
+                        if !force {
+                            let dirty: Vec<_> = buffers
+                                .iter()
                                 .enumerate()
                                 .filter(|(i, b)| !b.undo.is_empty() && *i != SCRATCH.idx)
                                 .map(|(i, _)| i)
                                 .collect();
-                            if !dirty.is_empty(){
-                                return Err(EditorErr::Msg(format!("cant quit dirty buffers: {:?}",dirty)));
+                            if !dirty.is_empty() {
+                                return Err(EditorErr::Msg(format!(
+                                    "cant quit dirty buffers: {:?}",
+                                    dirty
+                                )));
                             }
                         }
-                        return Err(EditorErr::Quit)
+                        return Err(EditorErr::Quit);
                     }
-                    Cmd::SplitV=>{
-                        if let Some(idx) = nodes.splits.get(parent.0).unwrap().children.iter().position(|x| *x == NodeIdx::Leaf(lidx)){
-                            let (l, new_parent) = nodes.new_split(vidx, parent, Direction::Vertical);
+                    Cmd::SplitV => {
+                        if let Some(idx) = nodes
+                            .splits
+                            .get(parent.0)
+                            .unwrap()
+                            .children
+                            .iter()
+                            .position(|x| *x == NodeIdx::Leaf(lidx))
+                        {
+                            let (l, new_parent) =
+                                nodes.new_split(vidx, parent, Direction::Vertical);
                             let vidx = views.push(View::new(SCRATCH));
-                            let comp: Box<dyn  Component> = Box::new(vidx);
+                            let comp: Box<dyn Component> = Box::new(vidx);
                             nodes.new_leaf(comp, new_parent);
-                            nodes.splits.get_mut(parent.0).unwrap().children.swap_remove(idx);
+                            nodes
+                                .splits
+                                .get_mut(parent.0)
+                                .unwrap()
+                                .children
+                                .swap_remove(idx);
                             nodes.recalc(parent);
                             enter_normal(focus, l, cmd_line);
                         }
                     }
-                    Cmd::SplitH=>{
-                        if let Some(idx) = nodes.splits.get(parent.0).unwrap().children.iter().position(|x| *x == NodeIdx::Leaf(lidx)){
-                            let (l, new_parent) = nodes.new_split(vidx, parent, Direction::Horizontal);
+                    Cmd::SplitH => {
+                        if let Some(idx) = nodes
+                            .splits
+                            .get(parent.0)
+                            .unwrap()
+                            .children
+                            .iter()
+                            .position(|x| *x == NodeIdx::Leaf(lidx))
+                        {
+                            let (l, new_parent) =
+                                nodes.new_split(vidx, parent, Direction::Horizontal);
                             let vidx = views.push(View::new(SCRATCH));
-                            let comp: Box<dyn  Component> = Box::new(vidx);
+                            let comp: Box<dyn Component> = Box::new(vidx);
                             nodes.new_leaf(comp, new_parent);
-                            nodes.splits.get_mut(parent.0).unwrap().children.swap_remove(idx);
+                            nodes
+                                .splits
+                                .get_mut(parent.0)
+                                .unwrap()
+                                .children
+                                .swap_remove(idx);
                             nodes.recalc(parent);
                             enter_normal(focus, l, cmd_line);
                         }
                     }
-                    Cmd::Split=>{
-                        let vidx = views.push(View::new(
-                            SCRATCH));
+                    Cmd::Split => {
+                        let vidx = views.push(View::new(SCRATCH));
                         let comp: Box<dyn Component> = Box::new(vidx);
                         nodes.new_leaf(comp, parent);
                         enter_normal(focus, lidx, cmd_line);
                     }
-                    Cmd::Noop=>{},
+                    Cmd::Noop => {}
                 }
                 Ok(())
             }
             Ok(())
         }
-        Focus::Leaf(lidx)=>{
-            unsafe {//UNSAFE but its fine probably :D
+        Focus::Leaf(lidx) => {
+            unsafe {
+                //UNSAFE but its fine probably :D
                 let l = nodes.leaves.get_unchecked_mut(lidx.0);
                 let mut comp = ptr::read(&l.comp);
                 let lidx = lidx.clone();
@@ -1943,44 +2038,46 @@ fn key_to_exec(key: KeyEvent, nodes: &mut Nodes, focus: &mut Focus, cmd_line: &m
     }
 }
 
-const SCRATCH: BufferIdx = BufferIdx{idx: 0};
-fn main()->io::Result<()>{
+const SCRATCH: BufferIdx = BufferIdx { idx: 0 };
+fn main() -> io::Result<()> {
     let mut views = Views::new();
     let mut buffers = Buffers::new();
     let mut nodes = Nodes::new();
     let (width, height) = terminal::size().unwrap();
-    let mut cmd_line = CmdLine::new(width, height-1);
-    let root = nodes.new_root(Rect{
-        x: 0,
-        y: 0,
-        height: height-1,
-        width,
-        min_height: None,
-        min_width: None,
-        max_height: None,
-        max_width: None, 
-    },
-        Direction::Vertical
+    let mut cmd_line = CmdLine::new(width, height - 1);
+    let root = nodes.new_root(
+        Rect {
+            x: 0,
+            y: 0,
+            height: height - 1,
+            width,
+            min_height: None,
+            min_width: None,
+            max_height: None,
+            max_width: None,
+        },
+        Direction::Vertical,
     );
-    nodes.new_root(Rect{
-        x: 0,
-        y: 0,
-        height: height-1,
-        width: width,
-        min_height: None,
-        min_width: None,
-        max_height: None,
-        max_width: None
-    },
-        Direction::Vertical
+    nodes.new_root(
+        Rect {
+            x: 0,
+            y: 0,
+            height: height - 1,
+            width: width,
+            min_height: None,
+            min_width: None,
+            max_height: None,
+            max_width: None,
+        },
+        Direction::Vertical,
     );
     let mut focus = {
         buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
         let args: Vec<String> = env::args().skip(1).collect();
         let bidx = {
-            if args.is_empty(){
+            if args.is_empty() {
                 SCRATCH
-            }else{
+            } else {
                 buffers.push(Buffer::new(Some(&args[0]), 0).unwrap())
             }
         };
@@ -1990,38 +2087,66 @@ fn main()->io::Result<()>{
         Focus::Leaf(l)
     };
     enable_raw_mode()?;
-    execute!(stdout(), terminal::EnterAlternateScreen, cursor::SetCursorStyle::SteadyBlock)?;
+    execute!(
+        stdout(),
+        terminal::EnterAlternateScreen,
+        cursor::SetCursorStyle::SteadyBlock
+    )?;
 
     //inital draw
-    let mut old = ScreenBuffer{width, height, cells: vec![' '; (width * height) as usize]};
-    let mut new = ScreenBuffer{width, height, cells: vec![' '; (width * height) as usize]};
+    let mut old = ScreenBuffer {
+        width,
+        height,
+        cells: vec![' '; (width * height) as usize],
+    };
+    let mut new = ScreenBuffer {
+        width,
+        height,
+        cells: vec![' '; (width * height) as usize],
+    };
     nodes.paint(&focus, &cmd_line, &views, &buffers, &mut old, &mut new)?;
     stdout().flush().unwrap();
 
-    loop{
-        match read()?{
-            Event::Key(event) =>{
-                match key_to_exec(event, &mut nodes, &mut focus, &mut cmd_line, &mut views, &mut buffers){
-                    Err(e)=> {
-                        match e{
-                            EditorErr::Msg(msg)=>cmd_line.error(&msg),
-                            EditorErr::Dirty(idx)=>cmd_line.error(&format!("buffer:{} is dirty",idx.idx)),
-                            EditorErr::InvalidBuffer=>cmd_line.error("index is invalid"),
-                            EditorErr::ReadOnly(idx)=>cmd_line.error(&format!("buffer:{}is read only",idx.idx)),
-                            EditorErr::InvalidFocus=>cmd_line.error("invalid focus"),
-                            EditorErr::Log(msg)=>log(&msg),
-                            EditorErr::Io(_)=>{log("IO error"); break},
-                            EditorErr::Quit=>break,
+    loop {
+        match read()? {
+            Event::Key(event) => {
+                match key_to_exec(
+                    event,
+                    &mut nodes,
+                    &mut focus,
+                    &mut cmd_line,
+                    &mut views,
+                    &mut buffers,
+                ) {
+                    Err(e) => {
+                        match e {
+                            EditorErr::Msg(msg) => cmd_line.error(&msg),
+                            EditorErr::Dirty(idx) => {
+                                cmd_line.error(&format!("buffer:{} is dirty", idx.idx))
+                            }
+                            EditorErr::InvalidBuffer => cmd_line.error("index is invalid"),
+                            EditorErr::ReadOnly(idx) => {
+                                cmd_line.error(&format!("buffer:{}is read only", idx.idx))
+                            }
+                            EditorErr::InvalidFocus => cmd_line.error("invalid focus"),
+                            EditorErr::Log(msg) => log(&msg),
+                            EditorErr::Io(_) => {
+                                log("IO error");
+                                break;
+                            }
+                            EditorErr::Quit => break,
                         }
                         let l = {
                             let mut curr = NodeIdx::Split(SplitIdx(0));
-                            loop{
-                                match curr{
-                                    NodeIdx::Split(s)=>{
-                                        let Split {children, focus:f, ..} = nodes.splits.get(s.0).unwrap();
+                            loop {
+                                match curr {
+                                    NodeIdx::Split(s) => {
+                                        let Split {
+                                            children, focus: f, ..
+                                        } = nodes.splits.get(s.0).unwrap();
                                         curr = *children.get(*f).unwrap();
                                     }
-                                    NodeIdx::Leaf(l)=>break l
+                                    NodeIdx::Leaf(l) => break l,
                                 }
                             }
                         };
@@ -2029,36 +2154,38 @@ fn main()->io::Result<()>{
                         cmd_line.error = false;
                         queue!(stdout(), SetCursorStyle::SteadyBlock)?;
                     }
-                    Ok(_) => {},
+                    Ok(_) => {}
                 }
                 queue!(stdout(), cursor::Hide)?;
                 nodes.paint(&focus, &cmd_line, &views, &buffers, &mut old, &mut new)?;
                 queue!(stdout(), cursor::Show)?;
                 stdout().flush()?;
             }
-            Event::Resize(width, height)=>{
-                cmd_line.rect = Rect{
+            Event::Resize(width, height) => {
+                cmd_line.rect = Rect {
                     x: 0,
-                    y: height-1,
-                    height:1,
+                    y: height - 1,
+                    height: 1,
                     width,
                     min_height: Some(1),
                     min_width: Some(width),
                     max_height: Some(1),
-                    max_width: Some(width) 
+                    max_width: Some(width),
                 };
                 old = ScreenBuffer {
-                    width, height,
-                    cells: vec!['_'; (width * height) as usize]//some placeholder
+                    width,
+                    height,
+                    cells: vec!['_'; (width * height) as usize], //some placeholder
                 };
-                    new = ScreenBuffer {
-                    width, height,
-                        cells: vec![' '; (width * height) as usize]
+                new = ScreenBuffer {
+                    width,
+                    height,
+                    cells: vec![' '; (width * height) as usize],
                 };
-                for r in nodes.roots.clone(){
+                for r in nodes.roots.clone() {
                     let root = nodes.splits.get_mut(r.0).unwrap();
                     root.rect.width = width;
-                    root.rect.height = height-1;
+                    root.rect.height = height - 1;
                     nodes.recalc(r);
                 }
                 queue!(stdout(), cursor::Hide)?;
@@ -2066,7 +2193,7 @@ fn main()->io::Result<()>{
                 queue!(stdout(), cursor::Show)?;
                 stdout().flush()?;
             }
-            _ => {},
+            _ => {}
         }
     }
     disable_raw_mode().unwrap();

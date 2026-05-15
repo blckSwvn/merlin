@@ -1,7 +1,6 @@
 # TODO
 
 # Current
-make move focus follow screen geometry
 
 ---
 
