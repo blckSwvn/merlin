@@ -325,7 +325,7 @@ impl CmdLine {
         self.input.clear();
         self.input = s.to_string();
     }
-    fn draw(&self, focus: &Focus, screen: &mut ScreenBuffer) {
+    fn sketch(&self, focus: &Focus, screen: &mut ScreenBuffer) {
         let s = {
             if self.error {
                 format!("{}", self.input)
@@ -386,7 +386,7 @@ impl View {
 }
 
 trait Component {
-    fn draw(&self, rect: &Rect, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer);
+    fn sketch(&self, rect: &Rect, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer);
     fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers) -> (u16, u16);
     fn behaviour(
         &mut self,
@@ -400,11 +400,11 @@ trait Component {
 }
 
 impl Component for ViewIdx {
-    fn draw(&self, rect: &Rect, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
+    fn sketch(&self, rect: &Rect, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
         let v = views.get(*self);
-        deco_draw(v, rect, buffers, screen);
-        text_draw(v, rect, buffers, screen);
-        fn text_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
+        deco_sketch(v, rect, buffers, screen);
+        text_sketch(v, rect, buffers, screen);
+        fn text_sketch(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
             for row in 0..rect.height.saturating_sub(1) {
                 let line_idx = view.off + row as usize;
                 if let Some(line) = buffers.get(view.buf).buf.get_line(line_idx) {
@@ -414,7 +414,7 @@ impl Component for ViewIdx {
                 }
             }
         }
-        fn deco_draw(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
+        fn deco_sketch(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
             for row in 0..rect.height {
                 let screen_y = rect.y + row as u16;
                 let line_num = view.off + row as usize;
@@ -804,7 +804,7 @@ impl Component for ViewIdx {
 struct BufferList {}
 
 impl Component for BufferList {
-    fn draw(&self, rect: &Rect, _views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
+    fn sketch(&self, rect: &Rect, _views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
         let dirty = if buffers.data.get(0).unwrap().undo.is_empty() {
             ""
         } else {
@@ -1083,9 +1083,9 @@ impl Nodes {
             rect,
             ..
         } = self.splits.get(curr.0).unwrap();
-        // if children.is_empty(){
-        //     return;
-        // }
+        if children.is_empty() {
+            return;
+        }
         let resize: Vec<(u16, NodeIdx)> = {
             let (mut size_left, mut remainder) = {
                 match direction {
@@ -1294,9 +1294,9 @@ impl Nodes {
         new: &mut ScreenBuffer,
     ) -> io::Result<()> {
         for r in &self.roots {
-            draw(&self, NodeIdx::Split(*r), views, buffers, old, new);
+            sketch(&self, NodeIdx::Split(*r), views, buffers, old, new);
         }
-        cmd_line.draw(focus, new);
+        cmd_line.sketch(focus, new);
         new.print(old)?;
         match focus {
             Focus::CmdLine => {
@@ -1312,7 +1312,7 @@ impl Nodes {
             }
             _ => {}
         }
-        fn draw(
+        fn sketch(
             nodes: &Nodes,
             nidx: NodeIdx,
             views: &Views,
@@ -1325,16 +1325,16 @@ impl Nodes {
                     let s = &nodes.splits[s.0];
                     for (i, n) in s.children.iter().enumerate() {
                         if i != s.focus {
-                            draw(nodes, *n, views, buffers, old, new);
+                            sketch(nodes, *n, views, buffers, old, new);
                         }
                     }
                     if let Some(nidx) = s.children.get(s.focus) {
-                        draw(nodes, *nidx, views, buffers, old, new);
+                        sketch(nodes, *nidx, views, buffers, old, new);
                     }
                 }
                 NodeIdx::Leaf(l) => {
                     let l = &nodes.leaves[l.0];
-                    l.comp.draw(&l.rect, views, buffers, new);
+                    l.comp.sketch(&l.rect, views, buffers, new);
                 }
             }
         }

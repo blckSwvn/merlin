@@ -1,6 +1,7 @@
 # TODO
 
 # Current
+soft wrap
 
 ---
 
