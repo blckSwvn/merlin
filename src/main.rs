@@ -41,7 +41,6 @@ enum EditorErr {
     Log(String),
     Quit,
 }
-
 struct Logger {
     file: &'static str,
 }
@@ -124,9 +123,6 @@ impl Buffers {
     fn iter(&self) -> impl Iterator<Item = &Buffer> {
         self.data.iter()
     }
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Buffer> {
-        self.data.iter_mut()
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,15 +142,6 @@ impl Views {
         let idx = ViewIdx(self.0.len());
         self.0.push(view);
         idx
-    }
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-    fn iter(&self) -> impl Iterator<Item = &View> {
-        self.0.iter()
-    }
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut View> {
-        self.0.iter_mut()
     }
 }
 
@@ -194,7 +181,7 @@ impl Buffer {
         self.buf = Rope::new();
         self.undo = Vec::new();
         self.redo = Vec::new();
-        //does not reset flags or pathbuf
+        //intentional does not reset flags or pathbuf
     }
     fn set_flag(&mut self, flag: u64) {
         self.flags |= flag
@@ -402,24 +389,72 @@ trait Component {
 impl Component for ViewIdx {
     fn sketch(&self, rect: &Rect, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
         let v = views.get(*self);
+        {
+            let blank = " ".repeat(rect.width as usize);
+            for row in 0..rect.height.saturating_sub(1) {
+                screen.set_string_xy(rect.x, rect.y + row, &blank);
+            }
+        }
         deco_sketch(v, rect, buffers, screen);
         text_sketch(v, rect, buffers, screen);
         fn text_sketch(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
-            for row in 0..rect.height.saturating_sub(1) {
-                let line_idx = view.off + row as usize;
-                if let Some(line) = buffers.get(view.buf).buf.get_line(line_idx) {
-                    let end = usize::min(rect.width.saturating_sub(4) as usize, line.len_chars());
-                    let s = line.slice(..end.saturating_sub(1));
-                    screen.set_string_xy(rect.x + 5, rect.y + row, &s.to_string());
+            let width = rect.width.saturating_sub(5) as usize;
+            let height = rect.height.saturating_sub(1) as usize;
+            let mut row = 0;
+            let mut line_idx = view.off;
+            while row < height {
+                let Some(line) = buffers.get(view.buf).buf.get_line(line_idx) else {
+                    break;
+                };
+                let line_len = line.len_chars().saturating_sub(1); //remove trailing /n if not removed causes ghost words
+                let mut start = 0usize;
+                while start < line_len && row < height {
+                    let end = usize::min(start + width, line_len);
+                    let slice = line.slice(start..end);
+                    screen.set_string_xy(rect.x + 5, rect.y + row as u16, &slice.to_string());
+                    start = end;
+                    row += 1;
                 }
+                if line_len == 0 {
+                    row += 1;
+                }
+                line_idx += 1;
             }
         }
         fn deco_sketch(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
-            for row in 0..rect.height {
-                let screen_y = rect.y + row as u16;
-                let line_num = view.off + row as usize;
-                let s = format!("{:>width$} ", line_num, width = 4);
-                screen.set_string_xy(rect.x, screen_y, &s);
+            let wrap_width = rect.width.saturating_sub(4) as usize;
+
+            let mut screen_row = 0usize;
+            let mut line_idx = view.off;
+
+            while screen_row < rect.height as usize {
+                let Some(line) = buffers.get(view.buf).buf.get_line(line_idx) else {
+                    break;
+                };
+
+                let line_len = line.len_chars();
+                let visual_rows = usize::max(1, line_len.div_ceil(wrap_width));
+
+                for visual_row in 0..visual_rows {
+                    if screen_row >= rect.height as usize {
+                        break;
+                    }
+
+                    let screen_y = rect.y + screen_row as u16;
+
+                    // only draw number on first wrapped row
+                    let s = if visual_row == 0 {
+                        format!("{:>4} ", line_idx)
+                    } else {
+                        "     ".to_string()
+                    };
+
+                    screen.set_string_xy(rect.x, screen_y, &s);
+
+                    screen_row += 1;
+                }
+
+                line_idx += 1;
             }
             let mut path = "SCRATCH";
             let buffer = buffers.get(view.buf);
@@ -442,11 +477,25 @@ impl Component for ViewIdx {
     fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers) -> (u16, u16) {
         let v = views.get(*self);
         let b = buffers.get(v.buf);
+        let width = rect.width.saturating_sub(4) as usize;
+        if width == 0 {
+            return (rect.x + 5, rect.y);
+        }
         let line = b.buf.char_to_line(v.cursor);
         let line_start = b.buf.line_to_char(line);
         let x = v.cursor - line_start;
-        let y = line - v.off;
-        (x as u16 + 5 + rect.x as u16, y as u16 + rect.y as u16)
+        let y = x / width;
+        let x = x % width;
+        let mut nested_y = 0usize;
+        for line_idx in v.off..line {
+            if let Some(line) = b.buf.get_line(line_idx) {
+                let len = line.len_chars();
+                nested_y += usize::max(1, len.div_ceil(width));
+            }
+        }
+        nested_y += y;
+        nested_y = nested_y.min(rect.height.saturating_sub(2) as usize);
+        (rect.x + x as u16 + 5, rect.y + nested_y as u16)
     }
     fn behaviour(
         &mut self,
@@ -837,7 +886,6 @@ impl Component for BufferList {
 
             let s = format!("{} {} {}", y, file_path, dirty);
             let s = format!("{:<width$}", s, width = rect.width as usize);
-            // s.truncate(rect.width as usize);
             screen.set_string_xy(rect.x, y, &s);
         }
     }
@@ -1584,16 +1632,6 @@ impl ScreenBuffer {
         let idx = y * self.width + x;
         self.cells[idx as usize] = cell;
     }
-    fn set_cell(&mut self, idx: usize, cell: char) {
-        self.cells[idx as usize] = cell;
-    }
-    fn get_cell_xy(&mut self, x: u16, y: u16) -> char {
-        let idx = y * self.width + x;
-        self.cells[idx as usize]
-    }
-    fn get_cell(&mut self, idx: usize) -> char {
-        self.cells[idx as usize]
-    }
     fn set_string_xy(&mut self, x: u16, y: u16, s: &str) {
         for (i, cell) in s.chars().enumerate() {
             let xx = x + i as u16;
@@ -2097,7 +2135,7 @@ fn main() -> io::Result<()> {
     let mut old = ScreenBuffer {
         width,
         height,
-        cells: vec![' '; (width * height) as usize],
+        cells: vec!['_'; (width * height) as usize], //some placeholder to ensure every cell is overwritten
     };
     let mut new = ScreenBuffer {
         width,
@@ -2175,7 +2213,8 @@ fn main() -> io::Result<()> {
                 old = ScreenBuffer {
                     width,
                     height,
-                    cells: vec!['_'; (width * height) as usize], //some placeholder
+                    cells: vec!['_'; (width * height) as usize],
+                    //some placeholder to ensure all cells are overwritten
                 };
                 new = ScreenBuffer {
                     width,
