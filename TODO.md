@@ -2,11 +2,11 @@
 
 # Current
 make move up/down operate on visual lines rather than real buffer lines
+copy/paste, visual mode
 
 ---
 
 ### future
-copy paste, visual mode
 add help cmd
 vim motions
 color highlighting

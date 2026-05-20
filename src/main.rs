@@ -352,23 +352,24 @@ impl View {
     }
     fn scroll(&mut self, rect: &Rect, buffer: &mut Buffer) {
         let line = buffer.buf.char_to_line(self.cursor);
-        let line_start = buffer.buf.line_to_char(line);
+        let height = {
+            let mut wrap_off = 0usize;
+            for line_idx in self.off..line {
+                if let Some(line) = buffer.buf.get_line(line_idx) {
+                    let len = line.len_chars();
+                    if len > 0 {
+                        wrap_off += len / rect.width.saturating_sub(5) as usize;
+                    }
+                }
+            }
+            let height = rect.height.saturating_sub(2) as usize;
+            height.saturating_sub(wrap_off)
+        };
         if line < self.off {
             self.off = line;
-        } else if line > self.off + (rect.height.saturating_sub(2)) as usize {
-            self.off = line - (rect.height.saturating_sub(2)) as usize;
+        } else if line > self.off + height {
+            self.off = line - height;
         }
-        let mut col = self.cursor - line_start;
-        if let Some(line) = buffer.buf.get_line(line) {
-            if line.len_chars() > 0 {
-                col = col.min(line.len_chars().saturating_sub(1));
-            } else {
-                col = 0;
-            }
-        } else {
-            col = 0;
-        }
-        self.cursor = line_start + col;
     }
 }
 
@@ -494,7 +495,6 @@ impl Component for ViewIdx {
             }
         }
         nested_y += y;
-        nested_y = nested_y.min(rect.height.saturating_sub(2) as usize);
         (rect.x + x as u16 + 5, rect.y + nested_y as u16)
     }
     fn behaviour(
