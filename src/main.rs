@@ -6,7 +6,7 @@ use crossterm::event::KeyEvent;
 use crossterm::event::{Event, KeyCode, read};
 use crossterm::execute;
 use crossterm::queue;
-use crossterm::style::Print;
+use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal;
 use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
@@ -17,6 +17,7 @@ use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::stdout;
 use std::io::{BufReader, Write};
+use std::mem;
 use std::path::Path;
 use std::path::PathBuf;
 use std::ptr;
@@ -328,11 +329,13 @@ impl CmdLine {
                 }
             }
         };
-        screen.set_string_xy(0, self.rect.y, &s);
+        screen.set_string_xy(0, self.rect.y, &s, Color::White, Color::Black);
     }
 }
 
 struct View {
+    selection: Option<(usize, usize)>,
+    clipboard: Option<String>,
     buf: BufferIdx,
     cursor: usize,
     prefered_x: usize,
@@ -344,6 +347,8 @@ impl View {
     fn new(buf: BufferIdx) -> Self {
         Self {
             buf,
+            selection: None,
+            clipboard: None,
             cursor: 0,
             prefered_x: 0,
             off: 0,
@@ -393,11 +398,12 @@ impl Component for ViewIdx {
         {
             let blank = " ".repeat(rect.width as usize);
             for row in 0..rect.height.saturating_sub(1) {
-                screen.set_string_xy(rect.x, rect.y + row, &blank);
+                screen.set_string_xy(rect.x, rect.y + row, &blank, Color::White, Color::Black);
             }
         }
         deco_sketch(v, rect, buffers, screen);
         text_sketch(v, rect, buffers, screen);
+        selection_sketch(v, rect, buffers, screen);
         fn text_sketch(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
             let width = rect.width.saturating_sub(5) as usize;
             let height = rect.height.saturating_sub(1) as usize;
@@ -412,7 +418,13 @@ impl Component for ViewIdx {
                 while start < line_len && row < height {
                     let end = usize::min(start + width, line_len);
                     let slice = line.slice(start..end);
-                    screen.set_string_xy(rect.x + 5, rect.y + row as u16, &slice.to_string());
+                    screen.set_string_xy(
+                        rect.x + 5,
+                        rect.y + row as u16,
+                        &slice.to_string(),
+                        Color::White,
+                        Color::Black,
+                    );
                     start = end;
                     row += 1;
                 }
@@ -450,7 +462,7 @@ impl Component for ViewIdx {
                         "     ".to_string()
                     };
 
-                    screen.set_string_xy(rect.x, screen_y, &s);
+                    screen.set_string_xy(rect.x, screen_y, &s, Color::White, Color::Black);
 
                     screen_row += 1;
                 }
@@ -469,10 +481,98 @@ impl Component for ViewIdx {
             let mode_str = match view.mode {
                 Mode::Normal => "NOR",
                 Mode::Insert => "INS",
+                Mode::Visual => "VIS",
             };
             let s = format!("{mode_str} {} {path}", view.buf.idx);
             let s = format!("{:width$}", s, width = rect.width as usize);
-            screen.set_string_xy(rect.x, rect.y + rect.height.saturating_sub(1), &s);
+            screen.set_string_xy(
+                rect.x,
+                rect.y + rect.height.saturating_sub(1),
+                &s,
+                Color::White,
+                Color::Black,
+            );
+        }
+        fn selection_sketch(
+            view: &View,
+            rect: &Rect,
+            buffers: &Buffers,
+            screen: &mut ScreenBuffer,
+        ) {
+            let Some((a, b)) = view.selection else {
+                return;
+            };
+            let sel_start = usize::min(a, b);
+            let sel_end = usize::max(a, b);
+            let width = rect.width.saturating_sub(5) as usize;
+            let height = rect.height.saturating_sub(1) as usize;
+            let buffer = buffers.get(view.buf);
+            let mut row = 0usize;
+            let mut line_idx = view.off;
+            let mut global_idx = 0usize;
+
+            for i in 0..view.off {
+                if let Some(line) = buffer.buf.get_line(i) {
+                    global_idx += line.len_chars();
+                }
+            }
+            while row < height {
+                let Some(line) = buffer.buf.get_line(line_idx) else {
+                    break;
+                };
+                let full_len = line.len_chars();
+                let text_len = full_len.saturating_sub(1);
+                if text_len == 0 {
+                    let idx = global_idx;
+                    if idx >= sel_start && idx < sel_end {
+                        screen.set_cell_xy(
+                            rect.x + 5,
+                            rect.y + row as u16,
+                            Cell {
+                                c: ' ',
+                                fg: Color::Black,
+                                bg: Color::White,
+                            },
+                        );
+                    }
+
+                    row += 1;
+                    global_idx += full_len;
+                    line_idx += 1;
+                    continue;
+                }
+
+                let mut start = 0usize;
+
+                while start < text_len && row < height {
+                    let end = usize::min(start + width, text_len);
+
+                    for col in start..end {
+                        let idx = global_idx + col;
+
+                        if idx >= sel_start && idx < sel_end {
+                            let c = line.char(col);
+
+                            screen.set_cell_xy(
+                                rect.x + 5 + (col - start) as u16,
+                                rect.y + row as u16,
+                                Cell {
+                                    c,
+                                    fg: Color::Black,
+                                    bg: Color::White,
+                                },
+                            );
+                        }
+                    }
+
+                    start = end;
+                    row += 1;
+                }
+
+                // move past entire rope line INCLUDING newline
+                global_idx += full_len;
+                line_idx += 1;
+            }
         }
     }
     fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers) -> (u16, u16) {
@@ -509,6 +609,7 @@ impl Component for ViewIdx {
         let cmd = key_to_cmd(key, views.get(*self));
         exec_cmd(cmd, *self, nodes, focus, cmd_line, views, buffers)?;
         enum Cmd {
+            EnterVisual,
             EnterNormal,
             EnterInsert,
             Insert(char),
@@ -520,16 +621,23 @@ impl Component for ViewIdx {
             MoveDown,
             MoveRight,
             MoveLeft,
+            MoveSelectionUp,
+            MoveSelectionDown,
+            MoveSelectionRight,
+            MoveSelectionLeft,
             FocusUp,
             FocusDown,
             FocusRight,
             FocusLeft,
             EnterCmd,
+            Yank,
+            Paste,
             Noop,
         }
         fn key_to_cmd(key: KeyEvent, view: &View) -> Cmd {
             match view.mode {
                 Mode::Normal => match key.code {
+                    KeyCode::Char('y') => Cmd::Yank,
                     KeyCode::Char('i') => Cmd::EnterInsert,
                     KeyCode::Char(':') => Cmd::EnterCmd,
                     KeyCode::Char('u') => Cmd::Undo,
@@ -542,6 +650,8 @@ impl Component for ViewIdx {
                     KeyCode::Char('J') => Cmd::FocusDown,
                     KeyCode::Char('K') => Cmd::FocusUp,
                     KeyCode::Char('L') => Cmd::FocusRight,
+                    KeyCode::Char('p') => Cmd::Paste,
+                    KeyCode::Char('v') => Cmd::EnterVisual,
                     _ => Cmd::Noop,
                 },
                 Mode::Insert => match key.code {
@@ -549,6 +659,17 @@ impl Component for ViewIdx {
                     KeyCode::Backspace => Cmd::BackSpace,
                     KeyCode::Enter => Cmd::NewLine,
                     KeyCode::Char(c) => Cmd::Insert(c),
+                    _ => Cmd::Noop,
+                },
+                Mode::Visual => match key.code {
+                    KeyCode::Esc => Cmd::EnterNormal,
+                    KeyCode::Char(':') => Cmd::EnterCmd,
+                    KeyCode::Char('k') => Cmd::MoveSelectionUp,
+                    KeyCode::Char('j') => Cmd::MoveSelectionDown,
+                    KeyCode::Char('h') => Cmd::MoveSelectionLeft,
+                    KeyCode::Char('l') => Cmd::MoveSelectionRight,
+                    KeyCode::Char('y') => Cmd::Yank,
+                    KeyCode::Char('p') => Cmd::Paste,
                     _ => Cmd::Noop,
                 },
             }
@@ -583,6 +704,109 @@ impl Component for ViewIdx {
                 (views.get(vidx).buf, lidx)
             };
             match cmd {
+                Cmd::EnterVisual => {
+                    let v = views.get_mut(vidx);
+                    let b = buffers.get(v.buf);
+                    v.mode = Mode::Visual;
+                    v.selection = Some((v.cursor, usize::min(v.cursor + 1, b.buf.len_chars())));
+                    queue!(stdout(), cursor::SetCursorStyle::SteadyUnderScore)?;
+                }
+                Cmd::MoveSelectionUp => {
+                    let buffer = buffers.get(bidx);
+                    let view = views.get_mut(vidx);
+                    let line = buffer.buf.char_to_line(view.cursor);
+                    if line > 0 {
+                        let line = line - 1;
+                        let line_start = buffer.buf.line_to_char(line);
+                        let line_len = buffer.buf.line(line).len_chars();
+                        let col = view.prefered_x.min(line_len.saturating_sub(1));
+
+                        view.cursor = line_start + col;
+                        view.selection.as_mut().unwrap().1 =
+                            usize::min(view.cursor + 1, buffer.buf.len_chars());
+                    }
+                    let buffer = buffers.get_mut(bidx);
+                    View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
+                }
+                Cmd::MoveSelectionDown => {
+                    let view = views.get_mut(vidx);
+                    let buffer = buffers.get(bidx);
+                    let len_lines = buffer.buf.len_lines();
+                    let line = buffer.buf.char_to_line(view.cursor);
+                    if line + 1 < len_lines {
+                        let line = line + 1;
+                        let start = buffer.buf.line_to_char(line);
+                        let len = buffer.buf.line(line).len_chars();
+                        let col = view.prefered_x.min(len.saturating_sub(1));
+                        view.cursor = start + col;
+                        view.selection.as_mut().unwrap().1 =
+                            usize::min(view.cursor + 1, buffer.buf.len_chars());
+                        View::scroll(
+                            view,
+                            &nodes.leaves.get(lidx.0).unwrap().rect,
+                            buffers.get_mut(bidx),
+                        );
+                    }
+                }
+                Cmd::MoveSelectionRight => {
+                    let buffer = buffers.get(bidx);
+                    let view = views.get_mut(vidx);
+                    let line = buffer.buf.char_to_line(view.cursor);
+                    let line_start = buffer.buf.line_to_char(line);
+                    let line_len = buffer.buf.line(line).len_chars();
+                    if view.cursor < line_start + line_len.saturating_sub(1) {
+                        let col = view.cursor - line_start;
+                        let col = col + 1;
+                        let col = col.min(buffer.buf.line(line).len_chars());
+                        view.prefered_x = col;
+                        view.cursor = line_start + col;
+                        view.selection.as_mut().unwrap().1 =
+                            usize::min(view.cursor + 1, buffer.buf.len_chars());
+                    }
+                }
+                Cmd::MoveSelectionLeft => {
+                    let buffer = buffers.get(bidx);
+                    let view = views.get_mut(vidx);
+                    let line = buffer.buf.char_to_line(view.cursor);
+                    let line_start = buffer.buf.line_to_char(line);
+                    let col = view.cursor - line_start;
+                    if view.cursor > line_start {
+                        let col = col - 1;
+                        view.prefered_x = col;
+                        view.cursor = line_start + col;
+                        view.selection.as_mut().unwrap().1 =
+                            usize::min(view.cursor + 1, buffer.buf.len_chars());
+                    }
+                }
+                Cmd::Yank => {
+                    let v = views.get_mut(vidx);
+                    let b = buffers.get(v.buf);
+                    let Some(selection) = &mut v.selection else {
+                        return Ok(());
+                    };
+                    if selection.0 > selection.1 {
+                        std::mem::swap(&mut selection.1, &mut selection.0);
+                    }
+                    v.clipboard = Some(b.buf.slice(selection.0..selection.1).to_string());
+                    v.selection = None;
+                    enter_normal(v, cmd_line);
+                }
+                Cmd::Paste => {
+                    let v = views.get_mut(vidx);
+                    let line = mem::take(&mut v.clipboard);
+                    let Some(line) = line else { return Ok(()) };
+                    let res: Result<(), _> = line.chars().try_for_each(|c| {
+                        if c == '\n' {
+                            exec_cmd(Cmd::NewLine, vidx, nodes, focus, cmd_line, views, buffers)
+                        } else {
+                            exec_cmd(Cmd::Insert(c), vidx, nodes, focus, cmd_line, views, buffers)
+                        }
+                    });
+                    let v = views.get_mut(vidx);
+                    v.clipboard = Some(line);
+                    v.selection = None;
+                    res?
+                }
                 Cmd::EnterCmd => {
                     cmd_line.enter_cmd_mode(vidx, focus, views, lidx);
                 }
@@ -616,6 +840,7 @@ impl Component for ViewIdx {
                         let col = view.prefered_x.min(line_len.saturating_sub(1));
 
                         view.cursor = line_start + col;
+                        view.selection = None;
                     }
                     let buffer = buffers.get_mut(bidx);
                     View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
@@ -631,6 +856,7 @@ impl Component for ViewIdx {
                         let len = buffer.buf.line(line).len_chars();
                         let col = view.prefered_x.min(len.saturating_sub(1));
                         view.cursor = start + col;
+                        view.selection = None;
                         View::scroll(
                             view,
                             &nodes.leaves.get(lidx.0).unwrap().rect,
@@ -650,6 +876,7 @@ impl Component for ViewIdx {
                         let col = col.min(buffer.buf.line(line).len_chars().saturating_sub(1));
                         view.prefered_x = col;
                         view.cursor = line_start + col;
+                        view.selection = None;
                     }
                 }
                 Cmd::MoveLeft => {
@@ -662,6 +889,7 @@ impl Component for ViewIdx {
                         let col = col - 1;
                         view.prefered_x = col;
                         view.cursor = line_start + col;
+                        view.selection = None;
                     }
                 }
                 Cmd::Undo => {
@@ -776,7 +1004,7 @@ impl Component for ViewIdx {
                     let buffer = buffers.get_mut(bidx);
                     buffer.redo.clear();
                     buffer.insert(view.off, view.cursor, '\n');
-                    buffer.redo.push(Edit::Insert {
+                    buffer.undo.push(Edit::Insert {
                         idx: view.cursor,
                         text: "\n".to_string(),
                     });
@@ -863,7 +1091,7 @@ impl Component for BufferList {
         let s = format!("{} {} {}", 0, "SCRATCH", dirty);
         let s = format!("{:<width$}", s, width = rect.width as usize);
 
-        screen.set_string_xy(rect.x, rect.y, &s);
+        screen.set_string_xy(rect.x, rect.y, &s, Color::White, Color::Black);
 
         for y in rect.y + 1..rect.y + rect.height {
             if y as usize > buffers.data.len() - 1 {
@@ -886,7 +1114,7 @@ impl Component for BufferList {
 
             let s = format!("{} {} {}", y, file_path, dirty);
             let s = format!("{:<width$}", s, width = rect.width as usize);
-            screen.set_string_xy(rect.x, y, &s);
+            screen.set_string_xy(rect.x, y, &s, Color::White, Color::Black);
         }
     }
     fn cursor_xy(&self, rect: &Rect, _views: &Views, _buffers: &Buffers) -> (u16, u16) {
@@ -1622,57 +1850,90 @@ impl Nodes {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Cell {
+    c: char,
+    fg: Color,
+    bg: Color,
+}
 struct ScreenBuffer {
-    cells: Vec<char>,
+    cells: Vec<Cell>,
     width: u16,
     height: u16,
 }
 impl ScreenBuffer {
-    fn set_cell_xy(&mut self, x: u16, y: u16, cell: char) {
+    fn set_cell_xy(&mut self, x: u16, y: u16, cell: Cell) {
         let idx = y * self.width + x;
         self.cells[idx as usize] = cell;
     }
-    fn set_string_xy(&mut self, x: u16, y: u16, s: &str) {
-        for (i, cell) in s.chars().enumerate() {
+    fn set_string_xy(&mut self, x: u16, y: u16, s: &str, fg: Color, bg: Color) {
+        for (i, c) in s.chars().enumerate() {
             let xx = x + i as u16;
             if xx >= self.width || y >= self.height {
                 break;
             }
-            self.set_cell_xy(xx, y, cell);
+            self.set_cell_xy(xx, y, Cell { c, fg, bg });
         }
     }
     fn clear_buffer(&mut self) {
-        self.cells.fill(' ');
+        self.cells.fill(Cell {
+            c: ' ',
+            fg: Color::White,
+            bg: Color::Black,
+        });
     }
     fn print(&mut self, prev: &mut ScreenBuffer) -> io::Result<()> {
         let mut out = stdout().lock();
+        let mut current_fg = None;
+        let mut current_bg = None;
+
         for y in 0..self.height {
             let mut x = 0;
             while x < self.width {
-                let idx = y * self.width + x;
-                let old = prev.cells[idx as usize];
-                let new = self.cells[idx as usize];
-                if new != old {
-                    let start_x = x;
-                    let mut line = String::with_capacity(self.width as usize);
-                    while x < self.width {
-                        let idx = y * self.width + x;
-                        let old = prev.cells[idx as usize];
-                        let new = self.cells[idx as usize];
-                        if new == old {
-                            break;
-                        }
-                        line.push(new);
-                        x += 1;
+                let idx = (y * self.width + x) as usize;
+                let old = prev.cells[idx];
+                let new = self.cells[idx];
+                if new == old {
+                    x += 1;
+                    continue;
+                }
+                let start_x = x;
+                let style_fg = new.fg;
+                let style_bg = new.bg;
+                let mut line = String::new();
+                while x < self.width {
+                    let idx = (y * self.width + x) as usize;
+                    let old = prev.cells[idx];
+                    let new = self.cells[idx];
+                    //stop if unchganged
+                    if new == old {
+                        break;
                     }
-                    queue!(out, MoveTo(start_x, y), Print(line))?;
-                } else {
+                    // stop if style changes
+                    if new.fg != style_fg || new.bg != style_bg {
+                        break;
+                    }
+                    line.push(new.c);
                     x += 1;
                 }
+                queue!(out, MoveTo(start_x, y))?;
+                if current_fg != Some(style_fg) {
+                    queue!(out, SetForegroundColor(style_fg))?;
+                    current_fg = Some(style_fg);
+                }
+                if current_bg != Some(style_bg) {
+                    queue!(out, SetBackgroundColor(style_bg))?;
+                    current_bg = Some(style_bg);
+                }
+                queue!(out, Print(line))?;
             }
         }
+
+        queue!(out, ResetColor)?;
+
         std::mem::swap(self, prev);
         self.clear_buffer();
+
         Ok(())
     }
 }
@@ -1681,6 +1942,7 @@ impl ScreenBuffer {
 enum Mode {
     Normal,
     Insert,
+    Visual,
 }
 
 fn key_to_exec(
@@ -2135,12 +2397,26 @@ fn main() -> io::Result<()> {
     let mut old = ScreenBuffer {
         width,
         height,
-        cells: vec!['_'; (width * height) as usize], //some placeholder to ensure every cell is overwritten
+        cells: vec![
+            Cell {
+                c: '_',
+                fg: Color::White,
+                bg: Color::Black,
+            };
+            (width * height) as usize
+        ], //some placeholder to ensure every cell is overwritten
     };
     let mut new = ScreenBuffer {
         width,
         height,
-        cells: vec![' '; (width * height) as usize],
+        cells: vec![
+            Cell {
+                c: ' ',
+                fg: Color::White,
+                bg: Color::Black
+            };
+            (width * height) as usize
+        ],
     };
     nodes.paint(&focus, &cmd_line, &views, &buffers, &mut old, &mut new)?;
     stdout().flush().unwrap();
@@ -2213,13 +2489,27 @@ fn main() -> io::Result<()> {
                 old = ScreenBuffer {
                     width,
                     height,
-                    cells: vec!['_'; (width * height) as usize],
+                    cells: vec![
+                        Cell {
+                            c: '_',
+                            fg: Color::White,
+                            bg: Color::Black
+                        };
+                        (width * height) as usize
+                    ],
                     //some placeholder to ensure all cells are overwritten
                 };
                 new = ScreenBuffer {
                     width,
                     height,
-                    cells: vec![' '; (width * height) as usize],
+                    cells: vec![
+                        Cell {
+                            c: ' ',
+                            fg: Color::White,
+                            bg: Color::Black
+                        };
+                        (width * height) as usize
+                    ],
                 };
                 for r in nodes.roots.clone() {
                     let root = nodes.splits.get_mut(r.0).unwrap();
