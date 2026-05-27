@@ -2,7 +2,6 @@
 
 # Current
 make move up/down operate on visual lines rather than real buffer lines
-copy/paste, visual mode
 
 ---
 

@@ -20,6 +20,7 @@ use std::io::{BufReader, Write};
 use std::mem;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::Mutex;
 use std::usize;
@@ -59,6 +60,108 @@ fn log(msg: &str) {
     LOGGER.lock().unwrap().log(msg);
 }
 static LOGGER: Mutex<Logger> = Mutex::new(Logger { file: "log" });
+
+pub fn yank_to_system_clipboard(text: &str) -> io::Result<()> {
+    let text = text.strip_suffix("\n").unwrap_or(text);
+    #[cfg(target_os = "linux")]
+    {
+        // helper to try a command
+        fn try_cmd(program: &str, args: &[&str], text: &str) -> io::Result<()> {
+            let mut child = Command::new(program)
+                .args(args)
+                .stdin(Stdio::piped())
+                .spawn()?;
+
+            child
+                .stdin
+                .as_mut()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Failed to open stdin"))?
+                .write_all(text.as_bytes())?;
+
+            let status = child.wait()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::new(io::ErrorKind::Other, "Command failed"))
+            }
+        }
+
+        try_cmd("wl-copy", &[], text)
+            .or_else(|_| try_cmd("xclip", &["-selection", "clipboard"], text))
+            .or_else(|_| try_cmd("xsel", &["--clipboard", "--input"], text))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut child = Command::new("pbcopy").stdin(Stdio::piped()).spawn()?;
+
+        child.stdin.as_mut().unwrap().write_all(text.as_bytes())?;
+        child.wait()?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut child = Command::new("cmd")
+            .args(["/C", "clip"])
+            .stdin(Stdio::piped())
+            .spawn()?;
+
+        child.stdin.as_mut().unwrap().write_all(text.as_bytes())?;
+        child.wait()?;
+    }
+
+    Ok(())
+}
+fn paste_to_system_clipboard() -> io::Result<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let commands = [
+            ("wl-paste", &[][..]),
+            ("xclip", &["-selection", "clipboard", "-o"]),
+            ("xsel", &["--clipboard", "--output"]),
+        ];
+
+        for (cmd, args) in commands {
+            if let Ok(output) = Command::new(cmd).args(args).output() {
+                if output.status.success() {
+                    return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+                }
+            }
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No clipboard tool found (wl-paste, xclip, xsel)",
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("pbpaste").output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err(io::Error::new(io::ErrorKind::Other, "pbpaste failed"))
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Get-Clipboard"])
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "PowerShell Get-Clipboard failed",
+            ))
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BufferIdx {
@@ -631,7 +734,9 @@ impl Component for ViewIdx {
             FocusLeft,
             EnterCmd,
             Yank,
+            YankClipboard,
             Paste,
+            PasteClipboard,
             Noop,
         }
         fn key_to_cmd(key: KeyEvent, view: &View) -> Cmd {
@@ -651,6 +756,7 @@ impl Component for ViewIdx {
                     KeyCode::Char('K') => Cmd::FocusUp,
                     KeyCode::Char('L') => Cmd::FocusRight,
                     KeyCode::Char('p') => Cmd::Paste,
+                    KeyCode::Char('P') => Cmd::PasteClipboard,
                     KeyCode::Char('v') => Cmd::EnterVisual,
                     _ => Cmd::Noop,
                 },
@@ -669,7 +775,9 @@ impl Component for ViewIdx {
                     KeyCode::Char('h') => Cmd::MoveSelectionLeft,
                     KeyCode::Char('l') => Cmd::MoveSelectionRight,
                     KeyCode::Char('y') => Cmd::Yank,
+                    KeyCode::Char('Y') => Cmd::YankClipboard,
                     KeyCode::Char('p') => Cmd::Paste,
+                    KeyCode::Char('P') => Cmd::PasteClipboard,
                     _ => Cmd::Noop,
                 },
             }
@@ -791,6 +899,20 @@ impl Component for ViewIdx {
                     v.selection = None;
                     enter_normal(v, cmd_line);
                 }
+                Cmd::YankClipboard => {
+                    let v = views.get_mut(vidx);
+                    let b = buffers.get(v.buf);
+                    let Some(selection) = &mut v.selection else {
+                        return Ok(());
+                    };
+                    if selection.0 > selection.1 {
+                        std::mem::swap(&mut selection.1, &mut selection.0);
+                    }
+                    yank_to_system_clipboard(&b.buf.slice(selection.0..selection.1).to_string())
+                        .unwrap();
+                    v.selection = None;
+                    enter_normal(v, cmd_line);
+                }
                 Cmd::Paste => {
                     let v = views.get_mut(vidx);
                     let line = mem::take(&mut v.clipboard);
@@ -805,6 +927,26 @@ impl Component for ViewIdx {
                     let v = views.get_mut(vidx);
                     v.clipboard = Some(line);
                     v.selection = None;
+                    res?
+                }
+
+                Cmd::PasteClipboard => {
+                    let s = match paste_to_system_clipboard() {
+                        Ok(text) => text,
+                        Err(_) => return Ok(()),
+                    };
+
+                    let res: Result<(), _> = s.chars().try_for_each(|c| {
+                        if c == '\n' {
+                            exec_cmd(Cmd::NewLine, vidx, nodes, focus, cmd_line, views, buffers)
+                        } else {
+                            exec_cmd(Cmd::Insert(c), vidx, nodes, focus, cmd_line, views, buffers)
+                        }
+                    });
+
+                    let v = views.get_mut(vidx);
+                    v.selection = None;
+
                     res?
                 }
                 Cmd::EnterCmd => {
@@ -2283,8 +2425,8 @@ fn key_to_exec(
                                 .unwrap()
                                 .children
                                 .swap_remove(idx);
-                            nodes.recalc(parent);
                             enter_normal(focus, l, cmd_line);
+                            nodes.recalc(parent);
                         }
                     }
                     Cmd::SplitH => {
@@ -2307,8 +2449,8 @@ fn key_to_exec(
                                 .unwrap()
                                 .children
                                 .swap_remove(idx);
-                            nodes.recalc(parent);
                             enter_normal(focus, l, cmd_line);
+                            nodes.recalc(parent);
                         }
                     }
                     Cmd::Split => {
