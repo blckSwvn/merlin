@@ -249,16 +249,21 @@ impl Views {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
+struct Constraints {
+    min_height: Option<u16>,
+    max_height: Option<u16>,
+    min_width: Option<u16>,
+    max_width: Option<u16>,
+}
+
+#[derive(Clone, Copy)]
 struct Rect {
     x: u16,
     y: u16,
     height: u16,
     width: u16,
-    min_height: Option<u16>,
-    min_width: Option<u16>,
-    max_height: Option<u16>,
-    max_width: Option<u16>,
+    constraint: Constraints,
 }
 
 enum Edit {
@@ -360,10 +365,12 @@ impl CmdLine {
                 y: height,
                 height: 1,
                 width: width,
-                min_height: Some(1),
-                min_width: Some(width),
-                max_height: Some(1),
-                max_width: Some(width),
+                constraint: Constraints {
+                    min_height: Some(1),
+                    min_width: Some(width),
+                    max_height: Some(1),
+                    max_width: Some(width),
+                },
             },
             cursor: 0,
             error: false,
@@ -432,7 +439,7 @@ impl CmdLine {
                 }
             }
         };
-        screen.set_string_xy(0, self.rect.y, &s, Color::White, Color::Black);
+        screen.set_string_xy(0, self.rect.y, &s, FG, BG);
     }
 }
 
@@ -481,6 +488,14 @@ impl View {
     }
 }
 
+const FG: Color = Color::White;
+const BG: Color = Color::Rgb { r: 0, g: 0, b: 0 };
+const SELECTION: Color = Color::Rgb {
+    r: 20,
+    g: 140,
+    b: 240,
+};
+
 trait Component {
     fn sketch(&self, rect: &Rect, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer);
     fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers) -> (u16, u16);
@@ -501,7 +516,7 @@ impl Component for ViewIdx {
         {
             let blank = " ".repeat(rect.width as usize);
             for row in 0..rect.height.saturating_sub(1) {
-                screen.set_string_xy(rect.x, rect.y + row, &blank, Color::White, Color::Black);
+                screen.set_string_xy(rect.x, rect.y + row, &blank, FG, BG);
             }
         }
         deco_sketch(v, rect, buffers, screen);
@@ -525,8 +540,8 @@ impl Component for ViewIdx {
                         rect.x + 5,
                         rect.y + row as u16,
                         &slice.to_string(),
-                        Color::White,
-                        Color::Black,
+                        FG,
+                        BG,
                     );
                     start = end;
                     row += 1;
@@ -565,7 +580,7 @@ impl Component for ViewIdx {
                         "     ".to_string()
                     };
 
-                    screen.set_string_xy(rect.x, screen_y, &s, Color::White, Color::Black);
+                    screen.set_string_xy(rect.x, screen_y, &s, FG, BG);
 
                     screen_row += 1;
                 }
@@ -588,13 +603,7 @@ impl Component for ViewIdx {
             };
             let s = format!("{mode_str} {} {path}", view.buf.idx);
             let s = format!("{:width$}", s, width = rect.width as usize);
-            screen.set_string_xy(
-                rect.x,
-                rect.y + rect.height.saturating_sub(1),
-                &s,
-                Color::White,
-                Color::Black,
-            );
+            screen.set_string_xy(rect.x, rect.y + rect.height.saturating_sub(1), &s, FG, BG);
         }
         fn selection_sketch(
             view: &View,
@@ -633,8 +642,8 @@ impl Component for ViewIdx {
                             rect.y + row as u16,
                             Cell {
                                 c: ' ',
-                                fg: Color::Black,
-                                bg: Color::White,
+                                fg: BG,
+                                bg: SELECTION,
                             },
                         );
                     }
@@ -661,8 +670,8 @@ impl Component for ViewIdx {
                                 rect.y + row as u16,
                                 Cell {
                                     c,
-                                    fg: Color::Black,
-                                    bg: Color::White,
+                                    fg: BG,
+                                    bg: SELECTION,
                                 },
                             );
                         }
@@ -816,7 +825,9 @@ impl Component for ViewIdx {
                     let v = views.get_mut(vidx);
                     let b = buffers.get(v.buf);
                     v.mode = Mode::Visual;
-                    v.selection = Some((v.cursor, usize::min(v.cursor + 1, b.buf.len_chars())));
+                    v.selection = Some((v.cursor, v.cursor));
+                    // v.selection = Some((v.cursor.saturating_sub(1), usize::min(v.cursor+1, b.buf.len_chars())));
+                    // v.selection = Some((v.cursor, usize::min(v.cursor + 1, b.buf.len_chars())));
                     queue!(stdout(), cursor::SetCursorStyle::SteadyUnderScore)?;
                 }
                 Cmd::MoveSelectionUp => {
@@ -1035,7 +1046,8 @@ impl Component for ViewIdx {
                     }
                 }
                 Cmd::Undo => {
-                    let view = views.get_mut(vidx);
+                    let v = views.get_mut(vidx);
+                    v.selection = None;
                     let buffer = buffers.get_mut(bidx);
                     if let Some(edit) = buffer.undo.pop() {
                         match edit {
@@ -1045,7 +1057,7 @@ impl Component for ViewIdx {
                                     text: text.clone(),
                                 });
                                 buffer.buf.remove(idx..idx + text.chars().count());
-                                view.cursor = idx;
+                                v.cursor = idx;
                             }
                             Edit::Delete { idx, text } => {
                                 buffer.redo.push(Edit::Insert {
@@ -1053,37 +1065,38 @@ impl Component for ViewIdx {
                                     text: text.clone(),
                                 });
                                 buffer.buf.insert(idx, &text);
-                                view.cursor = idx;
+                                v.cursor = idx;
                             }
                         }
-                        let line = buffer.buf.char_to_line(view.cursor);
+                        let line = buffer.buf.char_to_line(v.cursor);
                         let line_start = buffer.buf.line_to_char(line);
-                        let col = view.cursor - line_start;
-                        view.prefered_x = col;
+                        let col = v.cursor - line_start;
+                        v.prefered_x = col;
                         return Ok(());
                     }
                     return Err(EditorErr::Msg("undo stack is empty".to_string()));
                 }
                 Cmd::Redo => {
-                    let view = views.get_mut(vidx);
+                    let v = views.get_mut(vidx);
+                    v.selection = None;
                     let buffer = buffers.get_mut(bidx);
                     if let Some(edit) = buffer.redo.pop() {
                         match edit {
                             Edit::Insert { idx, text } => {
                                 buffer.buf.remove(idx..idx + text.chars().count());
-                                view.cursor = idx;
+                                v.cursor = idx;
                                 buffer.undo.push(Edit::Delete { idx, text });
                             }
                             Edit::Delete { idx, text } => {
                                 buffer.buf.insert(idx, &text);
-                                view.cursor = idx;
+                                v.cursor = idx;
                                 buffer.undo.push(Edit::Insert { idx, text });
                             }
                         }
-                        let line = buffer.buf.char_to_line(view.cursor);
+                        let line = buffer.buf.char_to_line(v.cursor);
                         let line_start = buffer.buf.line_to_char(line);
-                        let col = view.cursor - line_start;
-                        view.prefered_x = col;
+                        let col = v.cursor - line_start;
+                        v.prefered_x = col;
                         let view = views.get_mut(vidx);
                         let buffer = buffers.get_mut(bidx);
                         View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
@@ -1094,42 +1107,41 @@ impl Component for ViewIdx {
                 Cmd::Insert(c) => {
                     let buffer = buffers.get_mut(bidx);
                     buffer.redo.clear();
-                    let view = views.get(vidx);
+                    views.get_mut(vidx).selection = None;
+                    let v = views.get(vidx);
                     if let Some(edit) = buffer.undo.last_mut() {
                         match edit {
                             Edit::Insert {
                                 idx: c_idx, text, ..
                             } => {
-                                if *c_idx <= view.cursor
-                                    && view.cursor <= *c_idx + text.chars().count()
-                                {
+                                if *c_idx <= v.cursor && v.cursor <= *c_idx + text.chars().count() {
                                     let byte_idx = text
                                         .char_indices()
-                                        .nth(view.cursor - *c_idx)
+                                        .nth(v.cursor - *c_idx)
                                         .map(|(b_idx, _)| b_idx)
                                         .unwrap_or(text.len());
                                     text.insert_str(byte_idx, &c.to_string());
                                 } else {
                                     buffer.undo.push(Edit::Insert {
-                                        idx: view.cursor,
+                                        idx: v.cursor,
                                         text: c.into(),
                                     });
                                 }
                             }
                             Edit::Delete { .. } => {
                                 buffer.undo.push(Edit::Insert {
-                                    idx: view.cursor,
+                                    idx: v.cursor,
                                     text: c.into(),
                                 });
                             }
                         }
                     } else {
                         buffer.undo.push(Edit::Insert {
-                            idx: view.cursor,
+                            idx: v.cursor,
                             text: c.into(),
                         });
                     }
-                    buffer.insert(view.off, view.cursor, c);
+                    buffer.insert(v.off, v.cursor, c);
                     let view = views.get_mut(vidx);
                     let line = buffer.buf.char_to_line(view.cursor);
                     let line_start = buffer.buf.line_to_char(line);
@@ -1142,44 +1154,46 @@ impl Component for ViewIdx {
                     view.prefered_x = view.cursor - line_start;
                 }
                 Cmd::NewLine => {
-                    let view = views.get_mut(vidx);
+                    let v = views.get_mut(vidx);
+                    v.selection = None;
                     let buffer = buffers.get_mut(bidx);
                     buffer.redo.clear();
-                    buffer.insert(view.off, view.cursor, '\n');
+                    buffer.insert(v.off, v.cursor, '\n');
                     buffer.undo.push(Edit::Insert {
-                        idx: view.cursor,
+                        idx: v.cursor,
                         text: "\n".to_string(),
                     });
-                    let line = buffer.buf.char_to_line(view.cursor) + 1;
+                    let line = buffer.buf.char_to_line(v.cursor) + 1;
                     let len_lines = buffer.buf.len_lines();
                     let line = line.min(len_lines);
                     let line_start = buffer.buf.line_to_char(line);
-                    view.cursor = line_start;
-                    View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
+                    v.cursor = line_start;
+                    View::scroll(v, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
                 }
                 Cmd::BackSpace => {
-                    let view = views.get_mut(vidx);
+                    let v = views.get_mut(vidx);
+                    v.selection = None;
                     let buffer = buffers.get_mut(bidx);
                     buffer.redo.clear();
-                    if view.cursor != 0 {
-                        let del = buffer.buf.slice(view.cursor - 1..view.cursor).to_string();
+                    if v.cursor != 0 {
+                        let del = buffer.buf.slice(v.cursor - 1..v.cursor).to_string();
                         if let Some(edit) = buffer.undo.last_mut() {
                             match edit {
                                 Edit::Insert { .. } => {
                                     buffer.undo.push(Edit::Delete {
-                                        idx: view.cursor - 1,
+                                        idx: v.cursor - 1,
                                         text: del,
                                     });
                                 }
                                 Edit::Delete {
                                     idx: xidx, text, ..
                                 } => {
-                                    if *xidx == view.cursor {
+                                    if *xidx == v.cursor {
                                         *xidx -= 1;
                                         text.insert_str(0, &del);
                                     } else {
                                         buffer.undo.push(Edit::Delete {
-                                            idx: view.cursor - 1,
+                                            idx: v.cursor - 1,
                                             text: del,
                                         });
                                     }
@@ -1187,29 +1201,29 @@ impl Component for ViewIdx {
                             }
                         } else {
                             buffer.undo.push(Edit::Delete {
-                                idx: view.cursor - 1,
+                                idx: v.cursor - 1,
                                 text: del,
                             });
                         }
-                        let line = buffer.buf.char_to_line(view.cursor);
+                        let line = buffer.buf.char_to_line(v.cursor);
                         let line_start = buffer.buf.line_to_char(line);
-                        let col = view.cursor - line_start;
+                        let col = v.cursor - line_start;
                         let prev_start = buffer.buf.line_to_char(line.saturating_sub(1));
                         let prev_len = buffer
                             .buf
                             .line(line.saturating_sub(1))
                             .len_chars()
                             .saturating_sub(1);
-                        buffer.buf.remove(view.cursor - 1..view.cursor);
-                        if view.cursor > line_start {
+                        buffer.buf.remove(v.cursor - 1..v.cursor);
+                        if v.cursor > line_start {
                             let col = col - 1;
-                            view.prefered_x = col;
-                            view.cursor = line_start + col;
+                            v.prefered_x = col;
+                            v.cursor = line_start + col;
                         } else {
-                            view.prefered_x = prev_len;
-                            view.cursor = prev_start + prev_len;
+                            v.prefered_x = prev_len;
+                            v.cursor = prev_start + prev_len;
                         }
-                        View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
+                        View::scroll(v, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
                     }
                 }
                 Cmd::Noop => {}
@@ -1222,8 +1236,99 @@ impl Component for ViewIdx {
 
 struct BufferList {}
 
+fn sketch_border(
+    rect: &Rect,
+    screen: &mut ScreenBuffer,
+    uppper_left: char,
+    upper_right: char,
+    bottom_left: char,
+    bottom_right: char,
+    horizontal: char,
+    vertical: char,
+    fg: Color,
+    bg: Color,
+) -> Rect {
+    let mut r = *rect;
+    screen.set_cell_xy(
+        r.x,
+        r.y,
+        Cell {
+            c: uppper_left,
+            fg,
+            bg,
+        },
+    );
+    screen.set_cell_xy(
+        r.x + r.width,
+        r.y,
+        Cell {
+            c: upper_right,
+            fg,
+            bg,
+        },
+    );
+    screen.set_cell_xy(
+        r.x,
+        r.y + r.height,
+        Cell {
+            c: bottom_left,
+            fg,
+            bg,
+        },
+    );
+    screen.set_cell_xy(
+        r.x + r.width,
+        r.y + r.height,
+        Cell {
+            c: bottom_right,
+            fg,
+            bg,
+        },
+    );
+    screen.set_string_xy(
+        r.x + 1,
+        r.y,
+        &horizontal.to_string().repeat((r.width - 1) as usize),
+        fg,
+        bg,
+    );
+    screen.set_string_xy(
+        r.x + 1,
+        r.y + r.height,
+        &horizontal.to_string().repeat((r.width - 1) as usize),
+        fg,
+        bg,
+    );
+    for y in 1..r.height {
+        screen.set_cell_xy(
+            r.x,
+            y + r.y,
+            Cell {
+                c: vertical,
+                fg,
+                bg,
+            },
+        );
+        screen.set_cell_xy(
+            r.x + r.width,
+            y + r.y,
+            Cell {
+                c: vertical,
+                fg,
+                bg,
+            },
+        );
+    }
+    r.x += 1;
+    r.y += 1;
+    r.width = r.width.saturating_sub(1);
+    r.height = r.height.saturating_sub(1);
+    r
+}
+
 impl Component for BufferList {
     fn sketch(&self, rect: &Rect, _views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
+        let r = sketch_border(rect, screen, '┌', '┐', '└', '┘', '─', '│', FG, BG);
         let dirty = if buffers.data.get(0).unwrap().undo.is_empty() {
             ""
         } else {
@@ -1231,13 +1336,15 @@ impl Component for BufferList {
         };
 
         let s = format!("{} {} {}", 0, "SCRATCH", dirty);
-        let s = format!("{:<width$}", s, width = rect.width as usize);
+        let s = format!("{:<width$}", s, width = r.width as usize);
 
-        screen.set_string_xy(rect.x, rect.y, &s, Color::White, Color::Black);
+        screen.set_string_xy(r.x, r.y, &s, FG, BG);
 
-        for y in rect.y + 1..rect.y + rect.height {
+        let empty = &" ".repeat(r.width as usize);
+        for y in r.y..r.y + r.height - 1 {
             if y as usize > buffers.data.len() - 1 {
-                return;
+                screen.set_string_xy(r.x, y + 1, empty, FG, BG);
+                continue;
             }
 
             let dirty = if buffers.data.get(y as usize).unwrap().undo.is_empty() {
@@ -1255,8 +1362,8 @@ impl Component for BufferList {
             };
 
             let s = format!("{} {} {}", y, file_path, dirty);
-            let s = format!("{:<width$}", s, width = rect.width as usize);
-            screen.set_string_xy(rect.x, y, &s, Color::White, Color::Black);
+            let s = format!("{:<width$}", s, width = (r.width) as usize);
+            screen.set_string_xy(r.x, y + 1, &s, FG, BG);
         }
     }
     fn cursor_xy(&self, rect: &Rect, _views: &Views, _buffers: &Buffers) -> (u16, u16) {
@@ -1383,7 +1490,20 @@ impl Nodes {
         vidx: ViewIdx,
         parent: SplitIdx,
         direction: Direction,
+        constraint: Option<Constraints>,
     ) -> (LeafIdx, SplitIdx) {
+        let constraint: Constraints = {
+            if let Some(c) = constraint {
+                c
+            } else {
+                Constraints {
+                    min_height: None,
+                    max_height: None,
+                    min_width: None,
+                    max_width: None,
+                }
+            }
+        };
         let new_parent = self.push_branch(Split {
             parent: Some(parent),
             children: vec![],
@@ -1394,21 +1514,35 @@ impl Nodes {
                 y: 0,
                 height: 0,
                 width: 0,
-                max_height: None,
-                max_width: None,
-                min_height: None,
-                min_width: None,
+                constraint,
             },
         });
         self.splits[parent.0]
             .children
             .push(NodeIdx::Split(new_parent));
         let comp: Box<dyn Component> = Box::new(vidx);
-        let lidx = self.new_leaf(comp, new_parent);
+        let lidx = self.new_leaf(comp, new_parent, None);
         self.recalc(parent);
         (lidx, new_parent)
     }
-    fn new_leaf(&mut self, comp: Box<dyn Component>, parent: SplitIdx) -> LeafIdx {
+    fn new_leaf(
+        &mut self,
+        comp: Box<dyn Component>,
+        parent: SplitIdx,
+        constraint: Option<Constraints>,
+    ) -> LeafIdx {
+        let constraint = {
+            if let Some(c) = constraint {
+                c
+            } else {
+                Constraints {
+                    min_width: None,
+                    min_height: None,
+                    max_width: None,
+                    max_height: None,
+                }
+            }
+        };
         let lidx = self.push_leaf(Leaf {
             parent,
             comp,
@@ -1417,10 +1551,7 @@ impl Nodes {
                 y: 0,
                 height: 0,
                 width: 0,
-                max_height: None,
-                max_width: None,
-                min_height: None,
-                min_width: None,
+                constraint,
             },
         });
         self.splits[parent.0].children.push(NodeIdx::Leaf(lidx));
@@ -1519,13 +1650,13 @@ impl Nodes {
                         let mut min = 0;
                         match direction {
                             Direction::Horizontal => {
-                                if let Some(h) = l.rect.min_height {
+                                if let Some(h) = l.rect.constraint.min_height {
                                     min = h;
                                     size_left -= h;
                                 }
                             }
                             Direction::Vertical => {
-                                if let Some(w) = l.rect.min_width {
+                                if let Some(w) = l.rect.constraint.min_width {
                                     min = w;
                                     size_left -= w;
                                 }
@@ -1538,13 +1669,13 @@ impl Nodes {
                         let mut min = 0;
                         match direction {
                             Direction::Horizontal => {
-                                if let Some(h) = s.rect.min_height {
+                                if let Some(h) = s.rect.constraint.min_height {
                                     min = h;
                                     size_left -= h;
                                 }
                             }
                             Direction::Vertical => {
-                                if let Some(w) = s.rect.min_width {
+                                if let Some(w) = s.rect.constraint.min_width {
                                     min = w;
                                     size_left -= w;
                                 }
@@ -1566,12 +1697,20 @@ impl Nodes {
                     let max = {
                         match direction {
                             Direction::Vertical => match n {
-                                NodeIdx::Leaf(l) => self.leaves.get(l.0).unwrap().rect.max_width,
-                                NodeIdx::Split(s) => self.splits.get(s.0).unwrap().rect.max_width,
+                                NodeIdx::Leaf(l) => {
+                                    self.leaves.get(l.0).unwrap().rect.constraint.max_width
+                                }
+                                NodeIdx::Split(s) => {
+                                    self.splits.get(s.0).unwrap().rect.constraint.max_width
+                                }
                             },
                             Direction::Horizontal => match n {
-                                NodeIdx::Leaf(l) => self.leaves.get(l.0).unwrap().rect.max_height,
-                                NodeIdx::Split(s) => self.leaves.get(s.0).unwrap().rect.max_height,
+                                NodeIdx::Leaf(l) => {
+                                    self.leaves.get(l.0).unwrap().rect.constraint.max_height
+                                }
+                                NodeIdx::Split(s) => {
+                                    self.leaves.get(s.0).unwrap().rect.constraint.max_height
+                                }
                             },
                         }
                     };
@@ -1605,7 +1744,7 @@ impl Nodes {
                         l.rect.y = y;
                         l.rect.width = len;
                         x += l.rect.width;
-                        l.rect.height = l.rect.max_height.unwrap_or(rect.height);
+                        l.rect.height = l.rect.constraint.max_height.unwrap_or(rect.height);
                     }
                     NodeIdx::Split(sidx) => {
                         let s = self.splits.get_mut(sidx.0).unwrap();
@@ -1613,7 +1752,7 @@ impl Nodes {
                         s.rect.y = y;
                         s.rect.width = len;
                         x += s.rect.width;
-                        s.rect.height = s.rect.max_height.unwrap_or(rect.height);
+                        s.rect.height = s.rect.constraint.max_height.unwrap_or(rect.height);
                         self.recalc(sidx);
                     }
                 },
@@ -1624,7 +1763,7 @@ impl Nodes {
                         l.rect.y = y;
                         l.rect.height = len;
                         y += l.rect.height;
-                        l.rect.width = l.rect.max_width.unwrap_or(rect.width);
+                        l.rect.width = l.rect.constraint.max_width.unwrap_or(rect.width);
                     }
                     NodeIdx::Split(sidx) => {
                         let s = self.splits.get_mut(sidx.0).unwrap();
@@ -1632,7 +1771,7 @@ impl Nodes {
                         s.rect.y = y;
                         s.rect.height = len;
                         y += s.rect.height;
-                        s.rect.width = s.rect.max_width.unwrap_or(rect.width);
+                        s.rect.width = s.rect.constraint.max_width.unwrap_or(rect.width);
                         self.recalc(sidx);
                     }
                 },
@@ -1683,7 +1822,7 @@ impl Nodes {
             let vidx = views.push(View::new(SCRATCH));
             let comp: Box<dyn Component> = Box::new(vidx);
             *f = 0;
-            self.new_leaf(comp, self.roots[ROOT_TEXT_VIEW]);
+            self.new_leaf(comp, self.roots[ROOT_TEXT_VIEW], None);
         }
 
         let mut curr = NodeIdx::Split(self.roots[ROOT_TEXT_VIEW]);
@@ -2020,8 +2159,8 @@ impl ScreenBuffer {
     fn clear_buffer(&mut self) {
         self.cells.fill(Cell {
             c: ' ',
-            fg: Color::White,
-            bg: Color::Black,
+            fg: FG,
+            bg: BG,
         });
     }
     fn print(&mut self, prev: &mut ScreenBuffer) -> io::Result<()> {
@@ -2234,7 +2373,16 @@ fn key_to_exec(
                 match cmd {
                     Cmd::BufferList => {
                         let comp: Box<dyn Component> = Box::new(BufferList {});
-                        *focus = Focus::Leaf(nodes.new_leaf(comp, nodes.roots[ROOT_OVERLAY]));
+                        *focus = Focus::Leaf(nodes.new_leaf(
+                            comp,
+                            nodes.roots[ROOT_OVERLAY],
+                            Some(Constraints {
+                                max_width: Some(20),
+                                max_height: Some(20),
+                                min_height: None,
+                                min_width: None,
+                            }),
+                        ));
                         queue!(stdout(), cursor::SetCursorStyle::SteadyBlock)?;
                     }
                     Cmd::Exec => match parse_cmd(cmd_line.input.clone()) {
@@ -2415,10 +2563,10 @@ fn key_to_exec(
                             .position(|x| *x == NodeIdx::Leaf(lidx))
                         {
                             let (l, new_parent) =
-                                nodes.new_split(vidx, parent, Direction::Vertical);
+                                nodes.new_split(vidx, parent, Direction::Vertical, None);
                             let vidx = views.push(View::new(SCRATCH));
                             let comp: Box<dyn Component> = Box::new(vidx);
-                            nodes.new_leaf(comp, new_parent);
+                            nodes.new_leaf(comp, new_parent, None);
                             nodes
                                 .splits
                                 .get_mut(parent.0)
@@ -2439,10 +2587,10 @@ fn key_to_exec(
                             .position(|x| *x == NodeIdx::Leaf(lidx))
                         {
                             let (l, new_parent) =
-                                nodes.new_split(vidx, parent, Direction::Horizontal);
+                                nodes.new_split(vidx, parent, Direction::Horizontal, None);
                             let vidx = views.push(View::new(SCRATCH));
                             let comp: Box<dyn Component> = Box::new(vidx);
-                            nodes.new_leaf(comp, new_parent);
+                            nodes.new_leaf(comp, new_parent, None);
                             nodes
                                 .splits
                                 .get_mut(parent.0)
@@ -2456,7 +2604,7 @@ fn key_to_exec(
                     Cmd::Split => {
                         let vidx = views.push(View::new(SCRATCH));
                         let comp: Box<dyn Component> = Box::new(vidx);
-                        nodes.new_leaf(comp, parent);
+                        nodes.new_leaf(comp, parent, None);
                         enter_normal(focus, lidx, cmd_line);
                     }
                     Cmd::Noop => {}
@@ -2493,10 +2641,12 @@ fn main() -> io::Result<()> {
             y: 0,
             height: height - 1,
             width,
-            min_height: None,
-            min_width: None,
-            max_height: None,
-            max_width: None,
+            constraint: Constraints {
+                min_height: None,
+                max_height: None,
+                min_width: None,
+                max_width: None,
+            },
         },
         Direction::Vertical,
     );
@@ -2506,10 +2656,12 @@ fn main() -> io::Result<()> {
             y: 0,
             height: height - 1,
             width: width,
-            min_height: None,
-            min_width: None,
-            max_height: None,
-            max_width: None,
+            constraint: Constraints {
+                min_height: None,
+                max_height: None,
+                min_width: None,
+                max_width: None,
+            },
         },
         Direction::Vertical,
     );
@@ -2525,7 +2677,7 @@ fn main() -> io::Result<()> {
         };
         let vidx = views.push(View::new(bidx));
         let comp: Box<dyn Component> = Box::new(vidx);
-        let l = nodes.new_leaf(comp, root);
+        let l = nodes.new_leaf(comp, root, None);
         Focus::Leaf(l)
     };
     enable_raw_mode()?;
@@ -2542,8 +2694,8 @@ fn main() -> io::Result<()> {
         cells: vec![
             Cell {
                 c: '_',
-                fg: Color::White,
-                bg: Color::Black,
+                fg: FG,
+                bg: BG,
             };
             (width * height) as usize
         ], //some placeholder to ensure every cell is overwritten
@@ -2554,8 +2706,8 @@ fn main() -> io::Result<()> {
         cells: vec![
             Cell {
                 c: ' ',
-                fg: Color::White,
-                bg: Color::Black
+                fg: FG,
+                bg: BG,
             };
             (width * height) as usize
         ],
@@ -2623,10 +2775,12 @@ fn main() -> io::Result<()> {
                     y: height - 1,
                     height: 1,
                     width,
-                    min_height: Some(1),
-                    min_width: Some(width),
-                    max_height: Some(1),
-                    max_width: Some(width),
+                    constraint: Constraints {
+                        min_height: Some(1),
+                        max_height: Some(1),
+                        min_width: Some(width),
+                        max_width: Some(width),
+                    },
                 };
                 old = ScreenBuffer {
                     width,
@@ -2634,8 +2788,8 @@ fn main() -> io::Result<()> {
                     cells: vec![
                         Cell {
                             c: '_',
-                            fg: Color::White,
-                            bg: Color::Black
+                            fg: FG,
+                            bg: BG,
                         };
                         (width * height) as usize
                     ],
@@ -2647,8 +2801,8 @@ fn main() -> io::Result<()> {
                     cells: vec![
                         Cell {
                             c: ' ',
-                            fg: Color::White,
-                            bg: Color::Black
+                            fg: FG,
+                            bg: BG,
                         };
                         (width * height) as usize
                     ],
