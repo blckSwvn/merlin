@@ -335,6 +335,13 @@ impl Buffer {
         self.last_off = off;
         self.buf.insert_char(cursor, c);
     }
+    fn insert_string(&mut self, off: usize, cursor: usize, s: &str) {
+        self.last_cursor = cursor;
+        self.last_off = off;
+        for c in s.chars().rev() {
+            self.buf.insert_char(cursor, c);
+        }
+    }
     fn save(&mut self, new: Option<String>) -> io::Result<()> {
         if let Some(new) = new {
             let file = File::create(new)?;
@@ -823,11 +830,8 @@ impl Component for ViewIdx {
             match cmd {
                 Cmd::EnterVisual => {
                     let v = views.get_mut(vidx);
-                    let b = buffers.get(v.buf);
                     v.mode = Mode::Visual;
                     v.selection = Some((v.cursor, v.cursor));
-                    // v.selection = Some((v.cursor.saturating_sub(1), usize::min(v.cursor+1, b.buf.len_chars())));
-                    // v.selection = Some((v.cursor, usize::min(v.cursor + 1, b.buf.len_chars())));
                     queue!(stdout(), cursor::SetCursorStyle::SteadyUnderScore)?;
                 }
                 Cmd::MoveSelectionUp => {
@@ -928,17 +932,17 @@ impl Component for ViewIdx {
                     let v = views.get_mut(vidx);
                     let line = mem::take(&mut v.clipboard);
                     let Some(line) = line else { return Ok(()) };
-                    let res: Result<(), _> = line.chars().try_for_each(|c| {
-                        if c == '\n' {
-                            exec_cmd(Cmd::NewLine, vidx, nodes, focus, cmd_line, views, buffers)
-                        } else {
-                            exec_cmd(Cmd::Insert(c), vidx, nodes, focus, cmd_line, views, buffers)
-                        }
-                    });
                     let v = views.get_mut(vidx);
+                    let b = buffers.get_mut(v.buf);
+                    let c = usize::min(v.cursor + 1, b.buf.len_chars());
+                    b.insert_string(v.off, c, &line);
+                    b.undo.push(Edit::Insert {
+                        idx: c,
+                        text: line.clone(),
+                    });
+                    v.cursor += line.chars().count();
                     v.clipboard = Some(line);
                     v.selection = None;
-                    res?
                 }
 
                 Cmd::PasteClipboard => {
@@ -946,19 +950,16 @@ impl Component for ViewIdx {
                         Ok(text) => text,
                         Err(_) => return Ok(()),
                     };
-
-                    let res: Result<(), _> = s.chars().try_for_each(|c| {
-                        if c == '\n' {
-                            exec_cmd(Cmd::NewLine, vidx, nodes, focus, cmd_line, views, buffers)
-                        } else {
-                            exec_cmd(Cmd::Insert(c), vidx, nodes, focus, cmd_line, views, buffers)
-                        }
-                    });
-
                     let v = views.get_mut(vidx);
+                    let b = buffers.get_mut(v.buf);
+                    let c = usize::min(v.cursor + 1, b.buf.len_chars());
+                    b.insert_string(v.off, c, &s);
+                    b.undo.push(Edit::Insert {
+                        idx: c,
+                        text: s.clone(),
+                    });
+                    v.cursor += s.chars().count();
                     v.selection = None;
-
-                    res?
                 }
                 Cmd::EnterCmd => {
                     cmd_line.enter_cmd_mode(vidx, focus, views, lidx);
@@ -1159,10 +1160,38 @@ impl Component for ViewIdx {
                     let buffer = buffers.get_mut(bidx);
                     buffer.redo.clear();
                     buffer.insert(v.off, v.cursor, '\n');
-                    buffer.undo.push(Edit::Insert {
-                        idx: v.cursor,
-                        text: "\n".to_string(),
-                    });
+                    if let Some(edit) = buffer.undo.last_mut() {
+                        match edit {
+                            Edit::Insert {
+                                idx: c_idx, text, ..
+                            } => {
+                                if *c_idx <= v.cursor && v.cursor <= *c_idx + text.chars().count() {
+                                    let byte_idx = text
+                                        .char_indices()
+                                        .nth(v.cursor - *c_idx)
+                                        .map(|(b_idx, _)| b_idx)
+                                        .unwrap_or(text.len());
+                                    text.insert_str(byte_idx, &'\n'.to_string());
+                                } else {
+                                    buffer.undo.push(Edit::Insert {
+                                        idx: v.cursor,
+                                        text: '\n'.into(),
+                                    });
+                                }
+                            }
+                            Edit::Delete { .. } => {
+                                buffer.undo.push(Edit::Insert {
+                                    idx: v.cursor,
+                                    text: '\n'.into(),
+                                });
+                            }
+                        }
+                    } else {
+                        buffer.undo.push(Edit::Insert {
+                            idx: v.cursor,
+                            text: '\n'.into(),
+                        });
+                    }
                     let line = buffer.buf.char_to_line(v.cursor) + 1;
                     let len_lines = buffer.buf.len_lines();
                     let line = line.min(len_lines);
@@ -1236,6 +1265,9 @@ impl Component for ViewIdx {
 
 struct BufferList {}
 
+fn sketch_border1(rect: &Rect, screen: &mut ScreenBuffer) -> Rect {
+    sketch_border(rect, screen, '┌', '┐', '└', '┘', '─', '│', FG, BG)
+}
 fn sketch_border(
     rect: &Rect,
     screen: &mut ScreenBuffer,
@@ -1321,14 +1353,14 @@ fn sketch_border(
     }
     r.x += 1;
     r.y += 1;
-    r.width = r.width.saturating_sub(1);
-    r.height = r.height.saturating_sub(1);
+    r.width = r.width.saturating_sub(2);
+    r.height = r.height.saturating_sub(2);
     r
 }
 
 impl Component for BufferList {
-    fn sketch(&self, rect: &Rect, _views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
-        let r = sketch_border(rect, screen, '┌', '┐', '└', '┘', '─', '│', FG, BG);
+    fn sketch(&self, r: &Rect, _views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
+        let r = sketch_border1(r, screen);
         let dirty = if buffers.data.get(0).unwrap().undo.is_empty() {
             ""
         } else {
@@ -1336,12 +1368,12 @@ impl Component for BufferList {
         };
 
         let s = format!("{} {} {}", 0, "SCRATCH", dirty);
-        let s = format!("{:<width$}", s, width = r.width as usize);
+        let s = format!("{:<width$}", s, width = r.width as usize + 1);
 
         screen.set_string_xy(r.x, r.y, &s, FG, BG);
 
-        let empty = &" ".repeat(r.width as usize);
-        for y in r.y..r.y + r.height - 1 {
+        let empty = &" ".repeat((r.width + 1) as usize);
+        for y in r.y..r.y + r.height {
             if y as usize > buffers.data.len() - 1 {
                 screen.set_string_xy(r.x, y + 1, empty, FG, BG);
                 continue;
@@ -1362,7 +1394,7 @@ impl Component for BufferList {
             };
 
             let s = format!("{} {} {}", y, file_path, dirty);
-            let s = format!("{:<width$}", s, width = (r.width) as usize);
+            let s = format!("{:<width$}", s, width = (r.width + 1) as usize);
             screen.set_string_xy(r.x, y + 1, &s, FG, BG);
         }
     }
@@ -2640,7 +2672,7 @@ fn main() -> io::Result<()> {
             x: 0,
             y: 0,
             height: height - 1,
-            width,
+            width: width - 1,
             constraint: Constraints {
                 min_height: None,
                 max_height: None,
@@ -2651,11 +2683,12 @@ fn main() -> io::Result<()> {
         Direction::Vertical,
     );
     nodes.new_root(
+        //overlay ROOT DO NOT REMOVE
         Rect {
             x: 0,
             y: 0,
             height: height - 1,
-            width: width,
+            width: width - 1,
             constraint: Constraints {
                 min_height: None,
                 max_height: None,
@@ -2809,7 +2842,7 @@ fn main() -> io::Result<()> {
                 };
                 for r in nodes.roots.clone() {
                     let root = nodes.splits.get_mut(r.0).unwrap();
-                    root.rect.width = width;
+                    root.rect.width = width - 1;
                     root.rect.height = height - 1;
                     nodes.recalc(r);
                 }
