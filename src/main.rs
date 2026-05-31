@@ -258,12 +258,19 @@ struct Constraints {
 }
 
 #[derive(Clone, Copy)]
+enum Anchor {
+    Relative(u16), //fraction aka 1/3 etc not %
+    Absolute(u16),
+}
+
+#[derive(Clone, Copy)]
 struct Rect {
     x: u16,
     y: u16,
     height: u16,
     width: u16,
-    constraint: Constraints,
+    constraints: Constraints,
+    anchors: (Option<Anchor>, Option<Anchor>),
 }
 
 enum Edit {
@@ -372,12 +379,13 @@ impl CmdLine {
                 y: height,
                 height: 1,
                 width: width,
-                constraint: Constraints {
+                constraints: Constraints {
                     min_height: Some(1),
                     min_width: Some(width),
                     max_height: Some(1),
                     max_width: Some(width),
                 },
+                anchors: (None, Some(Anchor::Relative(1))),
             },
             cursor: 0,
             error: false,
@@ -1523,6 +1531,7 @@ impl Nodes {
         parent: SplitIdx,
         direction: Direction,
         constraint: Option<Constraints>,
+        anchors: (Option<Anchor>, Option<Anchor>),
     ) -> (LeafIdx, SplitIdx) {
         let constraint: Constraints = {
             if let Some(c) = constraint {
@@ -1546,14 +1555,15 @@ impl Nodes {
                 y: 0,
                 height: 0,
                 width: 0,
-                constraint,
+                constraints: constraint,
+                anchors,
             },
         });
         self.splits[parent.0]
             .children
             .push(NodeIdx::Split(new_parent));
         let comp: Box<dyn Component> = Box::new(vidx);
-        let lidx = self.new_leaf(comp, new_parent, None);
+        let lidx = self.new_leaf(comp, new_parent, None, (None, None));
         self.recalc(parent);
         (lidx, new_parent)
     }
@@ -1562,6 +1572,7 @@ impl Nodes {
         comp: Box<dyn Component>,
         parent: SplitIdx,
         constraint: Option<Constraints>,
+        anchors: (Option<Anchor>, Option<Anchor>),
     ) -> LeafIdx {
         let constraint = {
             if let Some(c) = constraint {
@@ -1583,7 +1594,8 @@ impl Nodes {
                 y: 0,
                 height: 0,
                 width: 0,
-                constraint,
+                constraints: constraint,
+                anchors,
             },
         });
         self.splits[parent.0].children.push(NodeIdx::Leaf(lidx));
@@ -1682,13 +1694,13 @@ impl Nodes {
                         let mut min = 0;
                         match direction {
                             Direction::Horizontal => {
-                                if let Some(h) = l.rect.constraint.min_height {
+                                if let Some(h) = l.rect.constraints.min_height {
                                     min = h;
                                     size_left -= h;
                                 }
                             }
                             Direction::Vertical => {
-                                if let Some(w) = l.rect.constraint.min_width {
+                                if let Some(w) = l.rect.constraints.min_width {
                                     min = w;
                                     size_left -= w;
                                 }
@@ -1701,13 +1713,13 @@ impl Nodes {
                         let mut min = 0;
                         match direction {
                             Direction::Horizontal => {
-                                if let Some(h) = s.rect.constraint.min_height {
+                                if let Some(h) = s.rect.constraints.min_height {
                                     min = h;
                                     size_left -= h;
                                 }
                             }
                             Direction::Vertical => {
-                                if let Some(w) = s.rect.constraint.min_width {
+                                if let Some(w) = s.rect.constraints.min_width {
                                     min = w;
                                     size_left -= w;
                                 }
@@ -1730,18 +1742,18 @@ impl Nodes {
                         match direction {
                             Direction::Vertical => match n {
                                 NodeIdx::Leaf(l) => {
-                                    self.leaves.get(l.0).unwrap().rect.constraint.max_width
+                                    self.leaves.get(l.0).unwrap().rect.constraints.max_width
                                 }
                                 NodeIdx::Split(s) => {
-                                    self.splits.get(s.0).unwrap().rect.constraint.max_width
+                                    self.splits.get(s.0).unwrap().rect.constraints.max_width
                                 }
                             },
                             Direction::Horizontal => match n {
                                 NodeIdx::Leaf(l) => {
-                                    self.leaves.get(l.0).unwrap().rect.constraint.max_height
+                                    self.leaves.get(l.0).unwrap().rect.constraints.max_height
                                 }
                                 NodeIdx::Split(s) => {
-                                    self.leaves.get(s.0).unwrap().rect.constraint.max_height
+                                    self.leaves.get(s.0).unwrap().rect.constraints.max_height
                                 }
                             },
                         }
@@ -1776,7 +1788,45 @@ impl Nodes {
                         l.rect.y = y;
                         l.rect.width = len;
                         x += l.rect.width;
-                        l.rect.height = l.rect.constraint.max_height.unwrap_or(rect.height);
+                        l.rect.height = l.rect.constraints.max_height.unwrap_or(rect.height);
+                        if let Some(x) = l.rect.anchors.0 {
+                            match x {
+                                Anchor::Relative(x) => {
+                                    let x = self.splits.get(l.parent.0).unwrap().rect.width / x;
+                                    let x = x - l.rect.width;
+                                    l.rect.x = x;
+                                }
+                                Anchor::Absolute(x) => {
+                                    let x = u16::min(
+                                        x,
+                                        self.splits.get(l.parent.0).unwrap().rect.width,
+                                    );
+                                    l.rect.x = x - l.rect.width;
+                                }
+                            }
+                        }
+
+                        if let Some(y) = l.rect.anchors.1 {
+                            match y {
+                                Anchor::Relative(y) => {
+                                    let y = self.splits.get(l.parent.0).unwrap().rect.height / y;
+                                    let y = y - l.rect.height;
+                                    l.rect.y = y;
+                                }
+                                Anchor::Absolute(y) => {
+                                    let y = {
+                                        let parent_height =
+                                            self.splits.get(l.parent.0).unwrap().rect.height;
+                                        if y + l.rect.height > parent_height {
+                                            parent_height - l.rect.height
+                                        } else {
+                                            y
+                                        }
+                                    };
+                                    l.rect.y = y;
+                                }
+                            }
+                        }
                     }
                     NodeIdx::Split(sidx) => {
                         let s = self.splits.get_mut(sidx.0).unwrap();
@@ -1784,7 +1834,7 @@ impl Nodes {
                         s.rect.y = y;
                         s.rect.width = len;
                         x += s.rect.width;
-                        s.rect.height = s.rect.constraint.max_height.unwrap_or(rect.height);
+                        s.rect.height = s.rect.constraints.max_height.unwrap_or(rect.height);
                         self.recalc(sidx);
                     }
                 },
@@ -1795,7 +1845,54 @@ impl Nodes {
                         l.rect.y = y;
                         l.rect.height = len;
                         y += l.rect.height;
-                        l.rect.width = l.rect.constraint.max_width.unwrap_or(rect.width);
+                        l.rect.width = l.rect.constraints.max_width.unwrap_or(rect.width);
+                        if let Some(x) = l.rect.anchors.0 {
+                            match x {
+                                Anchor::Relative(x) => {}
+                                Anchor::Absolute(x) => {
+                                    l.rect.x = x;
+                                }
+                            }
+                        }
+
+                        if let Some(x) = l.rect.anchors.0 {
+                            match x {
+                                Anchor::Relative(x) => {
+                                    let x = self.splits.get(l.parent.0).unwrap().rect.width / x;
+                                    let x = x - l.rect.width;
+                                    l.rect.x = x;
+                                }
+                                Anchor::Absolute(x) => {
+                                    let x = u16::min(
+                                        x,
+                                        self.splits.get(l.parent.0).unwrap().rect.width,
+                                    );
+                                    l.rect.x = x - l.rect.width;
+                                }
+                            }
+                        }
+
+                        if let Some(y) = l.rect.anchors.1 {
+                            match y {
+                                Anchor::Relative(y) => {
+                                    let y = self.splits.get(l.parent.0).unwrap().rect.height / y;
+                                    let y = y - l.rect.height;
+                                    l.rect.y = y;
+                                }
+                                Anchor::Absolute(y) => {
+                                    let y = {
+                                        let parent_height =
+                                            self.splits.get(l.parent.0).unwrap().rect.height;
+                                        if y + l.rect.height > parent_height {
+                                            parent_height - l.rect.height
+                                        } else {
+                                            y
+                                        }
+                                    };
+                                    l.rect.y = y;
+                                }
+                            }
+                        }
                     }
                     NodeIdx::Split(sidx) => {
                         let s = self.splits.get_mut(sidx.0).unwrap();
@@ -1803,7 +1900,7 @@ impl Nodes {
                         s.rect.y = y;
                         s.rect.height = len;
                         y += s.rect.height;
-                        s.rect.width = s.rect.constraint.max_width.unwrap_or(rect.width);
+                        s.rect.width = s.rect.constraints.max_width.unwrap_or(rect.width);
                         self.recalc(sidx);
                     }
                 },
@@ -1854,7 +1951,7 @@ impl Nodes {
             let vidx = views.push(View::new(SCRATCH));
             let comp: Box<dyn Component> = Box::new(vidx);
             *f = 0;
-            self.new_leaf(comp, self.roots[ROOT_TEXT_VIEW], None);
+            self.new_leaf(comp, self.roots[ROOT_TEXT_VIEW], None, (None, None));
         }
 
         let mut curr = NodeIdx::Split(self.roots[ROOT_TEXT_VIEW]);
@@ -2410,10 +2507,11 @@ fn key_to_exec(
                             nodes.roots[ROOT_OVERLAY],
                             Some(Constraints {
                                 max_width: Some(20),
-                                max_height: Some(20),
+                                max_height: Some(buffers.len() as u16 + 1),
                                 min_height: None,
                                 min_width: None,
                             }),
+                            (None, None),
                         ));
                         queue!(stdout(), cursor::SetCursorStyle::SteadyBlock)?;
                     }
@@ -2594,11 +2692,16 @@ fn key_to_exec(
                             .iter()
                             .position(|x| *x == NodeIdx::Leaf(lidx))
                         {
-                            let (l, new_parent) =
-                                nodes.new_split(vidx, parent, Direction::Vertical, None);
+                            let (l, new_parent) = nodes.new_split(
+                                vidx,
+                                parent,
+                                Direction::Vertical,
+                                None,
+                                (None, None),
+                            );
                             let vidx = views.push(View::new(SCRATCH));
                             let comp: Box<dyn Component> = Box::new(vidx);
-                            nodes.new_leaf(comp, new_parent, None);
+                            nodes.new_leaf(comp, new_parent, None, (None, None));
                             nodes
                                 .splits
                                 .get_mut(parent.0)
@@ -2618,11 +2721,16 @@ fn key_to_exec(
                             .iter()
                             .position(|x| *x == NodeIdx::Leaf(lidx))
                         {
-                            let (l, new_parent) =
-                                nodes.new_split(vidx, parent, Direction::Horizontal, None);
+                            let (l, new_parent) = nodes.new_split(
+                                vidx,
+                                parent,
+                                Direction::Horizontal,
+                                None,
+                                (None, None),
+                            );
                             let vidx = views.push(View::new(SCRATCH));
                             let comp: Box<dyn Component> = Box::new(vidx);
-                            nodes.new_leaf(comp, new_parent, None);
+                            nodes.new_leaf(comp, new_parent, None, (None, None));
                             nodes
                                 .splits
                                 .get_mut(parent.0)
@@ -2636,7 +2744,7 @@ fn key_to_exec(
                     Cmd::Split => {
                         let vidx = views.push(View::new(SCRATCH));
                         let comp: Box<dyn Component> = Box::new(vidx);
-                        nodes.new_leaf(comp, parent, None);
+                        nodes.new_leaf(comp, parent, None, (None, None));
                         enter_normal(focus, lidx, cmd_line);
                     }
                     Cmd::Noop => {}
@@ -2673,12 +2781,13 @@ fn main() -> io::Result<()> {
             y: 0,
             height: height - 1,
             width: width - 1,
-            constraint: Constraints {
+            constraints: Constraints {
                 min_height: None,
                 max_height: None,
                 min_width: None,
                 max_width: None,
             },
+            anchors: (None, None),
         },
         Direction::Vertical,
     );
@@ -2689,12 +2798,13 @@ fn main() -> io::Result<()> {
             y: 0,
             height: height - 1,
             width: width - 1,
-            constraint: Constraints {
+            constraints: Constraints {
                 min_height: None,
                 max_height: None,
                 min_width: None,
                 max_width: None,
             },
+            anchors: (None, None),
         },
         Direction::Vertical,
     );
@@ -2710,7 +2820,7 @@ fn main() -> io::Result<()> {
         };
         let vidx = views.push(View::new(bidx));
         let comp: Box<dyn Component> = Box::new(vidx);
-        let l = nodes.new_leaf(comp, root, None);
+        let l = nodes.new_leaf(comp, root, None, (None, None));
         Focus::Leaf(l)
     };
     enable_raw_mode()?;
@@ -2808,12 +2918,13 @@ fn main() -> io::Result<()> {
                     y: height - 1,
                     height: 1,
                     width,
-                    constraint: Constraints {
+                    constraints: Constraints {
                         min_height: Some(1),
                         max_height: Some(1),
                         min_width: Some(width),
                         max_width: Some(width),
                     },
+                    anchors: (None, None),
                 };
                 old = ScreenBuffer {
                     width,
