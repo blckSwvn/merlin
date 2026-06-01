@@ -251,15 +251,21 @@ impl Views {
 
 #[derive(Clone, Copy)]
 struct Constraints {
-    min_height: Option<u16>,
-    max_height: Option<u16>,
-    min_width: Option<u16>,
-    max_width: Option<u16>,
+    min_height: Option<Constraint>,
+    max_height: Option<Constraint>,
+    min_width: Option<Constraint>,
+    max_width: Option<Constraint>,
+}
+
+#[derive(Clone, Copy)]
+enum Constraint {
+    Relative(u16), //fraction aka width/x not x%
+    Absolute(u16),
 }
 
 #[derive(Clone, Copy)]
 enum Anchor {
-    Relative(u16), //fraction aka 1/3 etc not %
+    Relative(u16), //fraction aka width/x not x%
     Absolute(u16),
 }
 
@@ -363,30 +369,17 @@ impl Buffer {
     }
 }
 
+struct CmdLineDummy();
 struct CmdLine {
     input: String,
-    rect: Rect,
     cursor: usize,
     error: bool,
     last_view: (LeafIdx, ViewIdx),
 }
 impl CmdLine {
-    fn new(width: u16, height: u16) -> Self {
+    fn new() -> Self {
         Self {
             input: String::new(),
-            rect: Rect {
-                x: 0,
-                y: height,
-                height: 1,
-                width: width,
-                constraints: Constraints {
-                    min_height: Some(1),
-                    min_width: Some(width),
-                    max_height: Some(1),
-                    max_width: Some(width),
-                },
-                anchors: (None, Some(Anchor::Relative(1))),
-            },
             cursor: 0,
             error: false,
             last_view: (LeafIdx(usize::MAX), ViewIdx(usize::MAX)),
@@ -395,7 +388,7 @@ impl CmdLine {
     fn enter_cmd_mode(
         &mut self,
         vidx: ViewIdx,
-        focus: &mut Focus,
+        focus: &mut LeafIdx,
         views: &mut Views,
         lidx: LeafIdx,
     ) {
@@ -403,7 +396,7 @@ impl CmdLine {
         views.get_mut(vidx).mode = Mode::Normal;
         self.input.clear();
         self.cursor = 0;
-        *focus = Focus::CmdLine;
+        *focus = CMDLINE;
         queue!(stdout(), cursor::SetCursorStyle::SteadyBar).unwrap();
     }
     fn insert(&mut self, c: char) {
@@ -438,23 +431,434 @@ impl CmdLine {
         self.input.clear();
         self.input = s.to_string();
     }
-    fn sketch(&self, focus: &Focus, screen: &mut ScreenBuffer) {
+}
+
+impl Component for CmdLineDummy {
+    fn cursor_xy(
+        &self,
+        rect: &Rect,
+        views: &Views,
+        buffers: &Buffers,
+        cmd_line: &CmdLine,
+    ) -> (u16, u16) {
+        (rect.x + cmd_line.cursor as u16 + 1, rect.y)
+    }
+    fn sketch(
+        &self,
+        rect: &Rect,
+        views: &Views,
+        buffers: &Buffers,
+        cmd_line: &CmdLine,
+        screen: &mut ScreenBuffer,
+    ) {
+        screen.set_string_xy(rect.x, rect.y, &" ".repeat(rect.width as usize), FG, BG);
         let s = {
-            if self.error {
-                format!("{}", self.input)
+            if cmd_line.error {
+                format!("{}", cmd_line.input)
             } else {
-                if let Focus::CmdLine = focus {
-                    format!(":{}", self.input)
+                if !cmd_line.input.is_empty() {
+                    format!(":{}", cmd_line.input)
                 } else {
-                    if self.input.is_empty() {
-                        "".to_string()
-                    } else {
-                        format!(":{}", self.input)
-                    }
+                    return;
                 }
             }
         };
-        screen.set_string_xy(0, self.rect.y, &s, FG, BG);
+        screen.set_string_xy(rect.x, rect.y, &s, FG, BG);
+    }
+    fn behaviour(
+        &mut self,
+        key: KeyEvent,
+        focus: &mut LeafIdx,
+        cmd_line: &mut CmdLine,
+        views: &mut Views,
+        buffers: &mut Buffers,
+        nodes: &mut Nodes,
+    ) -> Result<(), EditorErr> {
+        let cmd = match key.code {
+            KeyCode::Char(c) => Cmd::Insert(c),
+            KeyCode::Esc => Cmd::EnterNormal,
+            KeyCode::Backspace => Cmd::BackSpace,
+            KeyCode::Left => Cmd::MoveLeft,
+            KeyCode::Right => Cmd::MoveRight,
+            KeyCode::Enter => Cmd::Exec,
+            _ => Cmd::Noop,
+        };
+        exec_cmd(cmd, cmd_line, nodes, focus, views, buffers)?;
+        enum Cmd {
+            BufferList,
+            EnterNormal,
+            Exec,
+            Insert(char),
+            BackSpace,
+            MoveLeft,
+            MoveRight,
+            Quit(bool),
+            Save(Option<String>),
+            Open(Option<String>),
+            SwitchBuffer(BufferIdx),
+            Close(Option<BufferIdx>, bool),
+            Split,
+            SplitV,
+            SplitH,
+            ViewClose,
+            Noop,
+        }
+        fn parse_cmd(s: String) -> Result<Cmd, String> {
+            fn parse_args(s: &str) -> Vec<String> {
+                let mut args = Vec::new();
+                let mut current = String::new();
+                let mut in_quotes = false;
+
+                for c in s.chars() {
+                    match c {
+                        '"' => in_quotes = !in_quotes,
+                        ' ' if !in_quotes => {
+                            if !current.is_empty() {
+                                args.push(current.clone());
+                                current.clear();
+                            }
+                        }
+                        _ => current.push(c),
+                    }
+                }
+                if !current.is_empty() {
+                    args.push(current);
+                }
+                args
+            }
+            let s = s.trim();
+            let mut parts = s.splitn(2, ' ');
+            let cmd = parts.next().ok_or(format!("unknown command: {}", s))?;
+            let rest = parts.next().unwrap_or("");
+            match cmd {
+                "bufferlist" | "bl" => Ok(Cmd::BufferList),
+                "q" => Ok(Cmd::Quit(false)),
+                "Q" => Ok(Cmd::Quit(true)),
+                "w" => {
+                    let args = parse_args(rest);
+                    Ok(Cmd::Save(args.get(0).cloned()))
+                }
+                "open" | "o" => {
+                    let args = parse_args(rest);
+                    if let Some(arg) = args.get(0) {
+                        if let Ok(idx) = arg.parse::<usize>() {
+                            Ok(Cmd::SwitchBuffer(BufferIdx { idx }))
+                        } else {
+                            Ok(Cmd::Open(Some(arg.clone())))
+                        }
+                    } else {
+                        Ok(Cmd::Open(None))
+                    }
+                }
+                "split" | "s" => Ok(Cmd::Split),
+                "splitv" | "sv" => Ok(Cmd::SplitV),
+                "splith" | "sh" => Ok(Cmd::SplitH),
+                "close" | "c" => {
+                    let mut args = Vec::new();
+                    args.push(rest);
+                    if let Some(arg) = args.get(0) {
+                        if let Ok(idx) = arg.parse::<usize>() {
+                            Ok(Cmd::Close(Some(BufferIdx { idx }), false))
+                        } else {
+                            Ok(Cmd::Close(None, false))
+                        }
+                    } else {
+                        Ok(Cmd::Close(None, false))
+                    }
+                }
+                "CLOSE" | "C" => {
+                    let mut args = Vec::new();
+                    args.push(rest);
+                    if let Some(arg) = args.get(0) {
+                        if let Ok(idx) = arg.parse::<usize>() {
+                            Ok(Cmd::Close(Some(BufferIdx { idx }), true))
+                        } else {
+                            Ok(Cmd::Close(None, true))
+                        }
+                    } else {
+                        Ok(Cmd::Close(None, true))
+                    }
+                }
+                "viewclose" | "vc" => Ok(Cmd::ViewClose),
+                _ => Err(format!("unknown command: {}", cmd)),
+            }
+        }
+        fn exec_cmd(
+            cmd: Cmd,
+            cmd_line: &mut CmdLine,
+            nodes: &mut Nodes,
+            focus: &mut LeafIdx,
+            views: &mut Views,
+            buffers: &mut Buffers,
+        ) -> Result<(), EditorErr> {
+            let (bidx, vidx, lidx, parent) = {
+                let l = nodes
+                    .leaves
+                    .get(cmd_line.last_view.0.0)
+                    .expect(&format!("lidx invalid:{}", cmd_line.last_view.0.0));
+                (
+                    views.get(cmd_line.last_view.1).buf,
+                    cmd_line.last_view.1,
+                    cmd_line.last_view.0,
+                    l.parent,
+                )
+            };
+            fn enter_normal(focus: &mut LeafIdx, lidx: LeafIdx, cmd_line: &mut CmdLine) {
+                queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
+                cmd_line.cursor = 0;
+                *focus = lidx;
+            }
+            match cmd {
+                Cmd::BufferList => {
+                    let comp: Box<dyn Component> = Box::new(BufferList {});
+                    *focus = nodes.new_leaf(
+                        comp,
+                        nodes.roots[ROOT_OVERLAY],
+                        Some(Constraints {
+                            max_width: Some(Constraint::Absolute(20)),
+                            max_height: Some(Constraint::Absolute(buffers.len() as u16 + 1)),
+                            min_height: None,
+                            min_width: None,
+                        }),
+                        (None, None),
+                    );
+                    queue!(stdout(), cursor::SetCursorStyle::SteadyBlock)?;
+                }
+                Cmd::Exec => match parse_cmd(cmd_line.input.clone()) {
+                    Ok(cmd) => {
+                        exec_cmd(cmd, cmd_line, nodes, focus, views, buffers)?;
+                    }
+                    Err(s) => return Err(EditorErr::Msg(s)),
+                },
+                Cmd::EnterNormal => {
+                    enter_normal(focus, lidx, cmd_line);
+                }
+                Cmd::Insert(c) => {
+                    cmd_line.insert(c);
+                }
+                Cmd::BackSpace => {
+                    cmd_line.backspace();
+                }
+                Cmd::MoveLeft => {
+                    cmd_line.cursor = cmd_line.cursor.saturating_sub(1);
+                }
+                Cmd::MoveRight => {
+                    cmd_line.cursor = cmd_line.cursor.saturating_add(1);
+                }
+                Cmd::Open(file) => {
+                    let view = views.get_mut(vidx);
+                    view.off = 0;
+                    view.cursor = 0;
+                    view.prefered_x = 0;
+                    let buffer = if let Some(f) = file {
+                        if let Some(b) = buffers.get_by_path(&f) {
+                            let buffer = buffers.get(*b);
+                            let line = buffer.buf.char_to_line(buffer.last_cursor);
+                            let line_start = buffer.buf.line_to_char(line);
+                            let col = buffer.last_cursor - line_start;
+                            view.cursor = buffer.last_cursor;
+                            view.prefered_x = col;
+                            view.off = buffer.last_off;
+                            *b
+                        } else {
+                            buffers.push(Buffer::new(Some(&f), 0)?)
+                        }
+                    } else {
+                        buffers.push(Buffer::new(None, 0)?)
+                    };
+                    view.buf = buffer;
+                    enter_normal(focus, lidx, cmd_line);
+                }
+                Cmd::Close(bidx, force) => {
+                    let view = views.get_mut(vidx);
+                    let mut bidx = { if let Some(idx) = bidx { idx } else { view.buf } };
+                    let curr_buffer = buffers.get(bidx);
+                    if bidx != SCRATCH {
+                        if curr_buffer.check_flag(Buffer::READ_ONLY) {
+                            return Err(EditorErr::ReadOnly(bidx));
+                        }
+                        if !curr_buffer.undo.is_empty() && force == false {
+                            return Err(EditorErr::Dirty(bidx));
+                        } else {
+                            if view.buf == bidx {
+                                view.buf = SCRATCH;
+                                cmd_line.input.clear();
+                                view.off = 0;
+                                view.cursor = 0;
+                                view.prefered_x = 0;
+                            }
+                            buffers.remove(&mut bidx);
+                        }
+                    } else {
+                        return Err(EditorErr::Msg("will not close special buffer: 0".into()));
+                    }
+                    enter_normal(focus, lidx, cmd_line);
+                }
+                Cmd::ViewClose => {
+                    nodes.remove_child(parent, views, focus, NodeIdx::Leaf(lidx));
+                    let mut curr = NodeIdx::Split(*nodes.roots.get(ROOT_TEXT_VIEW).unwrap());
+                    let lidx = loop {
+                        match curr {
+                            NodeIdx::Split(s) => {
+                                let Split {
+                                    children, focus: f, ..
+                                } = nodes.splits.get(s.0).unwrap();
+                                curr = *children.get(*f).unwrap();
+                            }
+                            NodeIdx::Leaf(l) => break l,
+                        }
+                    };
+                    *focus = lidx;
+                    enter_normal(focus, lidx, cmd_line);
+                }
+                Cmd::Save(f) => {
+                    let buffer = buffers.get_mut(bidx);
+                    if buffer.check_flag(Buffer::READ_ONLY) {
+                        return Err(EditorErr::ReadOnly(bidx));
+                    }
+                    if buffer.check_flag(Buffer::SCRATCH) {
+                        return Err(EditorErr::Msg(format!(
+                            "cant save, buffer: {} is scratch",
+                            bidx.idx
+                        )));
+                    }
+                    if let Some(new) = f {
+                        buffer.save(Some(new))?;
+                        buffer.undo.clear();
+                        buffer.redo.clear();
+                    } else {
+                        if let Some(_) = &buffer.file {
+                            match buffer.save(None) {
+                                Err(error) => return Err(EditorErr::Io(error)),
+                                Ok(_) => {
+                                    buffer.undo.clear();
+                                    buffer.redo.clear();
+                                }
+                            }
+                        } else {
+                            return Err(EditorErr::Msg("new file needs name".into()));
+                        }
+                    }
+                    enter_normal(focus, lidx, cmd_line);
+                }
+                Cmd::SwitchBuffer(idx) => {
+                    if idx.idx < buffers.len() {
+                        if buffers.get(idx).check_flag(Buffer::NON_NAVIGATABLE) {
+                            return Err(EditorErr::Msg(format!(
+                                "buffer {} is non navigatable",
+                                idx.idx
+                            )))?;
+                        }
+                        let view = views.get_mut(vidx);
+                        let buffer = buffers.get_mut(view.buf);
+                        buffer.last_off = view.off;
+                        buffer.last_cursor = view.cursor;
+                        let buffer = buffers.get_mut(idx);
+                        if buffer.buf.len_chars() == 0 {
+                            if let Some(p) = &buffer.file {
+                                let file = File::open(p)?;
+                                let reader = BufReader::new(file);
+                                buffer.buf = Rope::from_reader(reader)?;
+                            }
+                        }
+                        view.buf = idx;
+                        view.cursor = buffer.last_cursor;
+                        view.off = buffer.last_off;
+                        let line = buffer.buf.char_to_line(buffer.last_cursor);
+                        let line_start = buffer.buf.line_to_char(line);
+                        let col = buffer.last_cursor - line_start;
+                        view.cursor = buffer.last_cursor;
+                        view.prefered_x = col;
+                        view.scroll(&nodes.leaves.get(lidx.0).unwrap().rect, buffer);
+                        enter_normal(focus, lidx, cmd_line);
+                    } else {
+                        return Err(EditorErr::InvalidBuffer);
+                    }
+                }
+                Cmd::Quit(force) => {
+                    if !force {
+                        let dirty: Vec<_> = buffers
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, b)| !b.undo.is_empty() && *i != SCRATCH.idx)
+                            .map(|(i, _)| i)
+                            .collect();
+                        if !dirty.is_empty() {
+                            return Err(EditorErr::Msg(format!(
+                                "cant quit dirty buffers: {:?}",
+                                dirty
+                            )));
+                        }
+                    }
+                    return Err(EditorErr::Quit);
+                }
+                Cmd::SplitV => {
+                    if let Some(idx) = nodes
+                        .splits
+                        .get(parent.0)
+                        .unwrap()
+                        .children
+                        .iter()
+                        .position(|x| *x == NodeIdx::Leaf(lidx))
+                    {
+                        let (l, new_parent) = {
+                            let comp: Box<dyn Component> = Box::new(vidx);
+                            nodes.new_split(comp, parent, Direction::Vertical, None, (None, None))
+                        };
+                        let vidx = views.push(View::new(SCRATCH));
+                        let comp: Box<dyn Component> = Box::new(vidx);
+                        nodes.new_leaf(comp, new_parent, None, (None, None));
+                        nodes
+                            .splits
+                            .get_mut(parent.0)
+                            .unwrap()
+                            .children
+                            .swap_remove(idx);
+                        enter_normal(focus, l, cmd_line);
+                        nodes.recalc(parent);
+                    }
+                }
+                Cmd::SplitH => {
+                    if let Some(idx) = nodes
+                        .splits
+                        .get(parent.0)
+                        .unwrap()
+                        .children
+                        .iter()
+                        .position(|x| *x == NodeIdx::Leaf(lidx))
+                    {
+                        let comp: Box<dyn Component> = Box::new(vidx);
+                        let (l, new_parent) = nodes.new_split(
+                            comp,
+                            parent,
+                            Direction::Horizontal,
+                            None,
+                            (None, None),
+                        );
+                        let vidx = views.push(View::new(SCRATCH));
+                        let comp: Box<dyn Component> = Box::new(vidx);
+                        nodes.new_leaf(comp, new_parent, None, (None, None));
+                        nodes
+                            .splits
+                            .get_mut(parent.0)
+                            .unwrap()
+                            .children
+                            .swap_remove(idx);
+                        enter_normal(focus, l, cmd_line);
+                        nodes.recalc(parent);
+                    }
+                }
+                Cmd::Split => {
+                    let vidx = views.push(View::new(SCRATCH));
+                    let comp: Box<dyn Component> = Box::new(vidx);
+                    nodes.new_leaf(comp, parent, None, (None, None));
+                    enter_normal(focus, lidx, cmd_line);
+                }
+                Cmd::Noop => {}
+            }
+            Ok(())
+        }
+        Ok(())
     }
 }
 
@@ -488,6 +892,9 @@ impl View {
                 if let Some(line) = buffer.buf.get_line(line_idx) {
                     let len = line.len_chars();
                     if len > 0 {
+                        if rect.width.saturating_sub(5) == 0 {
+                            panic!("width:{}, height:{}", rect.width, rect.height)
+                        }
                         wrap_off += len / rect.width.saturating_sub(5) as usize;
                     }
                 }
@@ -512,12 +919,25 @@ const SELECTION: Color = Color::Rgb {
 };
 
 trait Component {
-    fn sketch(&self, rect: &Rect, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer);
-    fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers) -> (u16, u16);
+    fn sketch(
+        &self,
+        rect: &Rect,
+        views: &Views,
+        buffers: &Buffers,
+        cmd_line: &CmdLine,
+        screen: &mut ScreenBuffer,
+    );
+    fn cursor_xy(
+        &self,
+        rect: &Rect,
+        views: &Views,
+        buffers: &Buffers,
+        cmd_line: &CmdLine,
+    ) -> (u16, u16);
     fn behaviour(
         &mut self,
         key: KeyEvent,
-        focus: &mut Focus,
+        focus: &mut LeafIdx,
         cmd_line: &mut CmdLine,
         views: &mut Views,
         buffers: &mut Buffers,
@@ -526,7 +946,14 @@ trait Component {
 }
 
 impl Component for ViewIdx {
-    fn sketch(&self, rect: &Rect, views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
+    fn sketch(
+        &self,
+        rect: &Rect,
+        views: &Views,
+        buffers: &Buffers,
+        _cmd_line: &CmdLine,
+        screen: &mut ScreenBuffer,
+    ) {
         let v = views.get(*self);
         {
             let blank = " ".repeat(rect.width as usize);
@@ -702,7 +1129,13 @@ impl Component for ViewIdx {
             }
         }
     }
-    fn cursor_xy(&self, rect: &Rect, views: &Views, buffers: &Buffers) -> (u16, u16) {
+    fn cursor_xy(
+        &self,
+        rect: &Rect,
+        views: &Views,
+        buffers: &Buffers,
+        cmd_line: &CmdLine,
+    ) -> (u16, u16) {
         let v = views.get(*self);
         let b = buffers.get(v.buf);
         let width = rect.width.saturating_sub(4) as usize;
@@ -727,7 +1160,7 @@ impl Component for ViewIdx {
     fn behaviour(
         &mut self,
         key: KeyEvent,
-        focus: &mut Focus,
+        focus: &mut LeafIdx,
         cmd_line: &mut CmdLine,
         views: &mut Views,
         buffers: &mut Buffers,
@@ -810,7 +1243,7 @@ impl Component for ViewIdx {
             cmd: Cmd,
             vidx: ViewIdx,
             nodes: &mut Nodes,
-            focus: &mut Focus,
+            focus: &mut LeafIdx,
             cmd_line: &mut CmdLine,
             views: &mut Views,
             buffers: &mut Buffers,
@@ -1367,7 +1800,14 @@ fn sketch_border(
 }
 
 impl Component for BufferList {
-    fn sketch(&self, r: &Rect, _views: &Views, buffers: &Buffers, screen: &mut ScreenBuffer) {
+    fn sketch(
+        &self,
+        r: &Rect,
+        _views: &Views,
+        buffers: &Buffers,
+        _cmd_line: &CmdLine,
+        screen: &mut ScreenBuffer,
+    ) {
         let r = sketch_border1(r, screen);
         let dirty = if buffers.data.get(0).unwrap().undo.is_empty() {
             ""
@@ -1406,13 +1846,19 @@ impl Component for BufferList {
             screen.set_string_xy(r.x, y + 1, &s, FG, BG);
         }
     }
-    fn cursor_xy(&self, rect: &Rect, _views: &Views, _buffers: &Buffers) -> (u16, u16) {
+    fn cursor_xy(
+        &self,
+        rect: &Rect,
+        _views: &Views,
+        _buffers: &Buffers,
+        _cmd_line: &CmdLine,
+    ) -> (u16, u16) {
         (rect.x, rect.y)
     }
     fn behaviour(
         &mut self,
         key: KeyEvent,
-        focus: &mut Focus,
+        focus: &mut LeafIdx,
         _cmd_line: &mut CmdLine,
         views: &mut Views,
         _buffers: &mut Buffers,
@@ -1420,10 +1866,7 @@ impl Component for BufferList {
     ) -> Result<(), EditorErr> {
         match key.code {
             KeyCode::Esc => {
-                let (l, lidx) = {
-                    let Focus::Leaf(lidx) = focus else { panic!() };
-                    (nodes.leaves.get(lidx.0).unwrap(), lidx.clone())
-                };
+                let (l, lidx) = { (nodes.leaves.get(focus.0).unwrap(), focus.clone()) };
                 nodes.remove_child(l.parent, views, focus, NodeIdx::Leaf(lidx));
             }
             _ => {}
@@ -1462,11 +1905,6 @@ struct Split {
 enum Direction {
     Horizontal,
     Vertical,
-}
-
-enum Focus {
-    Leaf(LeafIdx),
-    CmdLine,
 }
 
 //index into nodes.roots
@@ -1527,7 +1965,7 @@ impl Nodes {
     }
     fn new_split(
         &mut self,
-        vidx: ViewIdx,
+        comp: Box<dyn Component>,
         parent: SplitIdx,
         direction: Direction,
         constraint: Option<Constraints>,
@@ -1562,7 +2000,6 @@ impl Nodes {
         self.splits[parent.0]
             .children
             .push(NodeIdx::Split(new_parent));
-        let comp: Box<dyn Component> = Box::new(vidx);
         let lidx = self.new_leaf(comp, new_parent, None, (None, None));
         self.recalc(parent);
         (lidx, new_parent)
@@ -1607,7 +2044,7 @@ impl Nodes {
         &mut self,
         parent: SplitIdx,
         views: &mut Views,
-        focus: &mut Focus,
+        focus: &mut LeafIdx,
         child: NodeIdx,
     ) {
         let Split {
@@ -1631,10 +2068,7 @@ impl Nodes {
             *f = 0;
             self.reflow(focus, views, parent);
             let parent = {
-                let Focus::Leaf(l) = focus else {
-                    panic!();
-                };
-                let Leaf { parent, .. } = self.leaves.get(l.0).unwrap();
+                let Leaf { parent, .. } = self.leaves.get(focus.0).unwrap();
                 parent
             };
             self.recalc(*parent);
@@ -1655,7 +2089,7 @@ impl Nodes {
                 NodeIdx::Leaf(l) => break l,
             }
         };
-        *focus = Focus::Leaf(lidx);
+        *focus = lidx;
     }
     fn remove(&mut self, nidx: NodeIdx) {
         match nidx {
@@ -1695,14 +2129,24 @@ impl Nodes {
                         match direction {
                             Direction::Horizontal => {
                                 if let Some(h) = l.rect.constraints.min_height {
-                                    min = h;
-                                    size_left -= h;
+                                    match h {
+                                        Constraint::Relative(r) => {}
+                                        Constraint::Absolute(a) => {
+                                            min = a;
+                                            size_left -= a;
+                                        }
+                                    }
                                 }
                             }
                             Direction::Vertical => {
                                 if let Some(w) = l.rect.constraints.min_width {
-                                    min = w;
-                                    size_left -= w;
+                                    match w {
+                                        Constraint::Relative(r) => {}
+                                        Constraint::Absolute(a) => {
+                                            min = a;
+                                            size_left -= a;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1714,14 +2158,24 @@ impl Nodes {
                         match direction {
                             Direction::Horizontal => {
                                 if let Some(h) = s.rect.constraints.min_height {
-                                    min = h;
-                                    size_left -= h;
+                                    match h {
+                                        Constraint::Relative(r) => {}
+                                        Constraint::Absolute(a) => {
+                                            min = a;
+                                            size_left -= a;
+                                        }
+                                    }
                                 }
                             }
                             Direction::Vertical => {
                                 if let Some(w) = s.rect.constraints.min_width {
-                                    min = w;
-                                    size_left -= w;
+                                    match w {
+                                        Constraint::Relative(r) => {}
+                                        Constraint::Absolute(a) => {
+                                            min = a;
+                                            size_left -= a;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1742,18 +2196,44 @@ impl Nodes {
                         match direction {
                             Direction::Vertical => match n {
                                 NodeIdx::Leaf(l) => {
-                                    self.leaves.get(l.0).unwrap().rect.constraints.max_width
+                                    match self.leaves.get(l.0).unwrap().rect.constraints.max_width {
+                                        Some(s) => match s {
+                                            Constraint::Relative(r) => rect.width / r,
+                                            Constraint::Absolute(a) => a,
+                                        },
+                                        none => rect.width,
+                                    }
                                 }
                                 NodeIdx::Split(s) => {
-                                    self.splits.get(s.0).unwrap().rect.constraints.max_width
+                                    match self.splits.get(s.0).unwrap().rect.constraints.max_width {
+                                        Some(s) => match s {
+                                            Constraint::Relative(r) => rect.width / r,
+                                            Constraint::Absolute(a) => a,
+                                        },
+                                        None => rect.width,
+                                    }
                                 }
                             },
                             Direction::Horizontal => match n {
                                 NodeIdx::Leaf(l) => {
-                                    self.leaves.get(l.0).unwrap().rect.constraints.max_height
+                                    match self.leaves.get(l.0).unwrap().rect.constraints.max_height
+                                    {
+                                        Some(s) => match s {
+                                            Constraint::Relative(r) => rect.height / r,
+                                            Constraint::Absolute(a) => a,
+                                        },
+                                        None => rect.height,
+                                    }
                                 }
                                 NodeIdx::Split(s) => {
-                                    self.leaves.get(s.0).unwrap().rect.constraints.max_height
+                                    match self.splits.get(s.0).unwrap().rect.constraints.max_height
+                                    {
+                                        Some(s) => match s {
+                                            Constraint::Relative(r) => rect.height / r,
+                                            Constraint::Absolute(a) => a,
+                                        },
+                                        None => rect.height,
+                                    }
                                 }
                             },
                         }
@@ -1763,13 +2243,11 @@ impl Nodes {
                         *s += 1;
                         remainder -= 1;
                     }
-                    if let Some(max) = max {
-                        if *s >= max {
-                            size_left += s.saturating_sub(max);
-                            *s = max;
-                            non_maxed.swap_remove(i);
-                            continue;
-                        }
+                    if *s >= max {
+                        size_left += s.saturating_sub(max);
+                        *s = max;
+                        non_maxed.swap_remove(i);
+                        continue;
                     }
                     i += 1;
                 }
@@ -1788,7 +2266,13 @@ impl Nodes {
                         l.rect.y = y;
                         l.rect.width = len;
                         x += l.rect.width;
-                        l.rect.height = l.rect.constraints.max_height.unwrap_or(rect.height);
+                        l.rect.height = match l.rect.constraints.max_height {
+                            Some(h) => match h {
+                                Constraint::Relative(r) => rect.height / r,
+                                Constraint::Absolute(a) => a,
+                            },
+                            None => rect.height,
+                        };
                         if let Some(x) = l.rect.anchors.0 {
                             match x {
                                 Anchor::Relative(x) => {
@@ -1797,11 +2281,17 @@ impl Nodes {
                                     l.rect.x = x;
                                 }
                                 Anchor::Absolute(x) => {
-                                    let x = u16::min(
-                                        x,
-                                        self.splits.get(l.parent.0).unwrap().rect.width,
-                                    );
-                                    l.rect.x = x - l.rect.width;
+                                    let x = {
+                                        let parent_width =
+                                            self.splits.get(l.parent.0).unwrap().rect.width;
+
+                                        if x + l.rect.width > parent_width {
+                                            parent_width - l.rect.width
+                                        } else {
+                                            x
+                                        }
+                                    };
+                                    l.rect.x = x;
                                 }
                             }
                         }
@@ -1834,7 +2324,13 @@ impl Nodes {
                         s.rect.y = y;
                         s.rect.width = len;
                         x += s.rect.width;
-                        s.rect.height = s.rect.constraints.max_height.unwrap_or(rect.height);
+                        s.rect.height = match s.rect.constraints.max_height {
+                            Some(s) => match s {
+                                Constraint::Relative(r) => rect.height / r,
+                                Constraint::Absolute(a) => a,
+                            },
+                            None => rect.height,
+                        };
                         self.recalc(sidx);
                     }
                 },
@@ -1845,7 +2341,13 @@ impl Nodes {
                         l.rect.y = y;
                         l.rect.height = len;
                         y += l.rect.height;
-                        l.rect.width = l.rect.constraints.max_width.unwrap_or(rect.width);
+                        l.rect.width = match l.rect.constraints.max_width {
+                            Some(s) => match s {
+                                Constraint::Relative(r) => rect.width / r,
+                                Constraint::Absolute(a) => a,
+                            },
+                            None => rect.width,
+                        };
                         if let Some(x) = l.rect.anchors.0 {
                             match x {
                                 Anchor::Relative(x) => {}
@@ -1863,11 +2365,16 @@ impl Nodes {
                                     l.rect.x = x;
                                 }
                                 Anchor::Absolute(x) => {
-                                    let x = u16::min(
-                                        x,
-                                        self.splits.get(l.parent.0).unwrap().rect.width,
-                                    );
-                                    l.rect.x = x - l.rect.width;
+                                    let x = {
+                                        let parent_width =
+                                            self.splits.get(l.parent.0).unwrap().rect.width;
+                                        if x + l.rect.width > parent_width {
+                                            parent_width - l.rect.width
+                                        } else {
+                                            x
+                                        }
+                                    };
+                                    l.rect.width = x;
                                 }
                             }
                         }
@@ -1900,7 +2407,13 @@ impl Nodes {
                         s.rect.y = y;
                         s.rect.height = len;
                         y += s.rect.height;
-                        s.rect.width = s.rect.constraints.max_width.unwrap_or(rect.width);
+                        s.rect.width = match s.rect.constraints.max_width {
+                            Some(s) => match s {
+                                Constraint::Relative(r) => rect.width / r,
+                                Constraint::Absolute(a) => a,
+                            },
+                            None => rect.width,
+                        };
                         self.recalc(sidx);
                     }
                 },
@@ -1908,7 +2421,7 @@ impl Nodes {
         }
     }
 
-    fn reflow(&mut self, focus: &mut Focus, views: &mut Views, parent: SplitIdx) {
+    fn reflow(&mut self, focus: &mut LeafIdx, views: &mut Views, parent: SplitIdx) {
         let mut to_remove: Option<(SplitIdx, usize, NodeIdx)> = None; //parent, child, node
         let mut curr = parent;
         loop {
@@ -1967,12 +2480,12 @@ impl Nodes {
                 _ => panic!(),
             }
         };
-        *focus = Focus::Leaf(curr)
+        *focus = curr
     }
 
     fn paint(
         &self,
-        focus: &Focus,
+        focus: &LeafIdx,
         cmd_line: &CmdLine,
         views: &Views,
         buffers: &Buffers,
@@ -1980,29 +2493,26 @@ impl Nodes {
         new: &mut ScreenBuffer,
     ) -> io::Result<()> {
         for r in &self.roots {
-            sketch(&self, NodeIdx::Split(*r), views, buffers, old, new);
+            sketch(
+                &self,
+                NodeIdx::Split(*r),
+                views,
+                buffers,
+                cmd_line,
+                old,
+                new,
+            );
         }
-        cmd_line.sketch(focus, new);
         new.print(old)?;
-        match focus {
-            Focus::CmdLine => {
-                queue!(
-                    stdout(),
-                    MoveTo(cmd_line.cursor as u16 + 1, cmd_line.rect.y)
-                )?;
-            }
-            Focus::Leaf(l) => {
-                let Leaf { comp, rect, .. } = self.leaves.get(l.0).unwrap();
-                let (x, y) = comp.cursor_xy(rect, views, buffers).clone();
-                queue!(stdout(), MoveTo(x, y))?;
-            }
-            _ => {}
-        }
+        let Leaf { comp, rect, .. } = self.leaves.get(focus.0).unwrap();
+        let (x, y) = comp.cursor_xy(rect, views, buffers, cmd_line).clone();
+        queue!(stdout(), MoveTo(x, y))?;
         fn sketch(
             nodes: &Nodes,
             nidx: NodeIdx,
             views: &Views,
             buffers: &Buffers,
+            cmd_line: &CmdLine,
             old: &mut ScreenBuffer,
             new: &mut ScreenBuffer,
         ) {
@@ -2011,27 +2521,24 @@ impl Nodes {
                     let s = &nodes.splits[s.0];
                     for (i, n) in s.children.iter().enumerate() {
                         if i != s.focus {
-                            sketch(nodes, *n, views, buffers, old, new);
+                            sketch(nodes, *n, views, buffers, cmd_line, old, new);
                         }
                     }
                     if let Some(nidx) = s.children.get(s.focus) {
-                        sketch(nodes, *nidx, views, buffers, old, new);
+                        sketch(nodes, *nidx, views, buffers, cmd_line, old, new);
                     }
                 }
                 NodeIdx::Leaf(l) => {
                     let l = &nodes.leaves[l.0];
-                    l.comp.sketch(&l.rect, views, buffers, new);
+                    l.comp.sketch(&l.rect, views, buffers, cmd_line, new);
                 }
             }
         }
         Ok(())
     }
 
-    fn focus_right(&mut self, focus: &mut Focus) {
-        let l = {
-            let Focus::Leaf(l) = focus else { panic!() };
-            l
-        };
+    fn focus_right(&mut self, focus: &mut LeafIdx) {
+        let l = *focus;
         let Leaf { parent, rect, .. } = &self.leaves[l.0];
         let x = rect.x + rect.width;
         let mut curr = *parent;
@@ -2072,7 +2579,7 @@ impl Nodes {
             loop {
                 match curr {
                     NodeIdx::Leaf(l) => {
-                        break Focus::Leaf(l);
+                        break l;
                     }
                     NodeIdx::Split(s) => {
                         let Split {
@@ -2085,11 +2592,8 @@ impl Nodes {
         }
     }
 
-    fn focus_left(&mut self, focus: &mut Focus) {
-        let l = {
-            let Focus::Leaf(l) = focus else { panic!() };
-            l
-        };
+    fn focus_left(&mut self, focus: &mut LeafIdx) {
+        let l = *focus;
         let Leaf { parent, rect, .. } = &self.leaves[l.0];
         let x = rect.x;
         let mut curr = *parent;
@@ -2130,7 +2634,7 @@ impl Nodes {
             loop {
                 match curr {
                     NodeIdx::Leaf(l) => {
-                        break Focus::Leaf(l);
+                        break l;
                     }
                     NodeIdx::Split(s) => {
                         let Split {
@@ -2143,11 +2647,8 @@ impl Nodes {
         }
     }
 
-    fn focus_up(&mut self, focus: &mut Focus) {
-        let l = {
-            let Focus::Leaf(l) = focus else { panic!() };
-            l
-        };
+    fn focus_up(&mut self, focus: &mut LeafIdx) {
+        let l = *focus;
         let Leaf { parent, rect, .. } = &self.leaves[l.0];
         let y = rect.y;
         let mut curr = *parent;
@@ -2188,7 +2689,7 @@ impl Nodes {
             loop {
                 match curr {
                     NodeIdx::Leaf(l) => {
-                        break Focus::Leaf(l);
+                        break l;
                     }
                     NodeIdx::Split(s) => {
                         let Split {
@@ -2201,11 +2702,8 @@ impl Nodes {
         }
     }
 
-    fn focus_down(&mut self, focus: &mut Focus) {
-        let l = {
-            let Focus::Leaf(l) = focus else { panic!() };
-            l
-        };
+    fn focus_down(&mut self, focus: &mut LeafIdx) {
+        let l = *focus;
         let Leaf { parent, rect, .. } = &self.leaves[l.0];
         let y = rect.y + rect.height;
         let mut curr = *parent;
@@ -2246,7 +2744,7 @@ impl Nodes {
             loop {
                 match curr {
                     NodeIdx::Leaf(l) => {
-                        break Focus::Leaf(l);
+                        break l;
                     }
                     NodeIdx::Split(s) => {
                         let Split {
@@ -2358,429 +2856,36 @@ enum Mode {
 fn key_to_exec(
     key: KeyEvent,
     nodes: &mut Nodes,
-    focus: &mut Focus,
+    focus: &mut LeafIdx,
     cmd_line: &mut CmdLine,
     views: &mut Views,
     buffers: &mut Buffers,
 ) -> Result<(), EditorErr> {
-    match focus {
-        Focus::CmdLine => {
-            let cmd = match key.code {
-                KeyCode::Char(c) => Cmd::Insert(c),
-                KeyCode::Esc => Cmd::EnterNormal,
-                KeyCode::Backspace => Cmd::BackSpace,
-                KeyCode::Left => Cmd::MoveLeft,
-                KeyCode::Right => Cmd::MoveRight,
-                KeyCode::Enter => Cmd::Exec,
-                _ => Cmd::Noop,
-            };
-            exec_cmd(cmd, cmd_line, nodes, focus, views, buffers)?;
-            enum Cmd {
-                BufferList,
-                EnterNormal,
-                Exec,
-                Insert(char),
-                BackSpace,
-                MoveLeft,
-                MoveRight,
-                Quit(bool),
-                Save(Option<String>),
-                Open(Option<String>),
-                SwitchBuffer(BufferIdx),
-                Close(Option<BufferIdx>, bool),
-                Split,
-                SplitV,
-                SplitH,
-                ViewClose,
-                Noop,
-            }
-            fn parse_cmd(s: String) -> Result<Cmd, String> {
-                fn parse_args(s: &str) -> Vec<String> {
-                    let mut args = Vec::new();
-                    let mut current = String::new();
-                    let mut in_quotes = false;
-
-                    for c in s.chars() {
-                        match c {
-                            '"' => in_quotes = !in_quotes,
-                            ' ' if !in_quotes => {
-                                if !current.is_empty() {
-                                    args.push(current.clone());
-                                    current.clear();
-                                }
-                            }
-                            _ => current.push(c),
-                        }
-                    }
-                    if !current.is_empty() {
-                        args.push(current);
-                    }
-                    args
-                }
-                let s = s.trim();
-                let mut parts = s.splitn(2, ' ');
-                let cmd = parts.next().ok_or(format!("unknown command: {}", s))?;
-                let rest = parts.next().unwrap_or("");
-                match cmd {
-                    "bufferlist" | "bl" => Ok(Cmd::BufferList),
-                    "q" => Ok(Cmd::Quit(false)),
-                    "Q" => Ok(Cmd::Quit(true)),
-                    "w" => {
-                        let args = parse_args(rest);
-                        Ok(Cmd::Save(args.get(0).cloned()))
-                    }
-                    "open" | "o" => {
-                        let args = parse_args(rest);
-                        if let Some(arg) = args.get(0) {
-                            if let Ok(idx) = arg.parse::<usize>() {
-                                Ok(Cmd::SwitchBuffer(BufferIdx { idx }))
-                            } else {
-                                Ok(Cmd::Open(Some(arg.clone())))
-                            }
-                        } else {
-                            Ok(Cmd::Open(None))
-                        }
-                    }
-                    "split" | "s" => Ok(Cmd::Split),
-                    "splitv" | "sv" => Ok(Cmd::SplitV),
-                    "splith" | "sh" => Ok(Cmd::SplitH),
-                    "close" | "c" => {
-                        let mut args = Vec::new();
-                        args.push(rest);
-                        if let Some(arg) = args.get(0) {
-                            if let Ok(idx) = arg.parse::<usize>() {
-                                Ok(Cmd::Close(Some(BufferIdx { idx }), false))
-                            } else {
-                                Ok(Cmd::Close(None, false))
-                            }
-                        } else {
-                            Ok(Cmd::Close(None, false))
-                        }
-                    }
-                    "CLOSE" | "C" => {
-                        let mut args = Vec::new();
-                        args.push(rest);
-                        if let Some(arg) = args.get(0) {
-                            if let Ok(idx) = arg.parse::<usize>() {
-                                Ok(Cmd::Close(Some(BufferIdx { idx }), true))
-                            } else {
-                                Ok(Cmd::Close(None, true))
-                            }
-                        } else {
-                            Ok(Cmd::Close(None, true))
-                        }
-                    }
-                    "viewclose" | "vc" => Ok(Cmd::ViewClose),
-                    _ => Err(format!("unknown command: {}", cmd)),
-                }
-            }
-            fn exec_cmd(
-                cmd: Cmd,
-                cmd_line: &mut CmdLine,
-                nodes: &mut Nodes,
-                focus: &mut Focus,
-                views: &mut Views,
-                buffers: &mut Buffers,
-            ) -> Result<(), EditorErr> {
-                let (bidx, vidx, lidx, parent) = {
-                    let l = nodes
-                        .leaves
-                        .get(cmd_line.last_view.0.0)
-                        .expect(&format!("lidx invalid:{}", cmd_line.last_view.0.0));
-                    (
-                        views.get(cmd_line.last_view.1).buf,
-                        cmd_line.last_view.1,
-                        cmd_line.last_view.0,
-                        l.parent,
-                    )
-                };
-                fn enter_normal(focus: &mut Focus, lidx: LeafIdx, cmd_line: &mut CmdLine) {
-                    queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
-                    cmd_line.cursor = 0;
-                    *focus = Focus::Leaf(lidx);
-                }
-                match cmd {
-                    Cmd::BufferList => {
-                        let comp: Box<dyn Component> = Box::new(BufferList {});
-                        *focus = Focus::Leaf(nodes.new_leaf(
-                            comp,
-                            nodes.roots[ROOT_OVERLAY],
-                            Some(Constraints {
-                                max_width: Some(20),
-                                max_height: Some(buffers.len() as u16 + 1),
-                                min_height: None,
-                                min_width: None,
-                            }),
-                            (None, None),
-                        ));
-                        queue!(stdout(), cursor::SetCursorStyle::SteadyBlock)?;
-                    }
-                    Cmd::Exec => match parse_cmd(cmd_line.input.clone()) {
-                        Ok(cmd) => {
-                            exec_cmd(cmd, cmd_line, nodes, focus, views, buffers)?;
-                        }
-                        Err(s) => return Err(EditorErr::Msg(s)),
-                    },
-                    Cmd::EnterNormal => {
-                        enter_normal(focus, lidx, cmd_line);
-                    }
-                    Cmd::Insert(c) => {
-                        cmd_line.insert(c);
-                    }
-                    Cmd::BackSpace => {
-                        cmd_line.backspace();
-                    }
-                    Cmd::MoveLeft => {
-                        cmd_line.cursor = cmd_line.cursor.saturating_sub(1);
-                    }
-                    Cmd::MoveRight => {
-                        cmd_line.cursor = cmd_line.cursor.saturating_add(1);
-                    }
-                    Cmd::Open(file) => {
-                        let view = views.get_mut(vidx);
-                        view.off = 0;
-                        view.cursor = 0;
-                        view.prefered_x = 0;
-                        let buffer = if let Some(f) = file {
-                            if let Some(b) = buffers.get_by_path(&f) {
-                                let buffer = buffers.get(*b);
-                                let line = buffer.buf.char_to_line(buffer.last_cursor);
-                                let line_start = buffer.buf.line_to_char(line);
-                                let col = buffer.last_cursor - line_start;
-                                view.cursor = buffer.last_cursor;
-                                view.prefered_x = col;
-                                view.off = buffer.last_off;
-                                *b
-                            } else {
-                                buffers.push(Buffer::new(Some(&f), 0)?)
-                            }
-                        } else {
-                            buffers.push(Buffer::new(None, 0)?)
-                        };
-                        view.buf = buffer;
-                        enter_normal(focus, lidx, cmd_line);
-                    }
-                    Cmd::Close(bidx, force) => {
-                        let view = views.get_mut(vidx);
-                        let mut bidx = { if let Some(idx) = bidx { idx } else { view.buf } };
-                        let curr_buffer = buffers.get(bidx);
-                        if bidx != SCRATCH {
-                            if curr_buffer.check_flag(Buffer::READ_ONLY) {
-                                return Err(EditorErr::ReadOnly(bidx));
-                            }
-                            if !curr_buffer.undo.is_empty() && force == false {
-                                return Err(EditorErr::Dirty(bidx));
-                            } else {
-                                if view.buf == bidx {
-                                    view.buf = SCRATCH;
-                                    cmd_line.input.clear();
-                                    view.off = 0;
-                                    view.cursor = 0;
-                                    view.prefered_x = 0;
-                                }
-                                buffers.remove(&mut bidx);
-                            }
-                        } else {
-                            return Err(EditorErr::Msg("will not close special buffer: 0".into()));
-                        }
-                        enter_normal(focus, lidx, cmd_line);
-                    }
-                    Cmd::ViewClose => {
-                        nodes.remove_child(parent, views, focus, NodeIdx::Leaf(lidx));
-                        let mut curr = NodeIdx::Split(*nodes.roots.get(ROOT_TEXT_VIEW).unwrap());
-                        let lidx = loop {
-                            match curr {
-                                NodeIdx::Split(s) => {
-                                    let Split {
-                                        children, focus: f, ..
-                                    } = nodes.splits.get(s.0).unwrap();
-                                    curr = *children.get(*f).unwrap();
-                                }
-                                NodeIdx::Leaf(l) => break l,
-                            }
-                        };
-                        *focus = Focus::Leaf(lidx);
-                        enter_normal(focus, lidx, cmd_line);
-                    }
-                    Cmd::Save(f) => {
-                        let buffer = buffers.get_mut(bidx);
-                        if buffer.check_flag(Buffer::READ_ONLY) {
-                            return Err(EditorErr::ReadOnly(bidx));
-                        }
-                        if buffer.check_flag(Buffer::SCRATCH) {
-                            return Err(EditorErr::Msg(format!(
-                                "cant save, buffer: {} is scratch",
-                                bidx.idx
-                            )));
-                        }
-                        if let Some(new) = f {
-                            buffer.save(Some(new))?;
-                            buffer.undo.clear();
-                            buffer.redo.clear();
-                        } else {
-                            if let Some(_) = &buffer.file {
-                                match buffer.save(None) {
-                                    Err(error) => return Err(EditorErr::Io(error)),
-                                    Ok(_) => {
-                                        buffer.undo.clear();
-                                        buffer.redo.clear();
-                                    }
-                                }
-                            } else {
-                                return Err(EditorErr::Msg("new file needs name".into()));
-                            }
-                        }
-                        enter_normal(focus, lidx, cmd_line);
-                    }
-                    Cmd::SwitchBuffer(idx) => {
-                        if idx.idx < buffers.len() {
-                            if buffers.get(idx).check_flag(Buffer::NON_NAVIGATABLE) {
-                                return Err(EditorErr::Msg(format!(
-                                    "buffer {} is non navigatable",
-                                    idx.idx
-                                )))?;
-                            }
-                            let view = views.get_mut(vidx);
-                            let buffer = buffers.get_mut(view.buf);
-                            buffer.last_off = view.off;
-                            buffer.last_cursor = view.cursor;
-                            let buffer = buffers.get_mut(idx);
-                            if buffer.buf.len_chars() == 0 {
-                                if let Some(p) = &buffer.file {
-                                    let file = File::open(p)?;
-                                    let reader = BufReader::new(file);
-                                    buffer.buf = Rope::from_reader(reader)?;
-                                }
-                            }
-                            view.buf = idx;
-                            view.cursor = buffer.last_cursor;
-                            view.off = buffer.last_off;
-                            let line = buffer.buf.char_to_line(buffer.last_cursor);
-                            let line_start = buffer.buf.line_to_char(line);
-                            let col = buffer.last_cursor - line_start;
-                            view.cursor = buffer.last_cursor;
-                            view.prefered_x = col;
-                            view.scroll(&nodes.leaves.get(lidx.0).unwrap().rect, buffer);
-                            enter_normal(focus, lidx, cmd_line);
-                        } else {
-                            return Err(EditorErr::InvalidBuffer);
-                        }
-                    }
-                    Cmd::Quit(force) => {
-                        if !force {
-                            let dirty: Vec<_> = buffers
-                                .iter()
-                                .enumerate()
-                                .filter(|(i, b)| !b.undo.is_empty() && *i != SCRATCH.idx)
-                                .map(|(i, _)| i)
-                                .collect();
-                            if !dirty.is_empty() {
-                                return Err(EditorErr::Msg(format!(
-                                    "cant quit dirty buffers: {:?}",
-                                    dirty
-                                )));
-                            }
-                        }
-                        return Err(EditorErr::Quit);
-                    }
-                    Cmd::SplitV => {
-                        if let Some(idx) = nodes
-                            .splits
-                            .get(parent.0)
-                            .unwrap()
-                            .children
-                            .iter()
-                            .position(|x| *x == NodeIdx::Leaf(lidx))
-                        {
-                            let (l, new_parent) = nodes.new_split(
-                                vidx,
-                                parent,
-                                Direction::Vertical,
-                                None,
-                                (None, None),
-                            );
-                            let vidx = views.push(View::new(SCRATCH));
-                            let comp: Box<dyn Component> = Box::new(vidx);
-                            nodes.new_leaf(comp, new_parent, None, (None, None));
-                            nodes
-                                .splits
-                                .get_mut(parent.0)
-                                .unwrap()
-                                .children
-                                .swap_remove(idx);
-                            enter_normal(focus, l, cmd_line);
-                            nodes.recalc(parent);
-                        }
-                    }
-                    Cmd::SplitH => {
-                        if let Some(idx) = nodes
-                            .splits
-                            .get(parent.0)
-                            .unwrap()
-                            .children
-                            .iter()
-                            .position(|x| *x == NodeIdx::Leaf(lidx))
-                        {
-                            let (l, new_parent) = nodes.new_split(
-                                vidx,
-                                parent,
-                                Direction::Horizontal,
-                                None,
-                                (None, None),
-                            );
-                            let vidx = views.push(View::new(SCRATCH));
-                            let comp: Box<dyn Component> = Box::new(vidx);
-                            nodes.new_leaf(comp, new_parent, None, (None, None));
-                            nodes
-                                .splits
-                                .get_mut(parent.0)
-                                .unwrap()
-                                .children
-                                .swap_remove(idx);
-                            enter_normal(focus, l, cmd_line);
-                            nodes.recalc(parent);
-                        }
-                    }
-                    Cmd::Split => {
-                        let vidx = views.push(View::new(SCRATCH));
-                        let comp: Box<dyn Component> = Box::new(vidx);
-                        nodes.new_leaf(comp, parent, None, (None, None));
-                        enter_normal(focus, lidx, cmd_line);
-                    }
-                    Cmd::Noop => {}
-                }
-                Ok(())
-            }
-            Ok(())
-        }
-        Focus::Leaf(lidx) => {
-            unsafe {
-                //UNSAFE but its fine probably :D
-                let l = nodes.leaves.get_unchecked_mut(lidx.0);
-                let mut comp = ptr::read(&l.comp);
-                let lidx = lidx.clone();
-                let r = comp.behaviour(key, focus, cmd_line, views, buffers, nodes);
-                ptr::write(&mut nodes.leaves.get_unchecked_mut(lidx.0).comp, comp);
-                r?
-            }
-            Ok(())
-        }
+    unsafe {
+        //UNSAFE but its fine probably :D
+        let l = nodes.leaves.get_unchecked_mut(focus.0);
+        let mut comp = ptr::read(&l.comp);
+        let lidx = focus.clone();
+        let r = comp.behaviour(key, focus, cmd_line, views, buffers, nodes);
+        ptr::write(&mut nodes.leaves.get_unchecked_mut(lidx.0).comp, comp);
+        r?
     }
+    Ok(())
 }
 
 const SCRATCH: BufferIdx = BufferIdx { idx: 0 };
+const CMDLINE: LeafIdx = LeafIdx(1);
 fn main() -> io::Result<()> {
     let mut views = Views::new();
     let mut buffers = Buffers::new();
     let mut nodes = Nodes::new();
     let (width, height) = terminal::size().unwrap();
-    let mut cmd_line = CmdLine::new(width, height - 1);
     let root = nodes.new_root(
         Rect {
             x: 0,
             y: 0,
-            height: height - 1,
-            width: width - 1,
+            height: height,
+            width: width,
             constraints: Constraints {
                 min_height: None,
                 max_height: None,
@@ -2789,15 +2894,15 @@ fn main() -> io::Result<()> {
             },
             anchors: (None, None),
         },
-        Direction::Vertical,
+        Direction::Horizontal,
     );
     nodes.new_root(
         //overlay ROOT DO NOT REMOVE
         Rect {
             x: 0,
             y: 0,
-            height: height - 1,
-            width: width - 1,
+            height: height,
+            width: width,
             constraints: Constraints {
                 min_height: None,
                 max_height: None,
@@ -2820,9 +2925,24 @@ fn main() -> io::Result<()> {
         };
         let vidx = views.push(View::new(bidx));
         let comp: Box<dyn Component> = Box::new(vidx);
-        let l = nodes.new_leaf(comp, root, None, (None, None));
-        Focus::Leaf(l)
+        nodes
+            .new_split(comp, root, Direction::Horizontal, None, (None, None))
+            .0
     };
+
+    let mut cmd_line = CmdLine::new();
+    let comp: Box<dyn Component> = Box::new(CmdLineDummy());
+    nodes.new_leaf(
+        comp,
+        root,
+        Some(Constraints {
+            max_width: Some(Constraint::Relative(1)),
+            min_width: Some(Constraint::Relative(1)),
+            min_height: None,
+            max_height: Some(Constraint::Absolute(1)),
+        }),
+        (Some(Anchor::Absolute(0)), Some(Anchor::Relative(1))),
+    );
     enable_raw_mode()?;
     execute!(
         stdout(),
@@ -2901,7 +3021,7 @@ fn main() -> io::Result<()> {
                                 }
                             }
                         };
-                        focus = Focus::Leaf(l);
+                        focus = l;
                         cmd_line.error = false;
                         queue!(stdout(), SetCursorStyle::SteadyBlock)?;
                     }
@@ -2913,19 +3033,6 @@ fn main() -> io::Result<()> {
                 stdout().flush()?;
             }
             Event::Resize(width, height) => {
-                cmd_line.rect = Rect {
-                    x: 0,
-                    y: height - 1,
-                    height: 1,
-                    width,
-                    constraints: Constraints {
-                        min_height: Some(1),
-                        max_height: Some(1),
-                        min_width: Some(width),
-                        max_width: Some(width),
-                    },
-                    anchors: (None, None),
-                };
                 old = ScreenBuffer {
                     width,
                     height,
@@ -2953,8 +3060,8 @@ fn main() -> io::Result<()> {
                 };
                 for r in nodes.roots.clone() {
                     let root = nodes.splits.get_mut(r.0).unwrap();
-                    root.rect.width = width - 1;
-                    root.rect.height = height - 1;
+                    root.rect.width = width;
+                    root.rect.height = height;
                     nodes.recalc(r);
                 }
                 queue!(stdout(), cursor::Hide)?;
