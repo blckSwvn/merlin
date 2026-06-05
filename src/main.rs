@@ -261,6 +261,7 @@ struct Constraints {
 enum Constraint {
     Relative(u16), //fraction aka width/x not x%
     Absolute(u16),
+    Negative(u16),
 }
 
 #[derive(Clone, Copy)]
@@ -397,7 +398,6 @@ impl CmdLine {
         self.input.clear();
         self.cursor = 0;
         *focus = CMDLINE;
-        queue!(stdout(), cursor::SetCursorStyle::SteadyBar).unwrap();
     }
     fn insert(&mut self, c: char) {
         if self.error {
@@ -440,27 +440,30 @@ impl Component for CmdLineDummy {
         views: &Views,
         buffers: &Buffers,
         cmd_line: &CmdLine,
-    ) -> (u16, u16) {
-        (rect.x + cmd_line.cursor as u16 + 1, rect.y)
+    ) -> (u16, u16, SetCursorStyle) {
+        (
+            rect.x + cmd_line.cursor as u16 + 1,
+            rect.y,
+            SetCursorStyle::SteadyBar,
+        )
     }
     fn sketch(
         &self,
         rect: &Rect,
-        views: &Views,
-        buffers: &Buffers,
+        _views: &Views,
+        _buffers: &Buffers,
         cmd_line: &CmdLine,
         screen: &mut ScreenBuffer,
     ) {
         screen.set_string_xy(rect.x, rect.y, &" ".repeat(rect.width as usize), FG, BG);
         let s = {
+            if cmd_line.input.is_empty() {
+                return;
+            }
             if cmd_line.error {
                 format!("{}", cmd_line.input)
             } else {
-                if !cmd_line.input.is_empty() {
-                    format!(":{}", cmd_line.input)
-                } else {
-                    return;
-                }
+                format!(":{}", cmd_line.input)
             }
         };
         screen.set_string_xy(rect.x, rect.y, &s, FG, BG);
@@ -604,7 +607,6 @@ impl Component for CmdLineDummy {
                 )
             };
             fn enter_normal(focus: &mut LeafIdx, lidx: LeafIdx, cmd_line: &mut CmdLine) {
-                queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
                 cmd_line.cursor = 0;
                 *focus = lidx;
             }
@@ -622,7 +624,6 @@ impl Component for CmdLineDummy {
                         }),
                         (None, None),
                     );
-                    queue!(stdout(), cursor::SetCursorStyle::SteadyBlock)?;
                 }
                 Cmd::Exec => match parse_cmd(cmd_line.input.clone()) {
                     Ok(cmd) => {
@@ -933,7 +934,7 @@ trait Component {
         views: &Views,
         buffers: &Buffers,
         cmd_line: &CmdLine,
-    ) -> (u16, u16);
+    ) -> (u16, u16, SetCursorStyle);
     fn behaviour(
         &mut self,
         key: KeyEvent,
@@ -1135,12 +1136,12 @@ impl Component for ViewIdx {
         views: &Views,
         buffers: &Buffers,
         cmd_line: &CmdLine,
-    ) -> (u16, u16) {
+    ) -> (u16, u16, SetCursorStyle) {
         let v = views.get(*self);
         let b = buffers.get(v.buf);
         let width = rect.width.saturating_sub(4) as usize;
         if width == 0 {
-            return (rect.x + 5, rect.y);
+            return (rect.x + 5, rect.y, SetCursorStyle::SteadyBar);
         }
         let line = b.buf.char_to_line(v.cursor);
         let line_start = b.buf.line_to_char(line);
@@ -1155,7 +1156,24 @@ impl Component for ViewIdx {
             }
         }
         nested_y += y;
-        (rect.x + x as u16 + 5, rect.y + nested_y as u16)
+        match v.mode {
+            Mode::Normal => (
+                rect.x + x as u16 + 5,
+                rect.y + nested_y as u16,
+                SetCursorStyle::SteadyBlock,
+            ),
+
+            Mode::Insert => (
+                rect.x + x as u16 + 5,
+                rect.y + nested_y as u16,
+                SetCursorStyle::SteadyBar,
+            ),
+            Mode::Visual => (
+                rect.x + x as u16 + 5,
+                rect.y + nested_y as u16,
+                SetCursorStyle::SteadyUnderScore,
+            ),
+        }
     }
     fn behaviour(
         &mut self,
@@ -1250,7 +1268,6 @@ impl Component for ViewIdx {
         ) -> Result<(), EditorErr> {
             fn enter_normal(view: &mut View, cmd_line: &mut CmdLine) {
                 view.mode = Mode::Normal;
-                queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
                 cmd_line.cursor = 0;
             }
             let (bidx, lidx) = {
@@ -1273,7 +1290,6 @@ impl Component for ViewIdx {
                     let v = views.get_mut(vidx);
                     v.mode = Mode::Visual;
                     v.selection = Some((v.cursor, v.cursor));
-                    queue!(stdout(), cursor::SetCursorStyle::SteadyUnderScore)?;
                 }
                 Cmd::MoveSelectionUp => {
                     let buffer = buffers.get(bidx);
@@ -1406,7 +1422,6 @@ impl Component for ViewIdx {
                     cmd_line.enter_cmd_mode(vidx, focus, views, lidx);
                 }
                 Cmd::EnterInsert => {
-                    queue!(stdout(), cursor::SetCursorStyle::SteadyBar)?;
                     views.get_mut(vidx).mode = Mode::Insert;
                 }
                 Cmd::EnterNormal => {
@@ -1852,8 +1867,8 @@ impl Component for BufferList {
         _views: &Views,
         _buffers: &Buffers,
         _cmd_line: &CmdLine,
-    ) -> (u16, u16) {
-        (rect.x, rect.y)
+    ) -> (u16, u16, SetCursorStyle) {
+        (rect.x, rect.y, SetCursorStyle::SteadyBlock)
     }
     fn behaviour(
         &mut self,
@@ -1907,9 +1922,6 @@ enum Direction {
     Vertical,
 }
 
-//index into nodes.roots
-const ROOT_OVERLAY: usize = 1;
-const ROOT_TEXT_VIEW: usize = 0;
 struct Nodes {
     roots: Vec<SplitIdx>,
     splits: Vec<Split>,
@@ -1953,6 +1965,17 @@ impl Nodes {
     }
 
     fn new_root(&mut self, rect: Rect, direction: Direction) -> SplitIdx {
+        let mut rect = rect;
+        match rect.constraints.max_height {
+            None => {}
+            Some(s) => match s {
+                Constraint::Relative(r) => {}
+                Constraint::Negative(n) => {
+                    rect.height = rect.height.saturating_sub(n);
+                }
+                Constraint::Absolute(a) => {}
+            },
+        }
         let new_root = self.push_branch(Split {
             parent: None,
             children: vec![],
@@ -2135,6 +2158,7 @@ impl Nodes {
                                             min = a;
                                             size_left -= a;
                                         }
+                                        Constraint::Negative(n) => {}
                                     }
                                 }
                             }
@@ -2146,6 +2170,7 @@ impl Nodes {
                                             min = a;
                                             size_left -= a;
                                         }
+                                        Constraint::Negative(n) => {}
                                     }
                                 }
                             }
@@ -2164,6 +2189,7 @@ impl Nodes {
                                             min = a;
                                             size_left -= a;
                                         }
+                                        Constraint::Negative(n) => {}
                                     }
                                 }
                             }
@@ -2175,6 +2201,7 @@ impl Nodes {
                                             min = a;
                                             size_left -= a;
                                         }
+                                        Constraint::Negative(n) => {}
                                     }
                                 }
                             }
@@ -2200,6 +2227,7 @@ impl Nodes {
                                         Some(s) => match s {
                                             Constraint::Relative(r) => rect.width / r,
                                             Constraint::Absolute(a) => a,
+                                            Constraint::Negative(n) => rect.width.saturating_sub(n),
                                         },
                                         none => rect.width,
                                     }
@@ -2209,6 +2237,7 @@ impl Nodes {
                                         Some(s) => match s {
                                             Constraint::Relative(r) => rect.width / r,
                                             Constraint::Absolute(a) => a,
+                                            Constraint::Negative(n) => rect.width.saturating_sub(n),
                                         },
                                         None => rect.width,
                                     }
@@ -2221,6 +2250,9 @@ impl Nodes {
                                         Some(s) => match s {
                                             Constraint::Relative(r) => rect.height / r,
                                             Constraint::Absolute(a) => a,
+                                            Constraint::Negative(n) => {
+                                                rect.height.saturating_sub(n)
+                                            }
                                         },
                                         None => rect.height,
                                     }
@@ -2231,6 +2263,9 @@ impl Nodes {
                                         Some(s) => match s {
                                             Constraint::Relative(r) => rect.height / r,
                                             Constraint::Absolute(a) => a,
+                                            Constraint::Negative(n) => {
+                                                rect.height.saturating_sub(n)
+                                            }
                                         },
                                         None => rect.height,
                                     }
@@ -2270,6 +2305,7 @@ impl Nodes {
                             Some(h) => match h {
                                 Constraint::Relative(r) => rect.height / r,
                                 Constraint::Absolute(a) => a,
+                                Constraint::Negative(n) => rect.height.saturating_sub(n),
                             },
                             None => rect.height,
                         };
@@ -2328,6 +2364,7 @@ impl Nodes {
                             Some(s) => match s {
                                 Constraint::Relative(r) => rect.height / r,
                                 Constraint::Absolute(a) => a,
+                                Constraint::Negative(n) => rect.height.saturating_sub(n),
                             },
                             None => rect.height,
                         };
@@ -2345,6 +2382,7 @@ impl Nodes {
                             Some(s) => match s {
                                 Constraint::Relative(r) => rect.width / r,
                                 Constraint::Absolute(a) => a,
+                                Constraint::Negative(n) => rect.width.saturating_sub(n),
                             },
                             None => rect.width,
                         };
@@ -2411,6 +2449,7 @@ impl Nodes {
                             Some(s) => match s {
                                 Constraint::Relative(r) => rect.width / r,
                                 Constraint::Absolute(a) => a,
+                                Constraint::Negative(n) => rect.width.saturating_sub(n),
                             },
                             None => rect.width,
                         };
@@ -2505,8 +2544,8 @@ impl Nodes {
         }
         new.print(old)?;
         let Leaf { comp, rect, .. } = self.leaves.get(focus.0).unwrap();
-        let (x, y) = comp.cursor_xy(rect, views, buffers, cmd_line).clone();
-        queue!(stdout(), MoveTo(x, y))?;
+        let (x, y, c) = comp.cursor_xy(rect, views, buffers, cmd_line).clone();
+        queue!(stdout(), MoveTo(x, y), c)?;
         fn sketch(
             nodes: &Nodes,
             nidx: NodeIdx,
@@ -2875,12 +2914,32 @@ fn key_to_exec(
 
 const SCRATCH: BufferIdx = BufferIdx { idx: 0 };
 const CMDLINE: LeafIdx = LeafIdx(1);
+//index into nodes.roots
+const ROOT_TEXT_VIEW: usize = 0;
+const ROOT_CMD_LINE: usize = 1;
+const ROOT_OVERLAY: usize = 2;
 fn main() -> io::Result<()> {
     let mut views = Views::new();
     let mut buffers = Buffers::new();
     let mut nodes = Nodes::new();
     let (width, height) = terminal::size().unwrap();
     let root = nodes.new_root(
+        Rect {
+            x: 0,
+            y: 0,
+            height: height,
+            width: width,
+            constraints: Constraints {
+                min_height: None,
+                max_height: Some(Constraint::Negative(1)),
+                min_width: None,
+                max_width: None,
+            },
+            anchors: (None, None),
+        },
+        Direction::Vertical,
+    );
+    nodes.new_root(
         Rect {
             x: 0,
             y: 0,
@@ -2896,8 +2955,7 @@ fn main() -> io::Result<()> {
         },
         Direction::Horizontal,
     );
-    nodes.new_root(
-        //overlay ROOT DO NOT REMOVE
+    let cmd_root = nodes.new_root(
         Rect {
             x: 0,
             y: 0,
@@ -2925,16 +2983,14 @@ fn main() -> io::Result<()> {
         };
         let vidx = views.push(View::new(bidx));
         let comp: Box<dyn Component> = Box::new(vidx);
-        nodes
-            .new_split(comp, root, Direction::Horizontal, None, (None, None))
-            .0
+        nodes.new_leaf(comp, root, None, (None, None))
     };
 
     let mut cmd_line = CmdLine::new();
     let comp: Box<dyn Component> = Box::new(CmdLineDummy());
     nodes.new_leaf(
         comp,
-        root,
+        cmd_root,
         Some(Constraints {
             max_width: Some(Constraint::Relative(1)),
             min_width: Some(Constraint::Relative(1)),
@@ -2944,11 +3000,7 @@ fn main() -> io::Result<()> {
         (Some(Anchor::Absolute(0)), Some(Anchor::Relative(1))),
     );
     enable_raw_mode()?;
-    execute!(
-        stdout(),
-        terminal::EnterAlternateScreen,
-        cursor::SetCursorStyle::SteadyBlock
-    )?;
+    execute!(stdout(), terminal::EnterAlternateScreen)?;
 
     //inital draw
     let mut old = ScreenBuffer {
@@ -3023,7 +3075,6 @@ fn main() -> io::Result<()> {
                         };
                         focus = l;
                         cmd_line.error = false;
-                        queue!(stdout(), SetCursorStyle::SteadyBlock)?;
                     }
                     Ok(_) => {}
                 }
