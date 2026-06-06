@@ -2145,55 +2145,32 @@ impl Nodes {
             };
             let mut resize: Vec<(u16, NodeIdx)> = vec![]; //main axis either width or height
             for n in children.iter() {
-                match n {
-                    NodeIdx::Leaf(l) => {
-                        let l = self.leaves.get(l.0).unwrap();
-                        let mut min = 0;
-                        match direction {
-                            Direction::Horizontal => match l.rect.constraints.min_height {
-                                Constraint::Relative(r) => {}
-                                Constraint::Flex => {}
-                                Constraint::Negative(n) => {}
-                                Constraint::Absolute(a) => {}
-                            },
-                            Direction::Vertical => match l.rect.constraints.min_width {
-                                Constraint::Relative(r) => {}
-                                Constraint::Absolute(a) => {
-                                    min = a;
-                                    size_left -= a;
-                                }
-                                Constraint::Negative(n) => {}
-                                Constraint::Flex => {}
-                            },
+                let mut min = 0;
+                let r = match n {
+                    NodeIdx::Leaf(l) => self.leaves.get(l.0).unwrap().rect,
+                    NodeIdx::Split(s) => self.splits.get(s.0).unwrap().rect,
+                };
+                match direction {
+                    Direction::Horizontal => match r.constraints.min_height {
+                        Constraint::Relative(r) => {}
+                        Constraint::Flex => {}
+                        Constraint::Negative(n) => {}
+                        Constraint::Absolute(a) => {
+                            min = a;
+                            size_left -= a;
                         }
-                        resize.push((min, *n));
-                    }
-                    NodeIdx::Split(s) => {
-                        let s = self.splits.get(s.0).unwrap();
-                        let mut min = 0;
-                        match direction {
-                            Direction::Horizontal => match s.rect.constraints.min_height {
-                                Constraint::Relative(r) => {}
-                                Constraint::Absolute(a) => {
-                                    min = a;
-                                    size_left -= a;
-                                }
-                                Constraint::Negative(n) => {}
-                                Constraint::Flex => {}
-                            },
-                            Direction::Vertical => match s.rect.constraints.min_width {
-                                Constraint::Relative(r) => {}
-                                Constraint::Absolute(a) => {
-                                    min = a;
-                                    size_left -= a;
-                                }
-                                Constraint::Negative(n) => {}
-                                Constraint::Flex => {}
-                            },
+                    },
+                    Direction::Vertical => match r.constraints.min_width {
+                        Constraint::Relative(r) => {}
+                        Constraint::Absolute(a) => {
+                            min = a;
+                            size_left -= a;
                         }
-                        resize.push((min, *n));
-                    }
+                        Constraint::Negative(n) => {}
+                        Constraint::Flex => {}
+                    },
                 }
+                resize.push((min, *n));
             }
 
             let mut non_maxed: Vec<usize> = (0..resize.len()).collect();
@@ -2205,44 +2182,22 @@ impl Nodes {
                     let idx = non_maxed[i];
                     let (s, n) = &mut resize[idx];
                     let max = {
+                        let r = match n {
+                            NodeIdx::Leaf(l) => self.leaves.get(l.0).unwrap().rect,
+                            NodeIdx::Split(s) => self.splits.get(s.0).unwrap().rect,
+                        };
                         match direction {
-                            Direction::Vertical => match n {
-                                NodeIdx::Leaf(l) => {
-                                    match self.leaves.get(l.0).unwrap().rect.constraints.max_width {
-                                        Constraint::Relative(r) => rect.width / r,
-                                        Constraint::Absolute(a) => a,
-                                        Constraint::Negative(n) => rect.width.saturating_sub(n),
-                                        Constraint::Flex => rect.width,
-                                    }
-                                }
-                                NodeIdx::Split(s) => {
-                                    match self.splits.get(s.0).unwrap().rect.constraints.max_width {
-                                        Constraint::Relative(r) => rect.width / r,
-                                        Constraint::Absolute(a) => a,
-                                        Constraint::Negative(n) => rect.width.saturating_sub(n),
-                                        Constraint::Flex => rect.width,
-                                    }
-                                }
+                            Direction::Vertical => match r.constraints.max_width {
+                                Constraint::Relative(r) => rect.width / r,
+                                Constraint::Absolute(a) => a,
+                                Constraint::Negative(n) => rect.width.saturating_sub(n),
+                                Constraint::Flex => rect.width,
                             },
-                            Direction::Horizontal => match n {
-                                NodeIdx::Leaf(l) => {
-                                    match self.leaves.get(l.0).unwrap().rect.constraints.max_height
-                                    {
-                                        Constraint::Relative(r) => rect.height / r,
-                                        Constraint::Absolute(a) => a,
-                                        Constraint::Negative(n) => rect.height.saturating_sub(n),
-                                        Constraint::Flex => rect.height,
-                                    }
-                                }
-                                NodeIdx::Split(s) => {
-                                    match self.splits.get(s.0).unwrap().rect.constraints.max_height
-                                    {
-                                        Constraint::Relative(r) => rect.height / r,
-                                        Constraint::Absolute(a) => a,
-                                        Constraint::Negative(n) => rect.height.saturating_sub(n),
-                                        Constraint::Flex => rect.height,
-                                    }
-                                }
+                            Direction::Horizontal => match r.constraints.max_height {
+                                Constraint::Relative(r) => rect.height / r,
+                                Constraint::Absolute(a) => a,
+                                Constraint::Negative(n) => rect.height.saturating_sub(n),
+                                Constraint::Flex => rect.height,
                             },
                         }
                     };
@@ -2920,7 +2875,7 @@ fn main() -> io::Result<()> {
         },
         Direction::Horizontal,
     );
-    let cmd_root = nodes.new_root(
+    nodes.new_root(
         Rect {
             x: 0,
             y: 0,
