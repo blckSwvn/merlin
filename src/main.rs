@@ -251,14 +251,15 @@ impl Views {
 
 #[derive(Clone, Copy)]
 struct Constraints {
-    min_height: Option<Constraint>,
-    max_height: Option<Constraint>,
-    min_width: Option<Constraint>,
-    max_width: Option<Constraint>,
+    min_height: Constraint,
+    max_height: Constraint,
+    min_width: Constraint,
+    max_width: Constraint,
 }
 
 #[derive(Clone, Copy)]
 enum Constraint {
+    Flex,          //default
     Relative(u16), //fraction aka width/x not x%
     Absolute(u16),
     Negative(u16),
@@ -617,10 +618,11 @@ impl Component for CmdLineDummy {
                         comp,
                         nodes.roots[ROOT_OVERLAY],
                         Some(Constraints {
-                            max_width: Some(Constraint::Absolute(20)),
-                            max_height: Some(Constraint::Absolute(buffers.len() as u16 + 1)),
-                            min_height: None,
-                            min_width: None,
+                            // max_width: Constraint::Flex,
+                            max_width: Constraint::Absolute(20),
+                            max_height: Constraint::Absolute(buffers.len() as u16 + 2),
+                            min_height: Constraint::Flex,
+                            min_width: Constraint::Flex,
                         }),
                         (None, None),
                     );
@@ -958,7 +960,8 @@ impl Component for ViewIdx {
         let v = views.get(*self);
         {
             let blank = " ".repeat(rect.width as usize);
-            for row in 0..rect.height.saturating_sub(1) {
+            for row in 0..rect.height {
+                //clear text area, line num area, status line
                 screen.set_string_xy(rect.x, rect.y + row, &blank, FG, BG);
             }
         }
@@ -970,7 +973,7 @@ impl Component for ViewIdx {
             let height = rect.height.saturating_sub(1) as usize;
             let mut row = 0;
             let mut line_idx = view.off;
-            while row < height {
+            while row <= height {
                 let Some(line) = buffers.get(view.buf).buf.get_line(line_idx) else {
                     break;
                 };
@@ -1045,8 +1048,7 @@ impl Component for ViewIdx {
                 Mode::Visual => "VIS",
             };
             let s = format!("{mode_str} {} {path}", view.buf.idx);
-            let s = format!("{:width$}", s, width = rect.width as usize);
-            screen.set_string_xy(rect.x, rect.y + rect.height.saturating_sub(1), &s, FG, BG);
+            screen.set_string_xy(rect.x, rect.y + rect.height - 1, &s, FG, BG);
         }
         fn selection_sketch(
             view: &View,
@@ -1747,7 +1749,7 @@ fn sketch_border(
         },
     );
     screen.set_cell_xy(
-        r.x + r.width,
+        r.x + r.width - 1,
         r.y,
         Cell {
             c: upper_right,
@@ -1757,7 +1759,7 @@ fn sketch_border(
     );
     screen.set_cell_xy(
         r.x,
-        r.y + r.height,
+        r.y + r.height - 1,
         Cell {
             c: bottom_left,
             fg,
@@ -1765,8 +1767,8 @@ fn sketch_border(
         },
     );
     screen.set_cell_xy(
-        r.x + r.width,
-        r.y + r.height,
+        r.x + r.width - 1,
+        r.y + r.height - 1,
         Cell {
             c: bottom_right,
             fg,
@@ -1776,18 +1778,18 @@ fn sketch_border(
     screen.set_string_xy(
         r.x + 1,
         r.y,
-        &horizontal.to_string().repeat((r.width - 1) as usize),
+        &horizontal.to_string().repeat((r.width - 2) as usize),
         fg,
         bg,
     );
     screen.set_string_xy(
         r.x + 1,
-        r.y + r.height,
-        &horizontal.to_string().repeat((r.width - 1) as usize),
+        r.y + r.height - 1,
+        &horizontal.to_string().repeat((r.width - 2) as usize),
         fg,
         bg,
     );
-    for y in 1..r.height {
+    for y in 1..r.height - 1 {
         screen.set_cell_xy(
             r.x,
             y + r.y,
@@ -1798,7 +1800,7 @@ fn sketch_border(
             },
         );
         screen.set_cell_xy(
-            r.x + r.width,
+            r.x + r.width - 1,
             y + r.y,
             Cell {
                 c: vertical,
@@ -1831,12 +1833,12 @@ impl Component for BufferList {
         };
 
         let s = format!("{} {} {}", 0, "SCRATCH", dirty);
-        let s = format!("{:<width$}", s, width = r.width as usize + 1);
+        let s = format!("{:<width$}", s, width = r.width as usize);
 
         screen.set_string_xy(r.x, r.y, &s, FG, BG);
 
-        let empty = &" ".repeat((r.width + 1) as usize);
-        for y in r.y..r.y + r.height {
+        let empty = &" ".repeat((r.width) as usize);
+        for y in r.y..r.y + r.height - 1 {
             if y as usize > buffers.data.len() - 1 {
                 screen.set_string_xy(r.x, y + 1, empty, FG, BG);
                 continue;
@@ -1857,7 +1859,7 @@ impl Component for BufferList {
             };
 
             let s = format!("{} {} {}", y, file_path, dirty);
-            let s = format!("{:<width$}", s, width = (r.width + 1) as usize);
+            let s = format!("{:<width$}", s, width = (r.width) as usize);
             screen.set_string_xy(r.x, y + 1, &s, FG, BG);
         }
     }
@@ -1967,14 +1969,12 @@ impl Nodes {
     fn new_root(&mut self, rect: Rect, direction: Direction) -> SplitIdx {
         let mut rect = rect;
         match rect.constraints.max_height {
-            None => {}
-            Some(s) => match s {
-                Constraint::Relative(r) => {}
-                Constraint::Negative(n) => {
-                    rect.height = rect.height.saturating_sub(n);
-                }
-                Constraint::Absolute(a) => {}
-            },
+            Constraint::Flex => {}
+            Constraint::Relative(r) => {}
+            Constraint::Negative(n) => {
+                rect.height = rect.height.saturating_sub(n);
+            }
+            Constraint::Absolute(a) => {}
         }
         let new_root = self.push_branch(Split {
             parent: None,
@@ -1999,10 +1999,10 @@ impl Nodes {
                 c
             } else {
                 Constraints {
-                    min_height: None,
-                    max_height: None,
-                    min_width: None,
-                    max_width: None,
+                    min_height: Constraint::Flex,
+                    max_height: Constraint::Flex,
+                    min_width: Constraint::Flex,
+                    max_width: Constraint::Flex,
                 }
             }
         };
@@ -2034,15 +2034,15 @@ impl Nodes {
         constraint: Option<Constraints>,
         anchors: (Option<Anchor>, Option<Anchor>),
     ) -> LeafIdx {
-        let constraint = {
+        let constraints = {
             if let Some(c) = constraint {
                 c
             } else {
                 Constraints {
-                    min_width: None,
-                    min_height: None,
-                    max_width: None,
-                    max_height: None,
+                    min_width: Constraint::Flex,
+                    min_height: Constraint::Flex,
+                    max_width: Constraint::Flex,
+                    max_height: Constraint::Flex,
                 }
             }
         };
@@ -2054,7 +2054,7 @@ impl Nodes {
                 y: 0,
                 height: 0,
                 width: 0,
-                constraints: constraint,
+                constraints,
                 anchors,
             },
         });
@@ -2150,30 +2150,21 @@ impl Nodes {
                         let l = self.leaves.get(l.0).unwrap();
                         let mut min = 0;
                         match direction {
-                            Direction::Horizontal => {
-                                if let Some(h) = l.rect.constraints.min_height {
-                                    match h {
-                                        Constraint::Relative(r) => {}
-                                        Constraint::Absolute(a) => {
-                                            min = a;
-                                            size_left -= a;
-                                        }
-                                        Constraint::Negative(n) => {}
-                                    }
+                            Direction::Horizontal => match l.rect.constraints.min_height {
+                                Constraint::Relative(r) => {}
+                                Constraint::Flex => {}
+                                Constraint::Negative(n) => {}
+                                Constraint::Absolute(a) => {}
+                            },
+                            Direction::Vertical => match l.rect.constraints.min_width {
+                                Constraint::Relative(r) => {}
+                                Constraint::Absolute(a) => {
+                                    min = a;
+                                    size_left -= a;
                                 }
-                            }
-                            Direction::Vertical => {
-                                if let Some(w) = l.rect.constraints.min_width {
-                                    match w {
-                                        Constraint::Relative(r) => {}
-                                        Constraint::Absolute(a) => {
-                                            min = a;
-                                            size_left -= a;
-                                        }
-                                        Constraint::Negative(n) => {}
-                                    }
-                                }
-                            }
+                                Constraint::Negative(n) => {}
+                                Constraint::Flex => {}
+                            },
                         }
                         resize.push((min, *n));
                     }
@@ -2181,30 +2172,24 @@ impl Nodes {
                         let s = self.splits.get(s.0).unwrap();
                         let mut min = 0;
                         match direction {
-                            Direction::Horizontal => {
-                                if let Some(h) = s.rect.constraints.min_height {
-                                    match h {
-                                        Constraint::Relative(r) => {}
-                                        Constraint::Absolute(a) => {
-                                            min = a;
-                                            size_left -= a;
-                                        }
-                                        Constraint::Negative(n) => {}
-                                    }
+                            Direction::Horizontal => match s.rect.constraints.min_height {
+                                Constraint::Relative(r) => {}
+                                Constraint::Absolute(a) => {
+                                    min = a;
+                                    size_left -= a;
                                 }
-                            }
-                            Direction::Vertical => {
-                                if let Some(w) = s.rect.constraints.min_width {
-                                    match w {
-                                        Constraint::Relative(r) => {}
-                                        Constraint::Absolute(a) => {
-                                            min = a;
-                                            size_left -= a;
-                                        }
-                                        Constraint::Negative(n) => {}
-                                    }
+                                Constraint::Negative(n) => {}
+                                Constraint::Flex => {}
+                            },
+                            Direction::Vertical => match s.rect.constraints.min_width {
+                                Constraint::Relative(r) => {}
+                                Constraint::Absolute(a) => {
+                                    min = a;
+                                    size_left -= a;
                                 }
-                            }
+                                Constraint::Negative(n) => {}
+                                Constraint::Flex => {}
+                            },
                         }
                         resize.push((min, *n));
                     }
@@ -2224,22 +2209,18 @@ impl Nodes {
                             Direction::Vertical => match n {
                                 NodeIdx::Leaf(l) => {
                                     match self.leaves.get(l.0).unwrap().rect.constraints.max_width {
-                                        Some(s) => match s {
-                                            Constraint::Relative(r) => rect.width / r,
-                                            Constraint::Absolute(a) => a,
-                                            Constraint::Negative(n) => rect.width.saturating_sub(n),
-                                        },
-                                        none => rect.width,
+                                        Constraint::Relative(r) => rect.width / r,
+                                        Constraint::Absolute(a) => a,
+                                        Constraint::Negative(n) => rect.width.saturating_sub(n),
+                                        Constraint::Flex => rect.width,
                                     }
                                 }
                                 NodeIdx::Split(s) => {
                                     match self.splits.get(s.0).unwrap().rect.constraints.max_width {
-                                        Some(s) => match s {
-                                            Constraint::Relative(r) => rect.width / r,
-                                            Constraint::Absolute(a) => a,
-                                            Constraint::Negative(n) => rect.width.saturating_sub(n),
-                                        },
-                                        None => rect.width,
+                                        Constraint::Relative(r) => rect.width / r,
+                                        Constraint::Absolute(a) => a,
+                                        Constraint::Negative(n) => rect.width.saturating_sub(n),
+                                        Constraint::Flex => rect.width,
                                     }
                                 }
                             },
@@ -2247,27 +2228,19 @@ impl Nodes {
                                 NodeIdx::Leaf(l) => {
                                     match self.leaves.get(l.0).unwrap().rect.constraints.max_height
                                     {
-                                        Some(s) => match s {
-                                            Constraint::Relative(r) => rect.height / r,
-                                            Constraint::Absolute(a) => a,
-                                            Constraint::Negative(n) => {
-                                                rect.height.saturating_sub(n)
-                                            }
-                                        },
-                                        None => rect.height,
+                                        Constraint::Relative(r) => rect.height / r,
+                                        Constraint::Absolute(a) => a,
+                                        Constraint::Negative(n) => rect.height.saturating_sub(n),
+                                        Constraint::Flex => rect.height,
                                     }
                                 }
                                 NodeIdx::Split(s) => {
                                     match self.splits.get(s.0).unwrap().rect.constraints.max_height
                                     {
-                                        Some(s) => match s {
-                                            Constraint::Relative(r) => rect.height / r,
-                                            Constraint::Absolute(a) => a,
-                                            Constraint::Negative(n) => {
-                                                rect.height.saturating_sub(n)
-                                            }
-                                        },
-                                        None => rect.height,
+                                        Constraint::Relative(r) => rect.height / r,
+                                        Constraint::Absolute(a) => a,
+                                        Constraint::Negative(n) => rect.height.saturating_sub(n),
+                                        Constraint::Flex => rect.height,
                                     }
                                 }
                             },
@@ -2302,12 +2275,10 @@ impl Nodes {
                         l.rect.width = len;
                         x += l.rect.width;
                         l.rect.height = match l.rect.constraints.max_height {
-                            Some(h) => match h {
-                                Constraint::Relative(r) => rect.height / r,
-                                Constraint::Absolute(a) => a,
-                                Constraint::Negative(n) => rect.height.saturating_sub(n),
-                            },
-                            None => rect.height,
+                            Constraint::Relative(r) => rect.height / r,
+                            Constraint::Absolute(a) => a,
+                            Constraint::Negative(n) => rect.height.saturating_sub(n),
+                            Constraint::Flex => rect.height,
                         };
                         if let Some(x) = l.rect.anchors.0 {
                             match x {
@@ -2361,12 +2332,10 @@ impl Nodes {
                         s.rect.width = len;
                         x += s.rect.width;
                         s.rect.height = match s.rect.constraints.max_height {
-                            Some(s) => match s {
-                                Constraint::Relative(r) => rect.height / r,
-                                Constraint::Absolute(a) => a,
-                                Constraint::Negative(n) => rect.height.saturating_sub(n),
-                            },
-                            None => rect.height,
+                            Constraint::Relative(r) => rect.height / r,
+                            Constraint::Absolute(a) => a,
+                            Constraint::Negative(n) => rect.height.saturating_sub(n),
+                            Constraint::Flex => rect.height,
                         };
                         self.recalc(sidx);
                     }
@@ -2379,12 +2348,10 @@ impl Nodes {
                         l.rect.height = len;
                         y += l.rect.height;
                         l.rect.width = match l.rect.constraints.max_width {
-                            Some(s) => match s {
-                                Constraint::Relative(r) => rect.width / r,
-                                Constraint::Absolute(a) => a,
-                                Constraint::Negative(n) => rect.width.saturating_sub(n),
-                            },
-                            None => rect.width,
+                            Constraint::Flex => rect.width,
+                            Constraint::Relative(r) => rect.width / r,
+                            Constraint::Absolute(a) => a,
+                            Constraint::Negative(n) => rect.width.saturating_sub(n),
                         };
                         if let Some(x) = l.rect.anchors.0 {
                             match x {
@@ -2446,12 +2413,10 @@ impl Nodes {
                         s.rect.height = len;
                         y += s.rect.height;
                         s.rect.width = match s.rect.constraints.max_width {
-                            Some(s) => match s {
-                                Constraint::Relative(r) => rect.width / r,
-                                Constraint::Absolute(a) => a,
-                                Constraint::Negative(n) => rect.width.saturating_sub(n),
-                            },
-                            None => rect.width,
+                            Constraint::Relative(r) => rect.width / r,
+                            Constraint::Absolute(a) => a,
+                            Constraint::Negative(n) => rect.width.saturating_sub(n),
+                            Constraint::Flex => rect.width,
                         };
                         self.recalc(sidx);
                     }
@@ -2930,10 +2895,10 @@ fn main() -> io::Result<()> {
             height: height,
             width: width,
             constraints: Constraints {
-                min_height: None,
-                max_height: Some(Constraint::Negative(1)),
-                min_width: None,
-                max_width: None,
+                min_height: Constraint::Flex,
+                max_height: Constraint::Negative(1),
+                min_width: Constraint::Flex,
+                max_width: Constraint::Flex,
             },
             anchors: (None, None),
         },
@@ -2946,10 +2911,10 @@ fn main() -> io::Result<()> {
             height: height,
             width: width,
             constraints: Constraints {
-                min_height: None,
-                max_height: None,
-                min_width: None,
-                max_width: None,
+                min_height: Constraint::Flex,
+                max_height: Constraint::Absolute(1),
+                min_width: Constraint::Flex,
+                max_width: Constraint::Flex,
             },
             anchors: (None, None),
         },
@@ -2962,10 +2927,10 @@ fn main() -> io::Result<()> {
             height: height,
             width: width,
             constraints: Constraints {
-                min_height: None,
-                max_height: None,
-                min_width: None,
-                max_width: None,
+                min_height: Constraint::Flex,
+                max_height: Constraint::Flex,
+                min_width: Constraint::Flex,
+                max_width: Constraint::Flex,
             },
             anchors: (None, None),
         },
@@ -2990,12 +2955,12 @@ fn main() -> io::Result<()> {
     let comp: Box<dyn Component> = Box::new(CmdLineDummy());
     nodes.new_leaf(
         comp,
-        cmd_root,
+        nodes.roots[ROOT_CMD_LINE],
         Some(Constraints {
-            max_width: Some(Constraint::Relative(1)),
-            min_width: Some(Constraint::Relative(1)),
-            min_height: None,
-            max_height: Some(Constraint::Absolute(1)),
+            max_width: Constraint::Relative(1),
+            min_width: Constraint::Relative(1),
+            min_height: Constraint::Flex,
+            max_height: Constraint::Absolute(1),
         }),
         (Some(Anchor::Absolute(0)), Some(Anchor::Relative(1))),
     );

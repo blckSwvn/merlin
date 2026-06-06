@@ -1,7 +1,7 @@
 # TODO
 
 # Current
-make anchor, constraint handle their own rules rather than having it everywhere
+make recalc also recalc the sidx passed in also in general clean it up
 make selection be consistent in both directions selection should always extend to include the cursor
 make move up/down operate on visual lines rather than real buffer lines
 cmd line pop up and autocomplete
