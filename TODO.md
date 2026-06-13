@@ -1,17 +1,15 @@
 # TODO
 
 # Current
-make recalc also recalc the sidx passed in also in general clean it up
-make selection be consistent in both directions selection should always extend to include the cursor
 make move up/down operate on visual lines rather than real buffer lines
-cmd line pop up and autocomplete
+cmd line pop-up and autocomplete
 better, consistent, more commands
-asdad
+
 ---
 
 ### future
-tree-sitter for syntax highlighting
-vim motions
+tree-sitter for syntax highlighting and structural/syntax aware editing
+motions
 replacing arrays of structs(Aos) with struct of arrays(Soa)
 
 ---

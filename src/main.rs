@@ -1059,8 +1059,8 @@ impl Component for ViewIdx {
             let Some((a, b)) = view.selection else {
                 return;
             };
-            let sel_start = usize::min(a, b);
-            let sel_end = usize::max(a, b);
+            let sel_start = a;
+            let sel_end = b;
             let width = rect.width.saturating_sub(5) as usize;
             let height = rect.height.saturating_sub(1) as usize;
             let buffer = buffers.get(view.buf);
@@ -1291,7 +1291,7 @@ impl Component for ViewIdx {
                 Cmd::EnterVisual => {
                     let v = views.get_mut(vidx);
                     v.mode = Mode::Visual;
-                    v.selection = Some((v.cursor, v.cursor));
+                    v.selection = Some((v.cursor, v.cursor + 1));
                 }
                 Cmd::MoveSelectionUp => {
                     let buffer = buffers.get(bidx);
@@ -1304,8 +1304,13 @@ impl Component for ViewIdx {
                         let col = view.prefered_x.min(line_len.saturating_sub(1));
 
                         view.cursor = line_start + col;
-                        view.selection.as_mut().unwrap().1 =
-                            usize::min(view.cursor + 1, buffer.buf.len_chars());
+                        if view.cursor >= view.selection.unwrap().0 {
+                            view.selection.as_mut().unwrap().1 =
+                                usize::min(view.cursor + 1, buffer.buf.len_chars());
+                        } else {
+                            view.selection.as_mut().unwrap().0 =
+                                usize::min(view.cursor, buffer.buf.len_chars());
+                        }
                     }
                     let buffer = buffers.get_mut(bidx);
                     View::scroll(view, &nodes.leaves.get(lidx.0).unwrap().rect, buffer);
@@ -1321,8 +1326,13 @@ impl Component for ViewIdx {
                         let len = buffer.buf.line(line).len_chars();
                         let col = view.prefered_x.min(len.saturating_sub(1));
                         view.cursor = start + col;
-                        view.selection.as_mut().unwrap().1 =
-                            usize::min(view.cursor + 1, buffer.buf.len_chars());
+                        if view.cursor >= view.selection.unwrap().1 {
+                            view.selection.as_mut().unwrap().1 =
+                                usize::min(view.cursor + 1, buffer.buf.len_chars());
+                        } else {
+                            view.selection.as_mut().unwrap().0 =
+                                usize::min(view.cursor, buffer.buf.len_chars());
+                        }
                         View::scroll(
                             view,
                             &nodes.leaves.get(lidx.0).unwrap().rect,
@@ -1342,8 +1352,13 @@ impl Component for ViewIdx {
                         let col = col.min(buffer.buf.line(line).len_chars());
                         view.prefered_x = col;
                         view.cursor = line_start + col;
-                        view.selection.as_mut().unwrap().1 =
-                            usize::min(view.cursor + 1, buffer.buf.len_chars());
+                        if view.cursor >= view.selection.unwrap().1 {
+                            view.selection.as_mut().unwrap().1 =
+                                usize::min(view.cursor + 1, buffer.buf.len_chars());
+                        } else {
+                            view.selection.as_mut().unwrap().0 =
+                                usize::min(view.cursor, buffer.buf.len_chars());
+                        }
                     }
                 }
                 Cmd::MoveSelectionLeft => {
@@ -1356,8 +1371,13 @@ impl Component for ViewIdx {
                         let col = col - 1;
                         view.prefered_x = col;
                         view.cursor = line_start + col;
-                        view.selection.as_mut().unwrap().1 =
-                            usize::min(view.cursor + 1, buffer.buf.len_chars());
+                        if view.cursor >= view.selection.unwrap().0 {
+                            view.selection.as_mut().unwrap().1 =
+                                usize::min(view.cursor + 1, buffer.buf.len_chars());
+                        } else {
+                            view.selection.as_mut().unwrap().0 =
+                                usize::min(view.cursor, buffer.buf.len_chars());
+                        }
                     }
                 }
                 Cmd::Yank => {
@@ -1417,7 +1437,7 @@ impl Component for ViewIdx {
                         idx: c,
                         text: s.clone(),
                     });
-                    v.cursor += s.chars().count();
+                    v.cursor += s.chars().count() + 1;
                     v.selection = None;
                 }
                 Cmd::EnterCmd => {
@@ -1967,15 +1987,6 @@ impl Nodes {
     }
 
     fn new_root(&mut self, rect: Rect, direction: Direction) -> SplitIdx {
-        let mut rect = rect;
-        match rect.constraints.max_height {
-            Constraint::Flex => {}
-            Constraint::Relative(r) => {}
-            Constraint::Negative(n) => {
-                rect.height = rect.height.saturating_sub(n);
-            }
-            Constraint::Absolute(a) => {}
-        }
         let new_root = self.push_branch(Split {
             parent: None,
             children: vec![],
@@ -2125,14 +2136,32 @@ impl Nodes {
         }
     }
 
+    fn recalc_including_root(&mut self, width: u16, height: u16) {
+        for ridx in &mut self.roots.clone() {
+            let r = self.splits.get_mut(ridx.0).unwrap();
+            r.rect.height = height;
+            r.rect.width = width;
+            r.rect.height = match r.rect.constraints.max_height {
+                Constraint::Negative(n) => r.rect.height.saturating_sub(n),
+                Constraint::Relative(r) => height / r,
+                Constraint::Absolute(a) => a,
+                Constraint::Flex => r.rect.height,
+            };
+            r.rect.width = match r.rect.constraints.max_width {
+                Constraint::Negative(n) => r.rect.width.saturating_sub(n),
+                Constraint::Relative(r) => width / r,
+                Constraint::Absolute(a) => a,
+                Constraint::Flex => r.rect.width,
+            };
+            self.recalc(*ridx);
+        }
+    }
     fn recalc(&mut self, sidx: SplitIdx) {
         let curr = sidx;
-        let Split {
-            children,
-            direction,
-            rect,
-            ..
-        } = self.splits.get(curr.0).unwrap();
+        let (children, direction, rect) = {
+            let s = self.splits.get(curr.0).unwrap();
+            (s.children.clone(), s.direction.clone(), s.rect.clone())
+        };
         if children.is_empty() {
             return;
         }
@@ -2147,8 +2176,11 @@ impl Nodes {
             for n in children.iter() {
                 let mut min = 0;
                 let r = match n {
-                    NodeIdx::Leaf(l) => self.leaves.get(l.0).unwrap().rect,
-                    NodeIdx::Split(s) => self.splits.get(s.0).unwrap().rect,
+                    NodeIdx::Leaf(l) => &mut self.leaves.get_mut(l.0).unwrap().rect,
+                    NodeIdx::Split(s) => {
+                        self.recalc(*s);
+                        &mut self.splits.get_mut(s.0).unwrap().rect
+                    }
                 };
                 match direction {
                     Direction::Horizontal => match r.constraints.min_height {
@@ -2183,8 +2215,8 @@ impl Nodes {
                     let (s, n) = &mut resize[idx];
                     let max = {
                         let r = match n {
-                            NodeIdx::Leaf(l) => self.leaves.get(l.0).unwrap().rect,
-                            NodeIdx::Split(s) => self.splits.get(s.0).unwrap().rect,
+                            NodeIdx::Leaf(l) => &mut self.leaves.get_mut(l.0).unwrap().rect,
+                            NodeIdx::Split(s) => &mut self.splits.get_mut(s.0).unwrap().rect,
                         };
                         match direction {
                             Direction::Vertical => match r.constraints.max_width {
@@ -2221,161 +2253,93 @@ impl Nodes {
         let direction = direction.clone();
         let rect = rect.clone();
         for (len, n) in resize {
+            let (r, p_width, p_height) = &mut match n {
+                NodeIdx::Leaf(l) => {
+                    let curr = self.leaves.get(l.0).unwrap();
+                    let p = curr.parent;
+                    let p_width = self.splits.get(p.0).unwrap().rect.width;
+                    let p_height = self.splits.get(p.0).unwrap().rect.height;
+                    let l = self.leaves.get_mut(l.0).unwrap();
+                    (&mut l.rect, p_width, p_height)
+                }
+                NodeIdx::Split(s) => {
+                    let curr = self.splits.get(s.0).unwrap();
+                    let p = curr.parent.unwrap();
+                    let p_width = self.splits.get(p.0).unwrap().rect.width;
+                    let p_height = self.splits.get(p.0).unwrap().rect.height;
+                    let s = self.splits.get_mut(s.0).unwrap();
+                    (&mut s.rect, p_width, p_height)
+                }
+            };
+
+            r.x = x;
+            r.y = y;
             match direction {
-                Direction::Vertical => match n {
-                    NodeIdx::Leaf(l) => {
-                        let l = self.leaves.get_mut(l.0).unwrap();
-                        l.rect.x = x;
-                        l.rect.y = y;
-                        l.rect.width = len;
-                        x += l.rect.width;
-                        l.rect.height = match l.rect.constraints.max_height {
-                            Constraint::Relative(r) => rect.height / r,
-                            Constraint::Absolute(a) => a,
-                            Constraint::Negative(n) => rect.height.saturating_sub(n),
-                            Constraint::Flex => rect.height,
-                        };
-                        if let Some(x) = l.rect.anchors.0 {
-                            match x {
-                                Anchor::Relative(x) => {
-                                    let x = self.splits.get(l.parent.0).unwrap().rect.width / x;
-                                    let x = x - l.rect.width;
-                                    l.rect.x = x;
-                                }
-                                Anchor::Absolute(x) => {
-                                    let x = {
-                                        let parent_width =
-                                            self.splits.get(l.parent.0).unwrap().rect.width;
-
-                                        if x + l.rect.width > parent_width {
-                                            parent_width - l.rect.width
-                                        } else {
-                                            x
-                                        }
-                                    };
-                                    l.rect.x = x;
-                                }
-                            }
-                        }
-
-                        if let Some(y) = l.rect.anchors.1 {
-                            match y {
-                                Anchor::Relative(y) => {
-                                    let y = self.splits.get(l.parent.0).unwrap().rect.height / y;
-                                    let y = y - l.rect.height;
-                                    l.rect.y = y;
-                                }
-                                Anchor::Absolute(y) => {
-                                    let y = {
-                                        let parent_height =
-                                            self.splits.get(l.parent.0).unwrap().rect.height;
-                                        if y + l.rect.height > parent_height {
-                                            parent_height - l.rect.height
-                                        } else {
-                                            y
-                                        }
-                                    };
-                                    l.rect.y = y;
-                                }
-                            }
-                        }
+                Direction::Vertical => {
+                    r.width = len;
+                    x += r.width;
+                    r.height = match r.constraints.max_height {
+                        Constraint::Relative(rel) => rect.height / rel,
+                        Constraint::Absolute(a) => a,
+                        Constraint::Negative(n) => rect.height.saturating_sub(n),
+                        Constraint::Flex => rect.height,
                     }
-                    NodeIdx::Split(sidx) => {
-                        let s = self.splits.get_mut(sidx.0).unwrap();
-                        s.rect.x = x;
-                        s.rect.y = y;
-                        s.rect.width = len;
-                        x += s.rect.width;
-                        s.rect.height = match s.rect.constraints.max_height {
-                            Constraint::Relative(r) => rect.height / r,
-                            Constraint::Absolute(a) => a,
-                            Constraint::Negative(n) => rect.height.saturating_sub(n),
-                            Constraint::Flex => rect.height,
-                        };
-                        self.recalc(sidx);
+                }
+                Direction::Horizontal => {
+                    r.height = len;
+                    y += r.height;
+                    r.width = match r.constraints.max_width {
+                        Constraint::Flex => rect.width,
+                        Constraint::Relative(r) => rect.width / r,
+                        Constraint::Absolute(a) => a,
+                        Constraint::Negative(n) => rect.width.saturating_sub(n),
                     }
-                },
-                Direction::Horizontal => match n {
-                    NodeIdx::Leaf(l) => {
-                        let l = self.leaves.get_mut(l.0).unwrap();
-                        l.rect.x = x;
-                        l.rect.y = y;
-                        l.rect.height = len;
-                        y += l.rect.height;
-                        l.rect.width = match l.rect.constraints.max_width {
-                            Constraint::Flex => rect.width,
-                            Constraint::Relative(r) => rect.width / r,
-                            Constraint::Absolute(a) => a,
-                            Constraint::Negative(n) => rect.width.saturating_sub(n),
-                        };
-                        if let Some(x) = l.rect.anchors.0 {
-                            match x {
-                                Anchor::Relative(x) => {}
-                                Anchor::Absolute(x) => {
-                                    l.rect.x = x;
-                                }
+                }
+            }
+            if let Some(x) = r.anchors.0 {
+                match x {
+                    Anchor::Relative(x) => {
+                        let x = *p_width / x;
+                        let x = x - r.width;
+                        r.x = x;
+                    }
+                    Anchor::Absolute(x) => {
+                        let x = {
+                            if x + r.width > *p_width {
+                                *p_width - r.width
+                            } else {
+                                x
                             }
-                        }
+                        };
+                        r.x = x;
+                    }
+                }
+            }
 
-                        if let Some(x) = l.rect.anchors.0 {
-                            match x {
-                                Anchor::Relative(x) => {
-                                    let x = self.splits.get(l.parent.0).unwrap().rect.width / x;
-                                    let x = x - l.rect.width;
-                                    l.rect.x = x;
-                                }
-                                Anchor::Absolute(x) => {
-                                    let x = {
-                                        let parent_width =
-                                            self.splits.get(l.parent.0).unwrap().rect.width;
-                                        if x + l.rect.width > parent_width {
-                                            parent_width - l.rect.width
-                                        } else {
-                                            x
-                                        }
-                                    };
-                                    l.rect.width = x;
-                                }
-                            }
-                        }
-
-                        if let Some(y) = l.rect.anchors.1 {
-                            match y {
-                                Anchor::Relative(y) => {
-                                    let y = self.splits.get(l.parent.0).unwrap().rect.height / y;
-                                    let y = y - l.rect.height;
-                                    l.rect.y = y;
-                                }
-                                Anchor::Absolute(y) => {
-                                    let y = {
-                                        let parent_height =
-                                            self.splits.get(l.parent.0).unwrap().rect.height;
-                                        if y + l.rect.height > parent_height {
-                                            parent_height - l.rect.height
-                                        } else {
-                                            y
-                                        }
-                                    };
-                                    l.rect.y = y;
-                                }
-                            }
-                        }
+            if let Some(y) = r.anchors.1 {
+                match y {
+                    Anchor::Relative(y) => {
+                        let y = *p_height / y;
+                        let y = y - r.height;
+                        r.y = y;
                     }
-                    NodeIdx::Split(sidx) => {
-                        let s = self.splits.get_mut(sidx.0).unwrap();
-                        s.rect.x = x;
-                        s.rect.y = y;
-                        s.rect.height = len;
-                        y += s.rect.height;
-                        s.rect.width = match s.rect.constraints.max_width {
-                            Constraint::Relative(r) => rect.width / r,
-                            Constraint::Absolute(a) => a,
-                            Constraint::Negative(n) => rect.width.saturating_sub(n),
-                            Constraint::Flex => rect.width,
+                    Anchor::Absolute(y) => {
+                        let y = {
+                            if y + r.height > *p_height {
+                                *p_height - r.height
+                            } else {
+                                y
+                            }
                         };
-                        self.recalc(sidx);
+                        r.y = y;
                     }
-                },
+                }
+            }
+            match n {
+                NodeIdx::Split(s) => {
+                    self.recalc(s);
+                }
+                _ => {}
             }
         }
     }
@@ -2867,7 +2831,7 @@ fn main() -> io::Result<()> {
             width: width,
             constraints: Constraints {
                 min_height: Constraint::Flex,
-                max_height: Constraint::Absolute(1),
+                max_height: Constraint::Flex,
                 min_width: Constraint::Flex,
                 max_width: Constraint::Flex,
             },
@@ -2891,6 +2855,7 @@ fn main() -> io::Result<()> {
         },
         Direction::Vertical,
     );
+    nodes.recalc_including_root(width, height);
     let mut focus = {
         buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
         let args: Vec<String> = env::args().skip(1).collect();
@@ -2947,6 +2912,7 @@ fn main() -> io::Result<()> {
             (width * height) as usize
         ],
     };
+
     nodes.paint(&focus, &cmd_line, &views, &buffers, &mut old, &mut new)?;
     stdout().flush().unwrap();
 
@@ -3029,12 +2995,7 @@ fn main() -> io::Result<()> {
                         (width * height) as usize
                     ],
                 };
-                for r in nodes.roots.clone() {
-                    let root = nodes.splits.get_mut(r.0).unwrap();
-                    root.rect.width = width;
-                    root.rect.height = height;
-                    nodes.recalc(r);
-                }
+                nodes.recalc_including_root(width, height);
                 queue!(stdout(), cursor::Hide)?;
                 nodes.paint(&focus, &cmd_line, &views, &buffers, &mut old, &mut new)?;
                 queue!(stdout(), cursor::Show)?;
