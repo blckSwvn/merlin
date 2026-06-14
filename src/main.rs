@@ -1247,6 +1247,7 @@ impl Component for ViewIdx {
                 Mode::Visual => match key.code {
                     KeyCode::Esc => Cmd::EnterNormal,
                     KeyCode::Char(':') => Cmd::EnterCmd,
+                    KeyCode::Char('i') => Cmd::EnterInsert,
                     KeyCode::Char('k') => Cmd::MoveSelectionUp,
                     KeyCode::Char('j') => Cmd::MoveSelectionDown,
                     KeyCode::Char('h') => Cmd::MoveSelectionLeft,

@@ -1,7 +1,6 @@
 # TODO
 
 # Current
-make move up/down operate on visual lines rather than real buffer lines
 cmd line pop-up and autocomplete
 better, consistent, more commands
 
