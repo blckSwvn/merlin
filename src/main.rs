@@ -1,15 +1,12 @@
 use core::panic;
-use crossterm::cursor;
-use crossterm::cursor::MoveTo;
-use crossterm::cursor::SetCursorStyle;
-use crossterm::event::KeyEvent;
-use crossterm::event::{Event, KeyCode, read};
-use crossterm::execute;
-use crossterm::queue;
-use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
-use crossterm::terminal;
-use crossterm::terminal::disable_raw_mode;
-use crossterm::terminal::enable_raw_mode;
+use crossterm::{
+    cursor, 
+    cursor::{MoveTo, SetCursorStyle},
+    event::{KeyEvent, Event, KeyCode, read},
+    execute, queue,
+    style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
+    terminal, terminal::{disable_raw_mode, enable_raw_mode},
+    };
 use ropey::Rope;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -257,6 +254,37 @@ struct Constraints {
     max_width: Constraint,
 }
 
+impl Constraints{
+    fn enumerate_min_width(&self)->Option<u16>{
+        match self.min_width{
+            Constraint::Negative(n)=>Some(n),
+            _ => None,
+        }
+    }
+    fn enumerate_min_height(&self)->Option<u16>{
+        match self.min_height{
+            Constraint::Absolute(a)=>Some(a),
+            _ => None,
+        }
+    }
+    fn enumerate_max_width(&self, width: u16)->u16{
+        match self.max_width{
+            Constraint::Flex=> width,
+            Constraint::Absolute(a)=>a,
+            Constraint::Relative(r)=>width / r,
+            Constraint::Negative(n)=>width.saturating_sub(n),
+        }
+    }
+    fn enumerate_max_height(&self, height: u16)->u16{
+        match self.max_height{
+            Constraint::Flex=> height,
+            Constraint::Absolute(a)=>a,
+            Constraint::Relative(r)=>height/r,
+            Constraint::Negative(n)=>height.saturating_sub(n),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Constraint {
     Flex,          //default
@@ -269,6 +297,28 @@ enum Constraint {
 enum Anchor {
     Relative(u16), //fraction aka width/x not x%
     Absolute(u16),
+    Negative(u16),
+}
+
+impl Anchor{
+    //dimension either rect.height or rect.width
+    fn get_enumerated(&self, curr_dimension: u16, parent_dimension: u16)->u16{
+        match self{
+            Anchor::Absolute(a)=>{
+                if a + curr_dimension > parent_dimension {
+                    parent_dimension - curr_dimension
+                } else {
+                    *a
+                }
+            },
+            Anchor::Negative(n)=>{
+                u16::max(curr_dimension.saturating_sub(*n), parent_dimension)
+            },
+            Anchor::Relative(r)=>{
+                parent_dimension / r - curr_dimension
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -296,81 +346,6 @@ struct Buffer {
     redo: Vec<Edit>,
 }
 
-impl Buffer {
-    const READ_ONLY: u64 = 1 << 0;
-    const SCRATCH: u64 = 1 << 1;
-    const NEW_FILE: u64 = 1 << 2;
-    const NON_NAVIGATABLE: u64 = 1 << 3;
-    fn partial_reset(&mut self) {
-        self.buf = Rope::new();
-        self.undo = Vec::new();
-        self.redo = Vec::new();
-        //intentional does not reset flags or pathbuf
-    }
-    fn set_flag(&mut self, flag: u64) {
-        self.flags |= flag
-    }
-    fn clear_flag(&mut self, flag: u64) {
-        self.flags &= !flag
-    }
-    fn check_flag(&self, flag: u64) -> bool {
-        self.flags & flag != 0
-    }
-    fn new(path: Option<&str>, flags: u64) -> std::io::Result<Buffer> {
-        let mut f = flags;
-        let buf = if let Some(p) = path {
-            let path = PathBuf::from(p);
-            if path.exists() {
-                let cont = fs::read_to_string(&path)?;
-                if fs::metadata(&path)?.permissions().readonly() {
-                    f |= Self::READ_ONLY;
-                }
-                Rope::from_str(&cont)
-            } else {
-                f |= Self::NEW_FILE;
-                Rope::new()
-            }
-        } else {
-            f |= Self::NEW_FILE;
-            Rope::new()
-        };
-        Ok(Buffer {
-            generation: 0,
-            flags: f,
-            buf: buf,
-            last_off: 0,
-            last_cursor: 0,
-            file: path.map(PathBuf::from),
-            redo: Vec::new(),
-            undo: Vec::new(),
-        })
-    }
-    fn insert(&mut self, off: usize, cursor: usize, c: char) {
-        self.last_cursor = cursor;
-        self.last_off = off;
-        self.buf.insert_char(cursor, c);
-    }
-    fn insert_string(&mut self, off: usize, cursor: usize, s: &str) {
-        self.last_cursor = cursor;
-        self.last_off = off;
-        for c in s.chars().rev() {
-            self.buf.insert_char(cursor, c);
-        }
-    }
-    fn save(&mut self, new: Option<String>) -> io::Result<()> {
-        if let Some(new) = new {
-            let file = File::create(new)?;
-            self.buf.write_to(file)?;
-        } else {
-            if let Some(path) = &self.file {
-                let file = File::create(path)?;
-                self.buf.write_to(file)?;
-            }
-        }
-        Ok(())
-    }
-}
-
 struct CmdLineDummy();
 struct CmdLine {
     input: String,
@@ -378,7 +353,7 @@ struct CmdLine {
     error: bool,
     last_view: (LeafIdx, ViewIdx),
 }
-impl CmdLine {
+impl CmdLine{
     fn new() -> Self {
         Self {
             input: String::new(),
@@ -433,8 +408,7 @@ impl CmdLine {
         self.input = s.to_string();
     }
 }
-
-impl Component for CmdLineDummy {
+impl Component for CmdLineDummy{
     fn cursor_xy(
         &self,
         rect: &Rect,
@@ -860,6 +834,81 @@ impl Component for CmdLineDummy {
                 Cmd::Noop => {}
             }
             Ok(())
+        }
+        Ok(())
+    }
+}
+
+impl Buffer {
+    const READ_ONLY: u64 = 1 << 0;
+    const SCRATCH: u64 = 1 << 1;
+    const NEW_FILE: u64 = 1 << 2;
+    const NON_NAVIGATABLE: u64 = 1 << 3;
+    fn partial_reset(&mut self) {
+        self.buf = Rope::new();
+        self.undo = Vec::new();
+        self.redo = Vec::new();
+        //intentional does not reset flags or pathbuf
+    }
+    fn set_flag(&mut self, flag: u64) {
+        self.flags |= flag
+    }
+    fn clear_flag(&mut self, flag: u64) {
+        self.flags &= !flag
+    }
+    fn check_flag(&self, flag: u64) -> bool {
+        self.flags & flag != 0
+    }
+    fn new(path: Option<&str>, flags: u64) -> std::io::Result<Buffer> {
+        let mut f = flags;
+        let buf = if let Some(p) = path {
+            let path = PathBuf::from(p);
+            if path.exists() {
+                let cont = fs::read_to_string(&path)?;
+                if fs::metadata(&path)?.permissions().readonly() {
+                    f |= Self::READ_ONLY;
+                }
+                Rope::from_str(&cont)
+            } else {
+                f |= Self::NEW_FILE;
+                Rope::new()
+            }
+        } else {
+            f |= Self::NEW_FILE;
+            Rope::new()
+        };
+        Ok(Buffer {
+            generation: 0,
+            flags: f,
+            buf: buf,
+            last_off: 0,
+            last_cursor: 0,
+            file: path.map(PathBuf::from),
+            redo: Vec::new(),
+            undo: Vec::new(),
+        })
+    }
+    fn insert(&mut self, off: usize, cursor: usize, c: char) {
+        self.last_cursor = cursor;
+        self.last_off = off;
+        self.buf.insert_char(cursor, c);
+    }
+    fn insert_string(&mut self, off: usize, cursor: usize, s: &str) {
+        self.last_cursor = cursor;
+        self.last_off = off;
+        for c in s.chars().rev() {
+            self.buf.insert_char(cursor, c);
+        }
+    }
+    fn save(&mut self, new: Option<String>) -> io::Result<()> {
+        if let Some(new) = new {
+            let file = File::create(new)?;
+            self.buf.write_to(file)?;
+        } else {
+            if let Some(path) = &self.file {
+                let file = File::create(path)?;
+                self.buf.write_to(file)?;
+            }
         }
         Ok(())
     }
@@ -2142,18 +2191,8 @@ impl Nodes {
             let r = self.splits.get_mut(ridx.0).unwrap();
             r.rect.height = height;
             r.rect.width = width;
-            r.rect.height = match r.rect.constraints.max_height {
-                Constraint::Negative(n) => r.rect.height.saturating_sub(n),
-                Constraint::Relative(r) => height / r,
-                Constraint::Absolute(a) => a,
-                Constraint::Flex => r.rect.height,
-            };
-            r.rect.width = match r.rect.constraints.max_width {
-                Constraint::Negative(n) => r.rect.width.saturating_sub(n),
-                Constraint::Relative(r) => width / r,
-                Constraint::Absolute(a) => a,
-                Constraint::Flex => r.rect.width,
-            };
+            r.rect.height = r.rect.constraints.enumerate_max_height(height);
+            r.rect.width = r.rect.constraints.enumerate_max_width(width);
             self.recalc(*ridx);
         }
     }
@@ -2184,25 +2223,21 @@ impl Nodes {
                     }
                 };
                 match direction {
-                    Direction::Horizontal => match r.constraints.min_height {
-                        Constraint::Relative(r) => {}
-                        Constraint::Flex => {}
-                        Constraint::Negative(n) => {}
-                        Constraint::Absolute(a) => {
-                            min = a;
-                            size_left -= a;
+                    Direction::Horizontal => {
+                        let m = r.constraints.enumerate_min_height();
+                        if let Some(m) = m{
+                            min = m;
+                            size_left -= m;
                         }
-                    },
-                    Direction::Vertical => match r.constraints.min_width {
-                        Constraint::Relative(r) => {}
-                        Constraint::Absolute(a) => {
-                            min = a;
-                            size_left -= a;
+                    }
+                        Direction::Vertical=>{
+                            let m = r.constraints.enumerate_min_width();
+                            if let Some(m) = m{
+                                min = m;
+                                size_left -= m;
+                            }
                         }
-                        Constraint::Negative(n) => {}
-                        Constraint::Flex => {}
-                    },
-                }
+                    }
                 resize.push((min, *n));
             }
 
@@ -2220,18 +2255,8 @@ impl Nodes {
                             NodeIdx::Split(s) => &mut self.splits.get_mut(s.0).unwrap().rect,
                         };
                         match direction {
-                            Direction::Vertical => match r.constraints.max_width {
-                                Constraint::Relative(r) => rect.width / r,
-                                Constraint::Absolute(a) => a,
-                                Constraint::Negative(n) => rect.width.saturating_sub(n),
-                                Constraint::Flex => rect.width,
-                            },
-                            Direction::Horizontal => match r.constraints.max_height {
-                                Constraint::Relative(r) => rect.height / r,
-                                Constraint::Absolute(a) => a,
-                                Constraint::Negative(n) => rect.height.saturating_sub(n),
-                                Constraint::Flex => rect.height,
-                            },
+                            Direction::Vertical=>r.constraints.enumerate_max_width(rect.width),
+                            Direction::Horizontal=>r.constraints.enumerate_max_height(rect.height),
                         }
                     };
                     *s += width_per_child;
@@ -2279,62 +2304,20 @@ impl Nodes {
                 Direction::Vertical => {
                     r.width = len;
                     x += r.width;
-                    r.height = match r.constraints.max_height {
-                        Constraint::Relative(rel) => rect.height / rel,
-                        Constraint::Absolute(a) => a,
-                        Constraint::Negative(n) => rect.height.saturating_sub(n),
-                        Constraint::Flex => rect.height,
-                    }
+                    r.height = r.constraints.enumerate_max_height(rect.height);
                 }
                 Direction::Horizontal => {
                     r.height = len;
                     y += r.height;
-                    r.width = match r.constraints.max_width {
-                        Constraint::Flex => rect.width,
-                        Constraint::Relative(r) => rect.width / r,
-                        Constraint::Absolute(a) => a,
-                        Constraint::Negative(n) => rect.width.saturating_sub(n),
-                    }
+                    r.width = r.constraints.enumerate_max_width(rect.width);
                 }
             }
             if let Some(x) = r.anchors.0 {
-                match x {
-                    Anchor::Relative(x) => {
-                        let x = *p_width / x;
-                        let x = x - r.width;
-                        r.x = x;
-                    }
-                    Anchor::Absolute(x) => {
-                        let x = {
-                            if x + r.width > *p_width {
-                                *p_width - r.width
-                            } else {
-                                x
-                            }
-                        };
-                        r.x = x;
-                    }
-                }
+                r.x = x.get_enumerated(r.width, *p_width);
             }
 
             if let Some(y) = r.anchors.1 {
-                match y {
-                    Anchor::Relative(y) => {
-                        let y = *p_height / y;
-                        let y = y - r.height;
-                        r.y = y;
-                    }
-                    Anchor::Absolute(y) => {
-                        let y = {
-                            if y + r.height > *p_height {
-                                *p_height - r.height
-                            } else {
-                                y
-                            }
-                        };
-                        r.y = y;
-                    }
-                }
+                r.y = y.get_enumerated(r.height, *p_height);
             }
             match n {
                 NodeIdx::Split(s) => {
@@ -2878,12 +2861,12 @@ fn main() -> io::Result<()> {
         comp,
         nodes.roots[ROOT_CMD_LINE],
         Some(Constraints {
-            max_width: Constraint::Relative(1),
-            min_width: Constraint::Relative(1),
-            min_height: Constraint::Flex,
+            max_width: Constraint::Flex,
+            min_width: Constraint::Flex,
             max_height: Constraint::Absolute(1),
+            min_height: Constraint::Flex,
         }),
-        (Some(Anchor::Absolute(0)), Some(Anchor::Relative(1))),
+        (None, Some(Anchor::Relative(1)))
     );
     enable_raw_mode()?;
     execute!(stdout(), terminal::EnterAlternateScreen)?;
