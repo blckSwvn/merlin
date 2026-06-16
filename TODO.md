@@ -3,7 +3,6 @@
 # Current
 cmd line pop-up and autocomplete
 better, consistent, more commands
-beeing able to delete selections
 
 ---
 

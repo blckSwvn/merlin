@@ -1276,6 +1276,7 @@ impl Component for ViewIdx {
                     KeyCode::Char('Y') => Cmd::YankClipboard,
                     KeyCode::Char('p') => Cmd::Paste,
                     KeyCode::Char('P') => Cmd::PasteClipboard,
+                    KeyCode::Char('d') => Cmd::BackSpace,
                     _ => Cmd::Noop,
                 },
             }
@@ -1291,6 +1292,7 @@ impl Component for ViewIdx {
         ) -> Result<(), EditorErr> {
             fn enter_normal(view: &mut View, cmd_line: &mut CmdLine) {
                 view.mode = Mode::Normal;
+                view.selection = None;
                 cmd_line.cursor = 0;
             }
             let (bidx, lidx) = {
@@ -1461,7 +1463,9 @@ impl Component for ViewIdx {
                     cmd_line.enter_cmd_mode(vidx, focus, views, lidx);
                 }
                 Cmd::EnterInsert => {
-                    views.get_mut(vidx).mode = Mode::Insert;
+                    let v = views.get_mut(vidx);
+                    v.mode = Mode::Insert;
+                    v.selection = None;
                 }
                 Cmd::EnterNormal => {
                     enter_normal(views.get_mut(vidx), cmd_line);
@@ -1691,8 +1695,8 @@ impl Component for ViewIdx {
                     View::scroll(v, &nodes.get_leaf(lidx).rect, buffer);
                 }
                 Cmd::BackSpace => {
-                    let v = views.get_mut(vidx);
-                    v.selection = None;
+                    fn backspace(views: &mut Views, vidx: ViewIdx, bidx: BufferIdx, buffers: &mut Buffers, nodes: &mut Nodes, lidx: LeafIdx) {
+                        let v = views.get_mut(vidx);
                     let buffer = buffers.get_mut(bidx);
                     buffer.redo.clear();
                     if v.cursor != 0 {
@@ -1744,6 +1748,19 @@ impl Component for ViewIdx {
                             v.cursor = prev_start + prev_len;
                         }
                         View::scroll(v, &nodes.get_leaf(lidx).rect, buffer);
+                    }
+
+                    }
+                    let v = views.get_mut(vidx);
+                    if let Some(sel) = v.selection{
+                        v.cursor = usize::min(sel.1, buffers.get(bidx).buf.len_chars());
+                        v.mode = Mode::Normal;
+                        for _ in sel.0..sel.1{
+                            backspace(views, vidx, bidx, buffers, nodes, lidx);
+                        }
+                        views.get_mut(vidx).selection = None;
+                    }else{
+                        backspace(views, vidx, bidx, buffers, nodes, lidx);
                     }
                 }
                 Cmd::Noop => {}
