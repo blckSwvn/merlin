@@ -103,7 +103,7 @@ pub fn yank_to_system_clipboard(text: &str) -> io::Result<()> {
 
     Ok(())
 }
-fn paste_to_system_clipboard() -> io::Result<String> {
+fn paste_system_clipboard() -> io::Result<String> {
     #[cfg(target_os = "linux")]
     {
         let commands = [
@@ -340,15 +340,26 @@ use cmdline::{CmdLine};
 struct CmdLineDummy();
 mod cmdline{
     use super::*;
+    use super::Mode as OtherMode;
+    enum Mode{
+        Normal,
+        Insert,
+        Visual,
+    }
+
 pub struct CmdLine {
+    mode: Mode,
     input: String,
     pub cursor: usize,
     pub error: bool,
+    selection: Option<(usize, usize)>,
     last_view: (LeafIdx, ViewIdx),
 }
 impl CmdLine {
     pub fn new() -> Self {
         Self {
+            mode: Mode::Insert,
+            selection: None,
             input: String::new(),
             cursor: 0,
             error: false,
@@ -363,7 +374,7 @@ impl CmdLine {
         lidx: LeafIdx,
     ) {
         self.last_view = (lidx, vidx);
-        views.get_mut(vidx).mode = Mode::Normal;
+        views.get_mut(vidx).mode = OtherMode::Normal;
         self.input.clear();
         self.cursor = 0;
         *focus = CMDLINE;
@@ -520,10 +531,17 @@ enum Cmd{
     ViewClose,
 }
 enum Action{
+    EnterView,
     EnterNormal,
+    EnterVisual,
+    EnterInsert,
     Exec,
     Insert(char),
     BackSpace,
+    YankClipboard,
+    PasteClipboard,
+    MoveSelectionLeft,
+    MoveSelectionRight,
     MoveLeft,
     MoveRight,
     Noop,
@@ -632,9 +650,13 @@ impl Component for CmdLineDummy {
         cmd_line: &CmdLine,
     ) -> (u16, u16, SetCursorStyle) {
         (
-            rect.x + cmd_line.cursor as u16 + 1,
+            rect.x + cmd_line.cursor as u16+1,
             rect.y,
-            SetCursorStyle::SteadyBar,
+            match cmd_line.mode{
+                Mode::Normal => SetCursorStyle::SteadyBlock,
+                Mode::Visual => SetCursorStyle::SteadyUnderScore,
+                Mode::Insert => SetCursorStyle::SteadyBar,
+            }
         )
     }
     fn sketch(
@@ -657,6 +679,10 @@ impl Component for CmdLineDummy {
             }
         };
         screen.set_string_xy(rect.x, rect.y, &s, FG, BG);
+        if let Some(sel) = cmd_line.selection{
+            let s = &cmd_line.input[sel.0..sel.1];
+            screen.set_string_xy(rect.x+cmd_line.input[..sel.0].chars().count() as u16+1, rect.y, s, FG, SELECTION);
+        }
     }
     fn behaviour(
         &mut self,
@@ -667,20 +693,41 @@ impl Component for CmdLineDummy {
         buffers: &mut Buffers,
         nodes: &mut Nodes,
     ) -> Result<(), EditorErr> {
-        let cmd = match key.code {
-            KeyCode::Char(c) => Action::Insert(c),
-            KeyCode::Esc => Action::EnterNormal,
-            KeyCode::Backspace => Action::BackSpace,
-            KeyCode::Left => Action::MoveLeft,
-            KeyCode::Right => Action::MoveRight,
-            KeyCode::Enter => Action::Exec,
-            _ => Action::Noop,
+        let action = match cmd_line.mode{
+            Mode::Insert => match key.code {
+                KeyCode::Char(c) => Action::Insert(c),
+                KeyCode::Esc => Action::EnterNormal,
+                KeyCode::Backspace => Action::BackSpace,
+                KeyCode::Left => Action::MoveLeft,
+                KeyCode::Right => Action::MoveRight,
+                KeyCode::Enter => Action::Exec,
+                _ => Action::Noop,
+            },
+            Mode::Visual => match key.code{
+                KeyCode::Esc => Action::EnterNormal,
+                KeyCode::Char('h')=>Action::MoveSelectionLeft,
+                KeyCode::Char('y')=>Action::YankClipboard,
+                KeyCode::Char('l')=>Action::MoveSelectionRight,
+                KeyCode::Char('d')=>Action::BackSpace,
+                _ => Action::Noop,
+            }
+            Mode::Normal => match key.code{
+                KeyCode::Enter    =>Action::Exec,
+                KeyCode::Esc      =>Action::EnterView,
+                KeyCode::Char('p')=>Action::PasteClipboard,
+                KeyCode::Char('i')=>Action::EnterInsert,
+                KeyCode::Char('v')=>Action::EnterVisual,
+                KeyCode::Char('h')=>Action::MoveLeft,
+                KeyCode::Char('l')=>Action::MoveRight,
+                _ => Action::Noop,
+            }
         };
-        fn enter_normal(focus: &mut LeafIdx, lidx: LeafIdx, cmd_line: &mut CmdLine) {
+        fn enter_view(focus: &mut LeafIdx, lidx: LeafIdx, cmd_line: &mut CmdLine) {
+            cmd_line.mode = Mode::Insert;
             cmd_line.cursor = 0;
             *focus = lidx;
         }
-        exec_action(cmd, cmd_line, nodes, focus, views, buffers)?;
+        exec_action(action, cmd_line, nodes, focus, views, buffers)?;
         fn exec_cmd(
             cmd: ParsedWritableCmd,
             cmd_line: &mut CmdLine,
@@ -748,7 +795,7 @@ impl Component for CmdLineDummy {
                     } else {
                         return Err(EditorErr::Msg("will not close special buffer: 0".into()));
                     }
-                    enter_normal(focus, lidx, cmd_line);
+                    enter_view(focus, lidx, cmd_line);
                 }
                 Cmd::Open=>{
                     let v = views.get_mut(vidx);
@@ -778,7 +825,7 @@ impl Component for CmdLineDummy {
                         buffers.push(Buffer::new(None, 0)?)
                     };
                     v.buf = buffer;
-                    enter_normal(focus, lidx, cmd_line);
+                    enter_view(focus, lidx, cmd_line);
                 }
                 Cmd::ViewClose => {
                     nodes.remove_child(parent, views, focus, NodeIdx::Leaf(lidx));
@@ -795,7 +842,7 @@ impl Component for CmdLineDummy {
                         }
                     };
                     *focus = lidx;
-                    enter_normal(focus, lidx, cmd_line);
+                    enter_view(focus, lidx, cmd_line);
                 }
                 Cmd::BufferSwitch => {
                     let idx = match cmd.argument{
@@ -820,7 +867,7 @@ impl Component for CmdLineDummy {
                         let buffer = buffers.get_mut(idx);
                         if buffer.buf.len_chars() == 0 {
                             if let Some(p) = &buffer.file {
-                                if Path::new(p).exists(){
+                                if Path::new(p).is_file(){
                                     let file = File::open(p)?;
                                     let reader = BufReader::new(file);
                                     buffer.buf = Rope::from_reader(reader)?;
@@ -840,7 +887,7 @@ impl Component for CmdLineDummy {
                         view.cursor = buffer.last_cursor;
                         view.prefered_x = col;
                         view.scroll(&nodes.get_leaf(lidx).rect, buffer);
-                        enter_normal(focus, lidx, cmd_line);
+                        enter_view(focus, lidx, cmd_line);
                     } else {
                         return Err(EditorErr::InvalidBuffer);
                     }
@@ -896,7 +943,7 @@ impl Component for CmdLineDummy {
                             }
                         }
                     }
-                    enter_normal(focus, lidx, cmd_line);
+                    enter_view(focus, lidx, cmd_line);
                 }
                 Cmd::SplitV => {
                     if let Some(idx) = nodes
@@ -913,7 +960,7 @@ impl Component for CmdLineDummy {
                         let comp: Box<dyn Component> = Box::new(vidx);
                         nodes.new_leaf(comp, new_parent, None, (None, None));
                         nodes.get_mut_split(parent).children.swap_remove(idx);
-                        enter_normal(focus, l, cmd_line);
+                        enter_view(focus, l, cmd_line);
                         nodes.recalc(parent);
                     }
                 }
@@ -936,7 +983,7 @@ impl Component for CmdLineDummy {
                         let comp: Box<dyn Component> = Box::new(vidx);
                         nodes.new_leaf(comp, new_parent, None, (None, None));
                         nodes.get_mut_split(parent).children.swap_remove(idx);
-                        enter_normal(focus, l, cmd_line);
+                        enter_view(focus, l, cmd_line);
                         nodes.recalc(parent);
                     }
                 }
@@ -944,7 +991,7 @@ impl Component for CmdLineDummy {
                     let vidx = views.push(View::new(SCRATCH));
                     let comp: Box<dyn Component> = Box::new(vidx);
                     nodes.new_leaf(comp, parent, None, (None, None));
-                    enter_normal(focus, lidx, cmd_line);
+                    enter_view(focus, lidx, cmd_line);
                 }
             }
             Ok(())
@@ -971,23 +1018,124 @@ impl Component for CmdLineDummy {
                     Ok(cmd)=>exec_cmd(cmd, cmd_line, nodes, focus, views, buffers)?,
                     Err(s) => return Err(EditorErr::Msg(s)),
                 },
-                Action::EnterNormal => {
-                    enter_normal(focus, lidx, cmd_line);
+                Action::EnterView => {
+                    cmd_line.selection = None;
+                    enter_view(focus, lidx, cmd_line);
                 }
                 Action::Insert(c) => {
                     cmd_line.insert(c);
                 }
                 Action::BackSpace => {
-                    cmd_line.backspace();
+                    if let Some(sel) = cmd_line.selection{
+                        cmd_line.cursor = sel.1;
+                        for _ in sel.0..sel.1{
+                            cmd_line.backspace();
+                        }
+                        cmd_line.selection = None;
+                        cmd_line.mode = Mode::Normal;
+                    }else{
+                        cmd_line.backspace();
+                    }
+                }
+                Action::YankClipboard => {
+                    if let Some(sel) = cmd_line.selection{
+                        yank_to_system_clipboard(&cmd_line.input[sel.0..sel.1])?;
+                        cmd_line.selection = None;
+                        cmd_line.mode = Mode::Normal;
+                    }
+                }
+                Action::PasteClipboard => {
+                    let mut s = match paste_system_clipboard(){
+                        Ok(t)=>t,
+                        Err(_)=>return Ok(())
+                    };
+                    s.retain(|c| c != '\n');
+                    for c in s.chars(){
+                        cmd_line.insert(c);
+                    }
+                }
+                Action::MoveSelectionLeft=>{
+                    exec_action(Action::MoveLeft, cmd_line, nodes, focus, views, buffers).unwrap();
+                    let Some(sel) = &mut cmd_line.selection else {return Ok(());};
+                    if cmd_line.cursor > sel.0{
+                        sel.1 = cmd_line.cursor;
+                    }else{
+                        sel.0 = cmd_line.cursor;
+                    }
+                }
+                Action::MoveSelectionRight=>{
+                    exec_action(Action::MoveRight, cmd_line, nodes, focus, views, buffers).unwrap();
+                    let Some(sel) = &mut cmd_line.selection else {return Ok(())};
+                    //to include the cursor not just until the cursor
+                    if cmd_line.cursor >= sel.1{
+                        if cmd_line.cursor == cmd_line.input.len(){
+                            return Ok(())
+                        }
+                        let mut it = cmd_line.input[cmd_line.cursor..].char_indices();
+                        it.next();
+                        if let Some(it) = it.next(){
+                            sel.1 += it.0;
+                        }else{
+                            sel.1 = cmd_line.input.len();
+                        }
+                    }else{
+                        sel.0 = cmd_line.cursor;
+                    }
                 }
                 Action::MoveLeft => {
-                    cmd_line.cursor = cmd_line.cursor.saturating_sub(1);
+                    if cmd_line.cursor == 0{
+                        return Ok(())
+                    }
+                    let mut prev = 0;
+                    let prev = {
+                        for (i, _) in cmd_line.input.char_indices(){
+                            if i >= cmd_line.cursor{
+                                break;
+                            }
+                            prev = i;
+                        }
+                        prev
+                    };
+                    cmd_line.cursor = prev;
                 }
                 Action::MoveRight => {
-                    cmd_line.cursor = cmd_line.cursor.saturating_add(1);
+                    if cmd_line.cursor == cmd_line.input.len(){
+                        return Ok(())
+                    }
+                    let mut it = cmd_line.input[cmd_line.cursor..].char_indices();
+                    it.next();
+                    if let Some(it) = it.next(){
+                        cmd_line.cursor += it.0;
+                    }else{
+                        cmd_line.cursor = cmd_line.input.len();
+                    }
+                }
+                Action::EnterNormal=>{
+                    cmd_line.selection = None;
+                    cmd_line.mode = Mode::Normal;
+                }
+                Action::EnterInsert=>{
+                    cmd_line.selection = None;
+                    cmd_line.mode = Mode::Insert;
+                }
+                Action::EnterVisual => {
+                    cmd_line.mode = Mode::Visual;
+                    let sel2 = {
+                        if cmd_line.cursor == cmd_line.input.len(){
+                            cmd_line.cursor
+                        }else{
+                            let mut it = cmd_line.input[cmd_line.cursor..].char_indices();
+                            it.next();
+                            if let Some(it) = it.next(){
+                                cmd_line.cursor + it.0
+                            }else{
+                                cmd_line.input.len()
+                            }
+                        }
+                    };
+                    cmd_line.selection = Some((cmd_line.cursor, sel2))
                 }
                 Action::Noop => {}
-                _ => {}
             }
             Ok(())
         }
@@ -1300,16 +1448,12 @@ impl Component for ViewIdx {
                 }
 
                 let mut start = 0usize;
-
                 while start < text_len && row < height {
                     let end = usize::min(start + width, text_len);
-
                     for col in start..end {
                         let idx = global_idx + col;
-
                         if idx >= sel_start && idx < sel_end {
                             let c = line.char(col);
-
                             screen.set_cell_xy(
                                 rect.x + 5 + (col - start) as u16,
                                 rect.y + row as u16,
@@ -1321,7 +1465,6 @@ impl Component for ViewIdx {
                             );
                         }
                     }
-
                     start = end;
                     row += 1;
                 }
@@ -1624,19 +1767,19 @@ impl Component for ViewIdx {
                 }
 
                 Cmd::PasteClipboard => {
-                    let s = match paste_to_system_clipboard() {
+                    let s = match paste_system_clipboard() {
                         Ok(text) => text,
                         Err(_) => return Ok(()),
                     };
                     let v = views.get_mut(vidx);
                     let b = buffers.get_mut(v.buf);
-                    let c = usize::min(v.cursor + 1, b.buf.len_chars());
+                    let c = usize::min(v.cursor+1, b.buf.len_chars());
                     b.insert_string(v.off, c, &s);
                     b.undo.push(Edit::Insert {
                         idx: c,
                         text: s.clone(),
                     });
-                    v.cursor += s.chars().count() + 1;
+                    v.cursor += s.chars().count();
                     v.selection = None;
                 }
                 Cmd::EnterCmd => {
