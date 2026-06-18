@@ -2,6 +2,7 @@
 
 # Current
 cmd line pop-up and autocomplete
+make cmd modal as in having modes: normal, insert visual
 better, consistent, more commands
 
 ---
