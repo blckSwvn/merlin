@@ -820,12 +820,18 @@ impl Component for CmdLineDummy {
                         let buffer = buffers.get_mut(idx);
                         if buffer.buf.len_chars() == 0 {
                             if let Some(p) = &buffer.file {
-                                let file = File::open(p)?;
-                                let reader = BufReader::new(file);
-                                buffer.buf = Rope::from_reader(reader)?;
+                                if Path::new(p).exists(){
+                                    let file = File::open(p)?;
+                                    let reader = BufReader::new(file);
+                                    buffer.buf = Rope::from_reader(reader)?;
+                                }
                             }
                         }
                         view.buf = idx;
+                        //prevent panic on cursor > len_chars which happens
+                        //if buffer is forcefully closed while cursor is not 0 and buffer is dirty and then revived
+                        buffer.last_cursor = buffer.last_cursor.min(buffer.buf.len_chars());
+                        buffer.last_off = buffer.last_off.min(buffer.buf.len_chars());
                         view.cursor = buffer.last_cursor;
                         view.off = buffer.last_off;
                         let line = buffer.buf.char_to_line(buffer.last_cursor);
@@ -1595,8 +1601,8 @@ impl Component for ViewIdx {
                     if selection.0 > selection.1 {
                         std::mem::swap(&mut selection.1, &mut selection.0);
                     }
-                    yank_to_system_clipboard(&b.buf.slice(selection.0..selection.1).to_string())
-                        .unwrap();
+                    let selection = &b.buf.slice(selection.0..selection.1).to_string();
+                    yank_to_system_clipboard(selection).unwrap();//kinda slow due to syscall and beeing blocking
                     v.selection = None;
                     enter_normal(v, cmd_line);
                 }
@@ -3099,8 +3105,8 @@ fn main() -> io::Result<()> {
                                 cmd_line.error(&format!("buffer:{}is read only", idx.idx))
                             }
                             EditorErr::Log(msg) => log(&msg),
-                            EditorErr::Io(_) => {
-                                log("IO error");
+                            EditorErr::Io(e) => {
+                                log(&format!("IO error: {e}"));
                                 break;
                             }
                             EditorErr::Quit => break,
