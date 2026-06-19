@@ -185,7 +185,7 @@ pub mod cmd_line {
         *focus = lidx;
     }
     fn exec_cmd(
-        cmd: ParsedWritableCmd,
+        cmd: CmdVal,
         cmd_line: &mut CmdLine,
         nodes: &mut Nodes,
         focus: &mut LeafIdx,
@@ -447,7 +447,7 @@ pub mod cmd_line {
         }
         Ok(())
     }
-    fn parse_cmd(s: &String) -> Result<ParsedWritableCmd, String> {
+    fn parse_cmd(s: &String) -> Result<CmdVal, String> {
         let mut parts: Vec<&str> = s.split_whitespace().collect();
         if parts.is_empty() {
             return Err("command is empty".into());
@@ -460,7 +460,7 @@ pub mod cmd_line {
                 false
             }
         };
-        let mut command: Option<WriteableCmdSpec> = None;
+        let mut command: Option<CmdSpec> = None;
         let mut cmd: Option<Cmd> = None;
         let mut argument: Option<ArgVal> = None;
         for c in COMMAND_REGISTERY {
@@ -502,7 +502,7 @@ pub mod cmd_line {
         } else {
             return Err(format!("{} is not a command nor command alias", parts[0]));
         }
-        Ok(ParsedWritableCmd {
+        Ok(CmdVal {
             cmd: cmd.unwrap(),
             argument,
             force,
@@ -618,14 +618,14 @@ pub mod cmd_line {
         kind: ArgKind,
         required: bool,
     }
-    pub struct WriteableCmdSpec {
+    pub struct CmdSpec {
         pub name: &'static str,
         pub arg: Option<ArgSpec>,
         pub forcable: bool,
         pub cmd: Cmd,
     }
 
-    struct ParsedWritableCmd {
+    struct CmdVal {
         cmd: Cmd,
         argument: Option<ArgVal>,
         force: bool,
@@ -636,14 +636,14 @@ pub mod cmd_line {
     //must commands do not collide to cause aliases beeing able to be interpreted in different ways
     ///! suffix is for force, not all commands implement force
     //commands that use arguments need to define if they require an argument or if they are optional argument
-    pub const COMMAND_REGISTERY: [WriteableCmdSpec; 10] = [
-        WriteableCmdSpec {
+    pub const COMMAND_REGISTERY: [CmdSpec; 10] = [
+        CmdSpec {
             name: "quit",
             arg: None,
             forcable: true,
             cmd: Cmd::Quit,
         },
-        WriteableCmdSpec {
+        CmdSpec {
             name: "write",
             arg: Some(ArgSpec {
                 kind: ArgKind::FilePath,
@@ -652,7 +652,7 @@ pub mod cmd_line {
             forcable: false,
             cmd: Cmd::Save,
         },
-        WriteableCmdSpec {
+        CmdSpec {
             name: "open",
             arg: Some(ArgSpec {
                 kind: ArgKind::FilePath,
@@ -661,7 +661,7 @@ pub mod cmd_line {
             forcable: false,
             cmd: Cmd::Open,
         },
-        WriteableCmdSpec {
+        CmdSpec {
             name: "close",
             arg: Some(ArgSpec {
                 kind: ArgKind::UnsignedNumber,
@@ -670,13 +670,13 @@ pub mod cmd_line {
             forcable: true,
             cmd: Cmd::Close,
         },
-        WriteableCmdSpec {
+        CmdSpec {
             name: "view-close",
             arg: None,
             forcable: false,
             cmd: Cmd::ViewClose,
         },
-        WriteableCmdSpec {
+        CmdSpec {
             name: "buffer-switch",
             arg: Some(ArgSpec {
                 kind: ArgKind::UnsignedNumber,
@@ -685,25 +685,25 @@ pub mod cmd_line {
             forcable: false,
             cmd: Cmd::BufferSwitch,
         },
-        WriteableCmdSpec {
+        CmdSpec {
             name: "buffer-list",
             arg: None,
             forcable: false,
             cmd: Cmd::BufferList,
         },
-        WriteableCmdSpec {
+        CmdSpec {
             name: "split",
             arg: None,
             forcable: false,
             cmd: Cmd::Split,
         },
-        WriteableCmdSpec {
+        CmdSpec {
             name: "split-horizontal",
             arg: None,
             forcable: false,
             cmd: Cmd::SplitH,
         },
-        WriteableCmdSpec {
+        CmdSpec {
             name: "split-vertical",
             arg: None,
             forcable: false,
