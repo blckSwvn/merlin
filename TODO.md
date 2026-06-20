@@ -3,6 +3,7 @@
 # Current
 cmd line pop-up and autocomplete
 make cmd modal as in having modes: normal, insert visual
+make delete work on single charcters when none selection
 better, consistent, more commands
 
 ---

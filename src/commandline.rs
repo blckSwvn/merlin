@@ -2,53 +2,86 @@ pub struct Dummy();
 use super::Mode as OtherMode;
 use super::*;
 mod auto_complete {
+    use cmd_line::CmdLine;
     use crossterm::event::KeyModifiers;
 
-    use crate::commandline::cmd_line::COMMAND_REGISTERY;
+    use crate::commandline::cmd_line::{COMMAND_REGISTERY, CmdSpec};
 
     use super::*;
 
-    pub struct AutoComplete(pub usize);
-    impl AutoComplete {}
+    pub struct AutoComplete {
+        pub selected: usize,
+        pub filtered: Vec<&'static CmdSpec>,
+        pub progress: Option<CmdSpec>,
+    }
+
+    impl AutoComplete {
+        pub fn new(cmd_line: &CmdLine) -> Self {
+            let parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
+            let filtered = match parts.get(1) {
+                Some(p) => COMMAND_REGISTERY
+                    .iter()
+                    .filter(|c| c.name.starts_with(p))
+                    .collect(),
+                None => COMMAND_REGISTERY.iter().collect(),
+            };
+            AutoComplete {
+                selected: 0,
+                filtered,
+                progress: None,
+            }
+        }
+    }
     impl Component for AutoComplete {
         fn sketch(
             &self,
             rect: &Rect,
             _views: &Views,
             _buffers: &Buffers,
-            _cmd_line: &CmdLine,
+            cmd_line: &CmdLine,
             screen: &mut ScreenBuffer,
         ) {
-            let rect = sketch_border1(rect, screen);
+            let mut rect = rect.clone();
             let blank = " ".repeat(rect.width as usize);
             for y in 0..rect.height {
                 screen.set_string_xy(rect.x, rect.y + y, &blank, FG, BG);
             }
+            // screen.set_string_xy(rect.x, rect.y, &"─".repeat(rect.width as usize), FG, BG);
+            rect.y += 1;
+            rect.height -= 1;
             let mut c = 0;
             let mut offset = 0;
-            while c < COMMAND_REGISTERY.len() {
+
+            let parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
+            while c < self.filtered.len() {
                 let mut max = 0;
                 for y in 0..rect.height {
-                    if c >= COMMAND_REGISTERY.len() {
+                    if c >= self.filtered.len() {
                         break;
                     }
-                    max = max.max(COMMAND_REGISTERY[c].name.chars().count());
-                    if c == self.0 {
+                    max = max.max(self.filtered[c].name.chars().count());
+                    if c == self.selected {
                         screen.set_string_xy(
                             rect.x + offset,
                             rect.y + y,
-                            COMMAND_REGISTERY[c].name,
+                            self.filtered[c].name,
                             FG,
                             SELECTION,
                         );
+                        if let Some(p) = parts.get(0) {
+                            screen.set_string_xy(rect.x + offset, rect.y + y, p, BG, SELECTION);
+                        }
                     } else {
                         screen.set_string_xy(
                             rect.x + offset,
                             rect.y + y,
-                            COMMAND_REGISTERY[c].name,
+                            self.filtered[c].name,
                             FG,
                             BG,
                         );
+                        if let Some(p) = parts.get(0) {
+                            screen.set_string_xy(rect.x + offset, rect.y + y, p, BG, FG);
+                        }
                     }
                     c += 1;
                 }
@@ -57,9 +90,9 @@ mod auto_complete {
         }
         fn cursor_xy(
             &self,
-            rect: &Rect,
-            views: &Views,
-            buffers: &Buffers,
+            _rect: &Rect,
+            _views: &Views,
+            _buffers: &Buffers,
             cmd_line: &CmdLine,
             nodes: &Nodes,
         ) -> (u16, u16, SetCursorStyle) {
@@ -79,7 +112,6 @@ mod auto_complete {
                 Next,
                 Prev,
                 Complete,
-                Exec,
                 BackSpace,
                 Insert(char),
             }
@@ -99,8 +131,8 @@ mod auto_complete {
                         Action::Insert('k')
                     }
                 }
-                KeyCode::Char(' ') => Action::Complete,
-                KeyCode::Enter => Action::Exec,
+                KeyCode::Enter => Action::Complete,
+                KeyCode::Char(' ') => Action::Quit,
                 KeyCode::Char(c) => Action::Insert(c),
                 KeyCode::Backspace => Action::BackSpace,
                 _ => return Ok(()),
@@ -116,7 +148,21 @@ mod auto_complete {
                 nodes: &mut Nodes,
             ) -> Result<(), EditorErr> {
                 match action {
-                    Action::BackSpace => cmd_line.backspace(),
+                    Action::BackSpace => {
+                        cmd_line.backspace();
+                        ac.selected = 0;
+                        let parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
+                        ac.filtered = match parts.get(0) {
+                            Some(p) => COMMAND_REGISTERY
+                                .iter()
+                                .filter(|c| c.name.starts_with(p))
+                                .collect(),
+                            None => COMMAND_REGISTERY.iter().collect(),
+                        };
+                        if let None = ac.filtered.get(ac.selected) {
+                            exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes)?;
+                        }
+                    }
                     Action::Quit => {
                         nodes.remove_child(
                             nodes.get_root(ROOT_OVERLAY),
@@ -126,12 +172,26 @@ mod auto_complete {
                         );
                         *focus = CMDLINE;
                     }
-                    Action::Prev => ac.0 = ac.0.saturating_sub(1),
+                    Action::Prev => ac.selected = ac.selected.saturating_sub(1),
                     Action::Next => {
-                        ac.0 += 1;
-                        ac.0 = ac.0.min(COMMAND_REGISTERY.len()-1)
+                        ac.selected += 1;
+                        ac.selected = ac.selected.min(ac.filtered.len() - 1)
                     }
-                    Action::Insert(c) => cmd_line.insert(c),
+                    Action::Insert(c) => {
+                        cmd_line.insert(c);
+                        ac.selected = 0;
+                        let parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
+                        ac.filtered = match parts.get(0) {
+                            Some(p) => COMMAND_REGISTERY
+                                .iter()
+                                .filter(|c| c.name.starts_with(p))
+                                .collect(),
+                            None => COMMAND_REGISTERY.iter().collect(),
+                        };
+                        if let None = ac.filtered.get(ac.selected) {
+                            exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes)?;
+                        }
+                    }
                     Action::Complete => {
                         let count = cmd_line.input[..cmd_line.cursor]
                             .chars()
@@ -141,16 +201,11 @@ mod auto_complete {
                         for _ in 0..count {
                             cmd_line.backspace();
                         }
-                        for c in COMMAND_REGISTERY[ac.0].name.chars() {
+                        for c in ac.filtered[ac.selected].name.chars() {
                             cmd_line.insert(c);
                         }
-                        exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes)?
-                    }
-                    Action::Exec => {
-                        // exec_action(ac, Action::Complete, focus, cmd_line, views, buffers, nodes)?;
+                        cmd_line.insert(' ');
                         exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes)?;
-                        *focus = CMDLINE;
-                        cmd_line.exec(nodes, views, focus, buffers)?;
                     }
                 }
                 Ok(())
@@ -546,7 +601,7 @@ pub mod cmd_line {
             self.input.clear();
             self.cursor = 0;
             *focus = CMDLINE;
-            let comp: Box<dyn Component> = Box::new(auto_complete::AutoComplete(0));
+            let comp: Box<dyn Component> = Box::new(AutoComplete::new(self));
             *focus = nodes.new_leaf(
                 comp,
                 nodes.get_root(ROOT_OVERLAY),
@@ -888,26 +943,24 @@ pub mod cmd_line {
                         cmd_line.selection = None;
                         enter_view(focus, lidx, cmd_line);
                     }
-                    Action::Insert(c) => {
-                        match c{
-                            ' ' => {
-                                let comp: Box<dyn Component> = Box::new(AutoComplete(0));
-                                *focus = nodes.new_leaf(
-                                    comp,
-                                    nodes.get_root(ROOT_OVERLAY),
-                                    Some(Constraints {
-                                        min_width: Constraint::Flex,
-                                        max_width: Constraint::Flex,
-                                        min_height: Constraint::Absolute(7),
-                                        max_height: Constraint::Absolute(7),
-                                    }),
-                                    (None, Some(Anchor::Negative(8))),
-                                );
-                                cmd_line.insert(c);
-                            }
-                            _ => cmd_line.insert(c),
+                    Action::Insert(c) => match c {
+                        ' ' => {
+                            let comp: Box<dyn Component> = Box::new(AutoComplete::new(&cmd_line));
+                            *focus = nodes.new_leaf(
+                                comp,
+                                nodes.get_root(ROOT_OVERLAY),
+                                Some(Constraints {
+                                    min_width: Constraint::Flex,
+                                    max_width: Constraint::Flex,
+                                    min_height: Constraint::Absolute(7),
+                                    max_height: Constraint::Absolute(7),
+                                }),
+                                (None, Some(Anchor::Negative(8))),
+                            );
+                            cmd_line.insert(c);
                         }
-                    }
+                        _ => cmd_line.insert(c),
+                    },
                     Action::BackSpace => {
                         if let Some(sel) = cmd_line.selection {
                             cmd_line.cursor = sel.1;
