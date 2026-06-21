@@ -3,32 +3,114 @@ use super::Mode as OtherMode;
 use super::*;
 mod auto_complete {
     use cmd_line::CmdLine;
-    use crossterm::event::KeyModifiers;
-
-    use crate::commandline::cmd_line::{COMMAND_REGISTERY, CmdSpec};
+    use crossterm::{event::KeyModifiers, terminal::EnterAlternateScreen};
+    use crate::commandline::cmd_line::{ArgKind, COMMAND_REGISTERY, CmdSpec, Mode, alias};
 
     use super::*;
 
+    #[derive(Clone)]
     pub struct AutoComplete {
         pub selected: usize,
-        pub filtered: Vec<&'static CmdSpec>,
-        pub progress: Option<CmdSpec>,
+        pub filtered: Vec<String>,
+        pub progress: Option<&'static CmdSpec>,
     }
 
     impl AutoComplete {
-        pub fn new(cmd_line: &CmdLine) -> Self {
-            let parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
-            let filtered = match parts.get(1) {
-                Some(p) => COMMAND_REGISTERY
+        pub fn refresh_filtered_and_progress(
+            &mut self,
+            cmd_line: &CmdLine,
+            buffers: &Buffers,
+            cwd: &PathBuf,
+        ) -> Result<(), ()> {
+            let mut parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
+            if let Some(p) = parts.get(0) {
+                if p.ends_with('!') {
+                    parts[0] = &parts[0][..parts[0].len() - 1]; //only safe due to ! beeing ascii
+                }
+            }
+            let progress: Option<&CmdSpec> = if let Some(p) = parts.get(0) {
+                COMMAND_REGISTERY
                     .iter()
-                    .filter(|c| c.name.starts_with(p))
-                    .collect(),
-                None => COMMAND_REGISTERY.iter().collect(),
+                    .find(|c| c.name == *p || *p == alias(c.name))
+            } else {
+                None
             };
-            AutoComplete {
+            let filtered: Vec<String> = match progress {
+                None => {
+                    if let Some(p) = parts.get(0) {
+                        COMMAND_REGISTERY
+                            .iter()
+                            .filter(|c| c.name.starts_with(p))
+                            .map(|c| c.name.to_string())
+                            .collect()
+                    } else {
+                        COMMAND_REGISTERY
+                            .iter()
+                            .map(|c| c.name.to_string())
+                            .collect()
+                    }
+                }
+                Some(s) => match &s.arg {
+                    None => {
+                        return Err(());
+                    }
+                    Some(a) => match a.kind {
+                        ArgKind::DirectoryPath=>{
+                            let entries = match parts.get(1) {
+                                None => fs::read_dir(cwd)
+                                    .map_err(|_| ())?,
+                                Some(d) => fs::read_dir(d).map_err(|_| ())?,
+                            };
+                            entries
+                                .filter_map(|e| {
+                                    let e = e.ok()?;
+                                    if e.file_type().ok()?.is_dir() {
+                                        Some(e.path().display().to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            .collect()
+                        }
+                        ArgKind::FilePath => {
+                            use std::fs;
+
+                            let entries = match parts.get(1) {
+                                None => fs::read_dir(cwd)
+                                    .map_err(|_| ())?,
+                                Some(d) => fs::read_dir(d).map_err(|_| ())?,
+                            };
+                            entries
+                                .filter_map(|e| {
+                                    let e = e.ok()?;
+                                    let p = e.path();
+                                    match fs::metadata(&p) {
+                                        Ok(meta) if meta.is_file() => Some(p.display().to_string()),
+                                        _ => None,
+                                    }
+                                })
+                                .collect()
+                        }
+
+                        ArgKind::BufferIndex => {
+                            (0..buffers.data.len()).map(|i| i.to_string()).collect()
+                        }
+                    },
+                },
+            };
+            self.filtered = filtered;
+            self.progress = progress;
+            Ok(())
+        }
+        pub fn new(cmd_line: &CmdLine, buffers: &Buffers, cwd: &PathBuf) -> Option<AutoComplete> {
+            let mut ac = AutoComplete {
                 selected: 0,
-                filtered,
                 progress: None,
+                filtered: vec![],
+            };
+            match ac.refresh_filtered_and_progress(cmd_line, buffers, cwd) {
+                Ok(()) => Some(ac),
+                Err(()) => None,
             }
         }
     }
@@ -46,9 +128,10 @@ mod auto_complete {
             for y in 0..rect.height {
                 screen.set_string_xy(rect.x, rect.y + y, &blank, FG, BG);
             }
-            // screen.set_string_xy(rect.x, rect.y, &"─".repeat(rect.width as usize), FG, BG);
+            screen.set_string_xy(rect.x, rect.y, &"─".repeat(rect.width as usize), FG, BG);
             rect.y += 1;
             rect.height -= 1;
+
             let mut c = 0;
             let mut offset = 0;
 
@@ -59,29 +142,29 @@ mod auto_complete {
                     if c >= self.filtered.len() {
                         break;
                     }
-                    max = max.max(self.filtered[c].name.chars().count());
+                    max = max.max(self.filtered[c].chars().count());
                     if c == self.selected {
                         screen.set_string_xy(
                             rect.x + offset,
                             rect.y + y,
-                            self.filtered[c].name,
+                            &self.filtered[c],
                             FG,
                             SELECTION,
                         );
-                        if let Some(p) = parts.get(0) {
-                            screen.set_string_xy(rect.x + offset, rect.y + y, p, BG, SELECTION);
-                        }
+                        // if let Some(p) = parts.get(0) {
+                        //     screen.set_string_xy(rect.x + offset, rect.y + y, p, BG, SELECTION);
+                        // }
                     } else {
                         screen.set_string_xy(
                             rect.x + offset,
                             rect.y + y,
-                            self.filtered[c].name,
+                            &self.filtered[c],
                             FG,
                             BG,
                         );
-                        if let Some(p) = parts.get(0) {
-                            screen.set_string_xy(rect.x + offset, rect.y + y, p, BG, FG);
-                        }
+                        // if let Some(p) = parts.get(0) {
+                        //     screen.set_string_xy(rect.x + offset, rect.y + y, p, BG, FG);
+                        // }
                     }
                     c += 1;
                 }
@@ -106,6 +189,7 @@ mod auto_complete {
             views: &mut Views,
             buffers: &mut Buffers,
             nodes: &mut Nodes,
+            cwd: &mut PathBuf,
         ) -> Result<(), EditorErr> {
             enum Action {
                 Quit,
@@ -113,6 +197,7 @@ mod auto_complete {
                 Prev,
                 Complete,
                 BackSpace,
+                Exec,
                 Insert(char),
             }
             let action = match key.code {
@@ -131,13 +216,12 @@ mod auto_complete {
                         Action::Insert('k')
                     }
                 }
-                KeyCode::Enter => Action::Complete,
-                KeyCode::Char(' ') => Action::Quit,
+                KeyCode::Enter => Action::Exec,
                 KeyCode::Char(c) => Action::Insert(c),
                 KeyCode::Backspace => Action::BackSpace,
                 _ => return Ok(()),
             };
-            exec_action(self, action, focus, cmd_line, views, buffers, nodes)?;
+            exec_action(self, action, focus, cmd_line, views, buffers, nodes, cwd)?;
             fn exec_action(
                 ac: &mut AutoComplete,
                 action: Action,
@@ -146,21 +230,24 @@ mod auto_complete {
                 views: &mut Views,
                 buffers: &mut Buffers,
                 nodes: &mut Nodes,
+                cwd: &mut PathBuf,
             ) -> Result<(), EditorErr> {
                 match action {
+                    Action::Exec => {
+                        let curr = *focus;
+                        *focus = CMDLINE;
+                        let res = cmd_line.exec(nodes, views, focus, buffers, cwd);
+                        cmd_line.mode = Mode::Normal;
+                        *focus = curr;
+                        exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes, cwd)?;
+                        res?
+                    }
                     Action::BackSpace => {
                         cmd_line.backspace();
                         ac.selected = 0;
-                        let parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
-                        ac.filtered = match parts.get(0) {
-                            Some(p) => COMMAND_REGISTERY
-                                .iter()
-                                .filter(|c| c.name.starts_with(p))
-                                .collect(),
-                            None => COMMAND_REGISTERY.iter().collect(),
-                        };
+                        let _ = ac.refresh_filtered_and_progress(cmd_line, buffers, cwd);
                         if let None = ac.filtered.get(ac.selected) {
-                            exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes)?;
+                            exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes, cwd)?;
                         }
                     }
                     Action::Quit => {
@@ -172,12 +259,24 @@ mod auto_complete {
                         );
                         *focus = CMDLINE;
                     }
-                    Action::Prev => ac.selected = ac.selected.saturating_sub(1),
+                    Action::Prev => {
+                        ac.selected = ac.selected.saturating_sub(1);
+                        exec_action(ac, Action::Complete, focus, cmd_line, views, buffers, nodes, cwd)?;
+                    }
                     Action::Next => {
                         ac.selected += 1;
-                        ac.selected = ac.selected.min(ac.filtered.len() - 1)
+                        ac.selected = ac.selected.min(ac.filtered.len().saturating_sub(1));
+                        exec_action(ac, Action::Complete, focus, cmd_line, views, buffers, nodes, cwd)?;
                     }
                     Action::Insert(c) => {
+                        if c == ' ' {
+                            cmd_line.insert(' ');
+                            match ac.refresh_filtered_and_progress(cmd_line, buffers, cwd){
+                                Ok(_)=>{}
+                                Err(_)=>exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes, cwd).unwrap(),
+                            }
+                            return Ok(())
+                        }
                         cmd_line.insert(c);
                         ac.selected = 0;
                         let parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
@@ -185,11 +284,15 @@ mod auto_complete {
                             Some(p) => COMMAND_REGISTERY
                                 .iter()
                                 .filter(|c| c.name.starts_with(p))
+                                .map(|e| e.name.to_string())
                                 .collect(),
-                            None => COMMAND_REGISTERY.iter().collect(),
+                            None => COMMAND_REGISTERY
+                                .iter()
+                                .map(|e| e.name.to_string())
+                                .collect(),
                         };
                         if let None = ac.filtered.get(ac.selected) {
-                            exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes)?;
+                            exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes, cwd)?;
                         }
                     }
                     Action::Complete => {
@@ -201,11 +304,22 @@ mod auto_complete {
                         for _ in 0..count {
                             cmd_line.backspace();
                         }
-                        for c in ac.filtered[ac.selected].name.chars() {
+                        for c in ac.filtered[ac.selected].chars() {
                             cmd_line.insert(c);
                         }
-                        cmd_line.insert(' ');
-                        exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes)?;
+                        // match ac.refresh_filtered_and_progress(cmd_line, buffers, cwd) {
+                        //     Err(()) => exec_action(
+                        //         ac,
+                        //         Action::Quit,
+                        //         focus,
+                        //         cmd_line,
+                        //         views,
+                        //         buffers,
+                        //         nodes,
+                        //         cwd,
+                        //     )?,
+                        //     Ok(()) => {}
+                        // }
                     }
                 }
                 Ok(())
@@ -217,17 +331,16 @@ mod auto_complete {
 pub mod cmd_line {
     use crate::commandline::auto_complete::AutoComplete;
 
-    use super::auto_complete;
     use super::*;
 
-    enum Mode {
+    pub enum Mode {
         Normal,
         Insert,
         Visual,
     }
 
     pub struct CmdLine {
-        mode: Mode,
+        pub mode: Mode,
         pub input: String,
         pub cursor: usize,
         pub error: bool,
@@ -246,6 +359,7 @@ pub mod cmd_line {
         focus: &mut LeafIdx,
         views: &mut Views,
         buffers: &mut Buffers,
+        cwd: &mut PathBuf,
     ) -> Result<(), EditorErr> {
         let (bidx, vidx, lidx, parent) = {
             let l = nodes.get_leaf(cmd_line.last_view.0);
@@ -257,6 +371,18 @@ pub mod cmd_line {
             )
         };
         match cmd.cmd {
+            Cmd::Cd => {
+                let Some(f) = cmd.argument else{
+                    return Ok(())
+                };
+                *cwd = match f{
+                    ArgVal::FilePath(s)=>PathBuf::from(s),
+                    _ => return Err(EditorErr::Msg("cwd needs to be path".into())),
+                };
+            }
+            Cmd::Pwd => {
+                return Err(EditorErr::Msg(format!("{}",cwd.to_str().unwrap())));
+            }
             Cmd::Quit => {
                 if !cmd.force {
                     let dirty: Vec<_> = buffers
@@ -274,12 +400,12 @@ pub mod cmd_line {
                 }
                 return Err(EditorErr::Quit);
             }
-            Cmd::Close => {
+            Cmd::BufferClose => {
                 let view = views.get_mut(vidx);
                 let mut bidx = {
                     if let Some(arg) = cmd.argument {
                         match arg {
-                            ArgVal::UnsignedNumber(idx) => BufferIdx { idx },
+                            ArgVal::BufferIndex(idx) => BufferIdx { idx },
                             _ => panic!(),
                         }
                     } else {
@@ -358,7 +484,7 @@ pub mod cmd_line {
             Cmd::BufferSwitch => {
                 let idx = match cmd.argument {
                     Some(a) => match a {
-                        ArgVal::UnsignedNumber(num) => num,
+                        ArgVal::BufferIndex(num) => num,
                         _ => panic!(),
                     },
                     None => panic!(),
@@ -542,11 +668,12 @@ pub mod cmd_line {
                             },
                             Some(a)=>{
                                 match arg.kind{
-                                    ArgKind::UnsignedNumber=>match a.parse::<usize>(){
-                                        Ok(num) => Some(ArgVal::UnsignedNumber(num)),
+                                    ArgKind::BufferIndex=>match a.parse::<usize>(){
+                                        Ok(num) => Some(ArgVal::BufferIndex(num)),
                                         Err(_) => return Err("argument was not provided or was of wrong type or was of wrong type".into()),
                                     },
-                                    ArgKind::FilePath => Some(ArgVal::FilePath((*a).into()))
+                                    ArgKind::FilePath => Some(ArgVal::FilePath((*a).into())),
+                                    ArgKind::DirectoryPath => Some(ArgVal::FilePath((*a).into())),
                                 }
                             }
                         }
@@ -580,12 +707,13 @@ pub mod cmd_line {
             views: &mut Views,
             focus: &mut LeafIdx,
             buffers: &mut Buffers,
+            cwd: &mut PathBuf,
         ) -> Result<(), EditorErr> {
             let cmd = match parse_cmd(&self.input) {
                 Ok(o) => o,
                 Err(s) => return Err(EditorErr::Msg(s)),
             };
-            exec_cmd(cmd, self, nodes, focus, views, buffers)?;
+            exec_cmd(cmd, self, nodes, focus, views, buffers, cwd)?;
             Ok(())
         }
         pub fn enter_cmd_mode(
@@ -594,14 +722,19 @@ pub mod cmd_line {
             focus: &mut LeafIdx,
             views: &mut Views,
             lidx: LeafIdx,
+            buffers: &Buffers,
             nodes: &mut Nodes,
+            cwd: &mut PathBuf,
         ) {
             self.last_view = (lidx, vidx);
             views.get_mut(vidx).mode = OtherMode::Normal;
             self.input.clear();
             self.cursor = 0;
             *focus = CMDLINE;
-            let comp: Box<dyn Component> = Box::new(AutoComplete::new(self));
+            let comp: Box<dyn Component> = Box::new(match AutoComplete::new(self, buffers, cwd) {
+                Some(s) => s,
+                None => return,
+            });
             *focus = nodes.new_leaf(
                 comp,
                 nodes.get_root(ROOT_OVERLAY),
@@ -661,17 +794,18 @@ pub mod cmd_line {
         }
     }
 
-    enum ArgKind {
+    pub enum ArgKind {
         FilePath,
-        UnsignedNumber,
+        DirectoryPath,
+        BufferIndex,
     }
     enum ArgVal {
         FilePath(String),
-        UnsignedNumber(usize),
+        BufferIndex(usize),
     }
-    struct ArgSpec {
-        kind: ArgKind,
-        required: bool,
+    pub struct ArgSpec {
+        pub kind: ArgKind,
+        pub required: bool,
     }
     pub struct CmdSpec {
         pub name: &'static str,
@@ -691,7 +825,16 @@ pub mod cmd_line {
     //must commands do not collide to cause aliases beeing able to be interpreted in different ways
     ///! suffix is for force, not all commands implement force
     //commands that use arguments need to define if they require an argument or if they are optional argument
-    pub const COMMAND_REGISTERY: [CmdSpec; 10] = [
+    pub const COMMAND_REGISTERY: [CmdSpec; 12] = [
+        CmdSpec {
+            name: "cd",
+            arg: Some(ArgSpec{
+                kind: ArgKind::DirectoryPath,
+                required: true,
+            }),
+            forcable: false,
+            cmd: Cmd::Cd,
+        },
         CmdSpec {
             name: "quit",
             arg: None,
@@ -717,13 +860,13 @@ pub mod cmd_line {
             cmd: Cmd::Open,
         },
         CmdSpec {
-            name: "close",
+            name: "buffer-close",
             arg: Some(ArgSpec {
-                kind: ArgKind::UnsignedNumber,
+                kind: ArgKind::BufferIndex,
                 required: false,
             }),
             forcable: true,
-            cmd: Cmd::Close,
+            cmd: Cmd::BufferClose,
         },
         CmdSpec {
             name: "view-close",
@@ -734,7 +877,7 @@ pub mod cmd_line {
         CmdSpec {
             name: "buffer-switch",
             arg: Some(ArgSpec {
-                kind: ArgKind::UnsignedNumber,
+                kind: ArgKind::BufferIndex,
                 required: true,
             }),
             forcable: false,
@@ -764,15 +907,23 @@ pub mod cmd_line {
             forcable: false,
             cmd: Cmd::SplitV,
         },
+        CmdSpec {
+            name: "pwd",
+            arg: None,
+            forcable: false,
+            cmd: Cmd::Pwd,
+        },
     ];
 
     enum Cmd {
+        Cd,
+        Pwd,
         BufferList,
         Quit,
         Save,
         Open,
         BufferSwitch,
-        Close,
+        BufferClose,
         Split,
         SplitV,
         SplitH,
@@ -795,7 +946,7 @@ pub mod cmd_line {
         Noop,
     }
 
-    fn alias(command: &str) -> String {
+    pub fn alias(command: &str) -> String {
         let mut result = String::new();
         let mut keep_next = true;
         for c in command.chars() {
@@ -885,6 +1036,7 @@ pub mod cmd_line {
             views: &mut Views,
             buffers: &mut Buffers,
             nodes: &mut Nodes,
+            cwd: &mut PathBuf,
         ) -> Result<(), EditorErr> {
             let action = match cmd_line.mode {
                 Mode::Insert => match key.code {
@@ -915,7 +1067,7 @@ pub mod cmd_line {
                     _ => Action::Noop,
                 },
             };
-            exec_action(action, cmd_line, nodes, focus, views, buffers)?;
+            exec_action(action, cmd_line, nodes, focus, views, buffers, cwd)?;
 
             fn exec_action(
                 action: Action,
@@ -924,6 +1076,7 @@ pub mod cmd_line {
                 focus: &mut LeafIdx,
                 views: &mut Views,
                 buffers: &mut Buffers,
+                cwd: &mut PathBuf,
             ) -> Result<(), EditorErr> {
                 let (bidx, vidx, lidx, parent) = {
                     let l = nodes.get_leaf(cmd_line.last_view.0);
@@ -936,7 +1089,7 @@ pub mod cmd_line {
                 };
                 match action {
                     Action::Exec => match parse_cmd(&cmd_line.input) {
-                        Ok(cmd) => exec_cmd(cmd, cmd_line, nodes, focus, views, buffers)?,
+                        Ok(cmd) => exec_cmd(cmd, cmd_line, nodes, focus, views, buffers, cwd)?,
                         Err(s) => return Err(EditorErr::Msg(s)),
                     },
                     Action::EnterView => {
@@ -945,7 +1098,12 @@ pub mod cmd_line {
                     }
                     Action::Insert(c) => match c {
                         ' ' => {
-                            let comp: Box<dyn Component> = Box::new(AutoComplete::new(&cmd_line));
+                            cmd_line.insert(c);
+                            let comp: Box<dyn Component> =
+                                Box::new(match AutoComplete::new(&cmd_line, buffers, cwd) {
+                                    Some(s) => s,
+                                    None => return Ok(()),
+                                });
                             *focus = nodes.new_leaf(
                                 comp,
                                 nodes.get_root(ROOT_OVERLAY),
@@ -957,7 +1115,6 @@ pub mod cmd_line {
                                 }),
                                 (None, Some(Anchor::Negative(8))),
                             );
-                            cmd_line.insert(c);
                         }
                         _ => cmd_line.insert(c),
                     },
@@ -991,7 +1148,7 @@ pub mod cmd_line {
                         }
                     }
                     Action::MoveSelectionLeft => {
-                        exec_action(Action::MoveLeft, cmd_line, nodes, focus, views, buffers)
+                        exec_action(Action::MoveLeft, cmd_line, nodes, focus, views, buffers, cwd)
                             .unwrap();
                         let Some(sel) = &mut cmd_line.selection else {
                             return Ok(());
@@ -1003,7 +1160,7 @@ pub mod cmd_line {
                         }
                     }
                     Action::MoveSelectionRight => {
-                        exec_action(Action::MoveRight, cmd_line, nodes, focus, views, buffers)
+                        exec_action(Action::MoveRight, cmd_line, nodes, focus, views, buffers, cwd)
                             .unwrap();
                         let Some(sel) = &mut cmd_line.selection else {
                             return Ok(());

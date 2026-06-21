@@ -364,7 +364,7 @@ impl Buffer {
         let mut f = flags;
         let buf = if let Some(p) = path {
             let path = PathBuf::from(p);
-            if path.exists() {
+            if path.exists() && path.is_file() {
                 let cont = fs::read_to_string(&path)?;
                 if fs::metadata(&path)?.permissions().readonly() {
                     f |= Self::READ_ONLY;
@@ -496,6 +496,7 @@ trait Component {
         views: &mut Views,
         buffers: &mut Buffers,
         nodes: &mut Nodes,
+        cwd: &mut PathBuf,
     ) -> Result<(), EditorErr>;
 }
 
@@ -732,9 +733,10 @@ impl Component for ViewIdx {
         views: &mut Views,
         buffers: &mut Buffers,
         nodes: &mut Nodes,
+        cwd: &mut PathBuf,
     ) -> Result<(), EditorErr> {
         let cmd = key_to_cmd(key, views.get(*self));
-        exec_cmd(cmd, *self, nodes, focus, cmd_line, views, buffers)?;
+        exec_cmd(cmd, *self, nodes, focus, cmd_line, views, buffers, cwd)?;
         enum Cmd {
             EnterVisual,
             EnterNormal,
@@ -816,6 +818,7 @@ impl Component for ViewIdx {
             cmd_line: &mut CmdLine,
             views: &mut Views,
             buffers: &mut Buffers,
+            cwd: &mut PathBuf,
         ) -> Result<(), EditorErr> {
             fn enter_normal(view: &mut View, cmd_line: &mut CmdLine) {
                 view.mode = Mode::Normal;
@@ -987,7 +990,7 @@ impl Component for ViewIdx {
                     v.selection = None;
                 }
                 Cmd::EnterCmd => {
-                    cmd_line.enter_cmd_mode(vidx, focus, views, lidx, nodes);
+                    cmd_line.enter_cmd_mode(vidx, focus, views, lidx, buffers, nodes, cwd);
                 }
                 Cmd::EnterInsert => {
                     let v = views.get_mut(vidx);
@@ -1464,6 +1467,7 @@ impl Component for BufferList {
         views: &mut Views,
         _buffers: &mut Buffers,
         nodes: &mut Nodes,
+        _cwd: &mut PathBuf,
     ) -> Result<(), EditorErr> {
         match key.code {
             KeyCode::Esc => {
@@ -2306,13 +2310,14 @@ fn key_to_exec(
     cmd_line: &mut CmdLine,
     views: &mut Views,
     buffers: &mut Buffers,
+    cmd: &mut PathBuf,
 ) -> Result<(), EditorErr> {
     unsafe {
         //UNSAFE but its fine probably :D
         let l = nodes.get_leaf(*focus);
         let mut comp = ptr::read(&l.comp);
         let lidx = focus.clone();
-        let r = comp.behaviour(key, focus, cmd_line, views, buffers, nodes);
+        let r = comp.behaviour(key, focus, cmd_line, views, buffers, nodes, cmd);
         ptr::write(&mut nodes.get_mut_leaf(lidx).comp, comp);
         r?
     }
@@ -2326,6 +2331,7 @@ const ROOT_TEXT_VIEW: usize = 0;
 const ROOT_CMD_LINE: usize = 1;
 const ROOT_OVERLAY: usize = 2;
 fn main() -> io::Result<()> {
+    let mut cwd = env::current_dir().unwrap();
     cmd_line::check_alias_collison();
     let mut views = Views::new();
     let mut buffers = Buffers::new();
@@ -2452,6 +2458,7 @@ fn main() -> io::Result<()> {
                     &mut cmd_line,
                     &mut views,
                     &mut buffers,
+                    &mut cwd,
                 ) {
                     Err(e) => {
                         match e {
