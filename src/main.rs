@@ -479,6 +479,7 @@ trait Component {
         buffers: &Buffers,
         cmd_line: &CmdLine,
         screen: &mut ScreenBuffer,
+        cwd: &PathBuf,
     );
     fn cursor_xy(
         &self,
@@ -508,6 +509,7 @@ impl Component for ViewIdx {
         buffers: &Buffers,
         _cmd_line: &CmdLine,
         screen: &mut ScreenBuffer,
+        cwd: &PathBuf,
     ) {
         let v = views.get(*self);
         {
@@ -517,7 +519,7 @@ impl Component for ViewIdx {
                 screen.set_string_xy(rect.x, rect.y + row, &blank, FG, BG);
             }
         }
-        deco_sketch(v, rect, buffers, screen);
+        deco_sketch(v, rect, buffers, screen, cwd);
         text_sketch(v, rect, buffers, screen);
         selection_sketch(v, rect, buffers, screen);
         fn text_sketch(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
@@ -550,7 +552,7 @@ impl Component for ViewIdx {
                 line_idx += 1;
             }
         }
-        fn deco_sketch(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
+        fn deco_sketch(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer, cwd: &PathBuf) {
             let wrap_width = rect.width.saturating_sub(4) as usize;
 
             let mut screen_row = 0usize;
@@ -585,13 +587,14 @@ impl Component for ViewIdx {
 
                 line_idx += 1;
             }
-            let mut path = "SCRATCH";
+            let mut path = format!("[SCRATCH] {}",cwd.display());
             let buffer = buffers.get(view.buf);
             if !buffer.check_flag(Buffer::SCRATCH) {
                 if let Some(p) = &buffer.file {
-                    path = p.to_str().unwrap_or("NEW_FILE");
+                    path = p.display().to_string();
+                        // .unwrap_or(format!("[NEW_FILE] {}",cwd.into()));
                 } else {
-                    path = "NEW_FILE";
+                    path = format!("[NEW_FILE] {}",cwd.display());
                 }
             }
             let mode_str = match view.mode {
@@ -1410,6 +1413,7 @@ impl Component for BufferList {
         buffers: &Buffers,
         _cmd_line: &CmdLine,
         screen: &mut ScreenBuffer,
+        _cwd: &PathBuf,
     ) {
         let r = sketch_border1(r, screen);
         let dirty = if buffers.data.get(0).unwrap().undo.is_empty() {
@@ -1936,6 +1940,7 @@ mod nodes {
             old: &mut ScreenBuffer,
             new: &mut ScreenBuffer,
             nodes: &Nodes,
+            cwd: &PathBuf,
         ) -> io::Result<()> {
             for r in &self.roots {
                 sketch(
@@ -1946,6 +1951,7 @@ mod nodes {
                     cmd_line,
                     old,
                     new,
+                    cwd,
                 );
             }
             new.print(old)?;
@@ -1962,22 +1968,23 @@ mod nodes {
                 cmd_line: &CmdLine,
                 old: &mut ScreenBuffer,
                 new: &mut ScreenBuffer,
+                cwd: &PathBuf,
             ) {
                 match nidx {
                     NodeIdx::Split(s) => {
                         let s = &nodes.splits[s.0];
                         for (i, n) in s.children.iter().enumerate() {
                             if i != s.focus {
-                                sketch(nodes, *n, views, buffers, cmd_line, old, new);
+                                sketch(nodes, *n, views, buffers, cmd_line, old, new, cwd);
                             }
                         }
                         if let Some(nidx) = s.children.get(s.focus) {
-                            sketch(nodes, *nidx, views, buffers, cmd_line, old, new);
+                            sketch(nodes, *nidx, views, buffers, cmd_line, old, new, cwd);
                         }
                     }
                     NodeIdx::Leaf(l) => {
                         let l = &nodes.leaves[l.0];
-                        l.comp.sketch(&l.rect, views, buffers, cmd_line, new);
+                        l.comp.sketch(&l.rect, views, buffers, cmd_line, new, cwd);
                     }
                 }
             }
@@ -2444,7 +2451,7 @@ fn main() -> io::Result<()> {
     };
 
     nodes.paint(
-        &focus, &cmd_line, &views, &buffers, &mut old, &mut new, &nodes,
+        &focus, &cmd_line, &views, &buffers, &mut old, &mut new, &nodes, &cwd
     )?;
     stdout().flush().unwrap();
 
@@ -2498,7 +2505,7 @@ fn main() -> io::Result<()> {
                 }
                 queue!(stdout(), cursor::Hide)?;
                 nodes.paint(
-                    &focus, &cmd_line, &views, &buffers, &mut old, &mut new, &nodes,
+                    &focus, &cmd_line, &views, &buffers, &mut old, &mut new, &nodes, &cwd,
                 )?;
                 queue!(stdout(), cursor::Show)?;
                 stdout().flush()?;
@@ -2532,7 +2539,7 @@ fn main() -> io::Result<()> {
                 nodes.recalc_including_root(width, height);
                 queue!(stdout(), cursor::Hide)?;
                 nodes.paint(
-                    &focus, &cmd_line, &views, &buffers, &mut old, &mut new, &nodes,
+                    &focus, &cmd_line, &views, &buffers, &mut old, &mut new, &nodes, &cwd
                 )?;
                 queue!(stdout(), cursor::Show)?;
                 stdout().flush()?;

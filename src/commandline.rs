@@ -2,15 +2,15 @@ pub struct Dummy();
 use super::Mode as OtherMode;
 use super::*;
 mod auto_complete {
+    use crate::commandline::cmd_line::{ArgKind, COMMAND_REGISTERY, CmdSpec, Mode, alias};
     use cmd_line::CmdLine;
     use crossterm::{event::KeyModifiers, terminal::EnterAlternateScreen};
-    use crate::commandline::cmd_line::{ArgKind, COMMAND_REGISTERY, CmdSpec, Mode, alias};
 
     use super::*;
 
     #[derive(Clone)]
     pub struct AutoComplete {
-        pub selected: usize,
+        pub selected: Option<usize>,
         pub filtered: Vec<String>,
         pub progress: Option<&'static CmdSpec>,
     }
@@ -55,10 +55,9 @@ mod auto_complete {
                         return Err(());
                     }
                     Some(a) => match a.kind {
-                        ArgKind::DirectoryPath=>{
+                        ArgKind::DirectoryPath => {
                             let entries = match parts.get(1) {
-                                None => fs::read_dir(cwd)
-                                    .map_err(|_| ())?,
+                                None => fs::read_dir(cwd).map_err(|_| ())?,
                                 Some(d) => fs::read_dir(d).map_err(|_| ())?,
                             };
                             entries
@@ -70,14 +69,13 @@ mod auto_complete {
                                         None
                                     }
                                 })
-                            .collect()
+                                .collect()
                         }
                         ArgKind::FilePath => {
                             use std::fs;
 
                             let entries = match parts.get(1) {
-                                None => fs::read_dir(cwd)
-                                    .map_err(|_| ())?,
+                                None => fs::read_dir(cwd).map_err(|_| ())?,
                                 Some(d) => fs::read_dir(d).map_err(|_| ())?,
                             };
                             entries
@@ -104,7 +102,7 @@ mod auto_complete {
         }
         pub fn new(cmd_line: &CmdLine, buffers: &Buffers, cwd: &PathBuf) -> Option<AutoComplete> {
             let mut ac = AutoComplete {
-                selected: 0,
+                selected: None,
                 progress: None,
                 filtered: vec![],
             };
@@ -122,6 +120,7 @@ mod auto_complete {
             _buffers: &Buffers,
             cmd_line: &CmdLine,
             screen: &mut ScreenBuffer,
+            cwd: &PathBuf,
         ) {
             let mut rect = rect.clone();
             let blank = " ".repeat(rect.width as usize);
@@ -143,17 +142,24 @@ mod auto_complete {
                         break;
                     }
                     max = max.max(self.filtered[c].chars().count());
-                    if c == self.selected {
-                        screen.set_string_xy(
-                            rect.x + offset,
-                            rect.y + y,
-                            &self.filtered[c],
-                            FG,
-                            SELECTION,
-                        );
-                        // if let Some(p) = parts.get(0) {
-                        //     screen.set_string_xy(rect.x + offset, rect.y + y, p, BG, SELECTION);
-                        // }
+                    if let Some(s) = self.selected {
+                        if c == s {
+                            screen.set_string_xy(
+                                rect.x + offset,
+                                rect.y + y,
+                                &self.filtered[c],
+                                FG,
+                                SELECTION,
+                            );
+                        } else {
+                            screen.set_string_xy(
+                                rect.x + offset,
+                                rect.y + y,
+                                &self.filtered[c],
+                                FG,
+                                BG,
+                            );
+                        }
                     } else {
                         screen.set_string_xy(
                             rect.x + offset,
@@ -235,19 +241,37 @@ mod auto_complete {
                 match action {
                     Action::Exec => {
                         let curr = *focus;
+                        // *focus = curr;
+                        exec_action(
+                            ac,
+                            Action::Quit,
+                            focus,
+                            cmd_line,
+                            views,
+                            buffers,
+                            nodes,
+                            cwd,
+                        ).unwrap();
                         *focus = CMDLINE;
                         let res = cmd_line.exec(nodes, views, focus, buffers, cwd);
                         cmd_line.mode = Mode::Normal;
-                        *focus = curr;
-                        exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes, cwd)?;
                         res?
                     }
                     Action::BackSpace => {
                         cmd_line.backspace();
-                        ac.selected = 0;
+                        ac.selected = None;
                         let _ = ac.refresh_filtered_and_progress(cmd_line, buffers, cwd);
-                        if let None = ac.filtered.get(ac.selected) {
-                            exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes, cwd)?;
+                        if ac.filtered.is_empty() {
+                            exec_action(
+                                ac,
+                                Action::Quit,
+                                focus,
+                                cmd_line,
+                                views,
+                                buffers,
+                                nodes,
+                                cwd,
+                            )?;
                         }
                     }
                     Action::Quit => {
@@ -260,25 +284,61 @@ mod auto_complete {
                         *focus = CMDLINE;
                     }
                     Action::Prev => {
-                        ac.selected = ac.selected.saturating_sub(1);
-                        exec_action(ac, Action::Complete, focus, cmd_line, views, buffers, nodes, cwd)?;
+                        if let Some(s) = ac.selected {
+                            ac.selected = Some(s.saturating_sub(1));
+                        } else {
+                            ac.selected = Some(ac.filtered.len().saturating_sub(1));
+                        }
+                        exec_action(
+                            ac,
+                            Action::Complete,
+                            focus,
+                            cmd_line,
+                            views,
+                            buffers,
+                            nodes,
+                            cwd,
+                        )?;
                     }
                     Action::Next => {
-                        ac.selected += 1;
-                        ac.selected = ac.selected.min(ac.filtered.len().saturating_sub(1));
-                        exec_action(ac, Action::Complete, focus, cmd_line, views, buffers, nodes, cwd)?;
+                        if let Some(s) = ac.selected {
+                            ac.selected =
+                                Some(usize::min(s + 1, ac.filtered.len().saturating_sub(1)));
+                        } else {
+                            ac.selected = Some(0);
+                        }
+                        exec_action(
+                            ac,
+                            Action::Complete,
+                            focus,
+                            cmd_line,
+                            views,
+                            buffers,
+                            nodes,
+                            cwd,
+                        )?;
                     }
                     Action::Insert(c) => {
                         if c == ' ' {
                             cmd_line.insert(' ');
-                            match ac.refresh_filtered_and_progress(cmd_line, buffers, cwd){
-                                Ok(_)=>{}
-                                Err(_)=>exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes, cwd).unwrap(),
+                            match ac.refresh_filtered_and_progress(cmd_line, buffers, cwd) {
+                                Ok(_) => {}
+                                Err(_) => exec_action(
+                                    ac,
+                                    Action::Quit,
+                                    focus,
+                                    cmd_line,
+                                    views,
+                                    buffers,
+                                    nodes,
+                                    cwd,
+                                )
+                                .unwrap(),
                             }
-                            return Ok(())
+                            return Ok(());
                         }
                         cmd_line.insert(c);
-                        ac.selected = 0;
+                        ac.selected = None;
                         let parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
                         ac.filtered = match parts.get(0) {
                             Some(p) => COMMAND_REGISTERY
@@ -291,8 +351,17 @@ mod auto_complete {
                                 .map(|e| e.name.to_string())
                                 .collect(),
                         };
-                        if let None = ac.filtered.get(ac.selected) {
-                            exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes, cwd)?;
+                        if ac.filtered.is_empty() {
+                            exec_action(
+                                ac,
+                                Action::Quit,
+                                focus,
+                                cmd_line,
+                                views,
+                                buffers,
+                                nodes,
+                                cwd,
+                            )?;
                         }
                     }
                     Action::Complete => {
@@ -304,22 +373,11 @@ mod auto_complete {
                         for _ in 0..count {
                             cmd_line.backspace();
                         }
-                        for c in ac.filtered[ac.selected].chars() {
-                            cmd_line.insert(c);
+                        if let Some(s) = ac.selected {
+                            for c in ac.filtered[s].chars() {
+                                cmd_line.insert(c);
+                            }
                         }
-                        // match ac.refresh_filtered_and_progress(cmd_line, buffers, cwd) {
-                        //     Err(()) => exec_action(
-                        //         ac,
-                        //         Action::Quit,
-                        //         focus,
-                        //         cmd_line,
-                        //         views,
-                        //         buffers,
-                        //         nodes,
-                        //         cwd,
-                        //     )?,
-                        //     Ok(()) => {}
-                        // }
                     }
                 }
                 Ok(())
@@ -328,6 +386,9 @@ mod auto_complete {
         }
     }
 }
+//
+//
+//
 pub mod cmd_line {
     use crate::commandline::auto_complete::AutoComplete;
 
@@ -372,16 +433,26 @@ pub mod cmd_line {
         };
         match cmd.cmd {
             Cmd::Cd => {
-                let Some(f) = cmd.argument else{
-                    return Ok(())
-                };
-                *cwd = match f{
-                    ArgVal::FilePath(s)=>PathBuf::from(s),
-                    _ => return Err(EditorErr::Msg("cwd needs to be path".into())),
-                };
-            }
+                let Some(f) = cmd.argument else { return Ok(()) };
+                *cwd = match f {
+                    ArgVal::DirectoryPath(s)=>{
+                        let mut cwd = cwd.clone();
+                        cwd.push(s);
+                        match cwd.exists(){
+                            true => match cwd.is_dir(){
+                                true => {
+                                    cwd
+                                }
+                                false => return Err(EditorErr::Msg("path is not directory".into())),
+                            },
+                            false => return Err(EditorErr::Msg("path does not exist".into())),
+                        }
+                    }
+                    _ => return Err(EditorErr::Msg("needs to be directory path".into())),
+                    };
+            },
             Cmd::Pwd => {
-                return Err(EditorErr::Msg(format!("{}",cwd.to_str().unwrap())));
+                return Err(EditorErr::Msg(format!("{}", cwd.to_str().unwrap())));
             }
             Cmd::Quit => {
                 if !cmd.force {
@@ -673,7 +744,7 @@ pub mod cmd_line {
                                         Err(_) => return Err("argument was not provided or was of wrong type or was of wrong type".into()),
                                     },
                                     ArgKind::FilePath => Some(ArgVal::FilePath((*a).into())),
-                                    ArgKind::DirectoryPath => Some(ArgVal::FilePath((*a).into())),
+                                    ArgKind::DirectoryPath => Some(ArgVal::DirectoryPath((*a).into())),
                                 }
                             }
                         }
@@ -727,9 +798,10 @@ pub mod cmd_line {
             cwd: &mut PathBuf,
         ) {
             self.last_view = (lidx, vidx);
-            views.get_mut(vidx).mode = OtherMode::Normal;
+            // views.get_mut(vidx).mode = OtherMode::Normal; idk why this was here
             self.input.clear();
             self.cursor = 0;
+            self.mode = Mode::Insert;
             *focus = CMDLINE;
             let comp: Box<dyn Component> = Box::new(match AutoComplete::new(self, buffers, cwd) {
                 Some(s) => s,
@@ -801,6 +873,7 @@ pub mod cmd_line {
     }
     enum ArgVal {
         FilePath(String),
+        DirectoryPath(String),
         BufferIndex(usize),
     }
     pub struct ArgSpec {
@@ -828,7 +901,7 @@ pub mod cmd_line {
     pub const COMMAND_REGISTERY: [CmdSpec; 12] = [
         CmdSpec {
             name: "cd",
-            arg: Some(ArgSpec{
+            arg: Some(ArgSpec {
                 kind: ArgKind::DirectoryPath,
                 required: true,
             }),
@@ -1004,6 +1077,7 @@ pub mod cmd_line {
             _buffers: &Buffers,
             cmd_line: &CmdLine,
             screen: &mut ScreenBuffer,
+            cwd: &PathBuf,
         ) {
             screen.set_string_xy(rect.x, rect.y, &" ".repeat(rect.width as usize), FG, BG);
             let s = {
@@ -1148,8 +1222,16 @@ pub mod cmd_line {
                         }
                     }
                     Action::MoveSelectionLeft => {
-                        exec_action(Action::MoveLeft, cmd_line, nodes, focus, views, buffers, cwd)
-                            .unwrap();
+                        exec_action(
+                            Action::MoveLeft,
+                            cmd_line,
+                            nodes,
+                            focus,
+                            views,
+                            buffers,
+                            cwd,
+                        )
+                        .unwrap();
                         let Some(sel) = &mut cmd_line.selection else {
                             return Ok(());
                         };
@@ -1160,8 +1242,16 @@ pub mod cmd_line {
                         }
                     }
                     Action::MoveSelectionRight => {
-                        exec_action(Action::MoveRight, cmd_line, nodes, focus, views, buffers, cwd)
-                            .unwrap();
+                        exec_action(
+                            Action::MoveRight,
+                            cmd_line,
+                            nodes,
+                            focus,
+                            views,
+                            buffers,
+                            cwd,
+                        )
+                        .unwrap();
                         let Some(sel) = &mut cmd_line.selection else {
                             return Ok(());
                         };

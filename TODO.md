@@ -1,10 +1,15 @@
 # TODO
 
 # Current
-cmd line pop-up and autocomplete
-make cmd modal as in having modes: normal, insert visual
+improve autocomplete:
+    stripping cwd from path suggestions
+    compact on cwd ../ ./ without canonlize
+    maybe make cd without arg resolve to /home/user/ like in the shell
+    reslove ~ as /home/user
+improve cmdline by having history
 make delete work on single charcters when none selection
-better, consistent, more commands
+have local cliboard global for the editor rather than view specfic
+better, more, consistent, more commands
 
 ---
 
