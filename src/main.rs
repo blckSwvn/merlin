@@ -1,10 +1,9 @@
 use crossterm::{
     cursor::{self, MoveTo, SetCursorStyle},
-    event::{Event, KeyCode, KeyEvent, read},
+    event::{Event, KeyCode, KeyEvent, KeyModifiers, read},
     execute, queue,
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
-    terminal,
-    terminal::{disable_raw_mode, enable_raw_mode},
+    terminal::{self, disable_raw_mode, enable_raw_mode},
 };
 use ropey::Rope;
 use std::{
@@ -480,6 +479,7 @@ trait Component {
         cmd_line: &CmdLine,
         screen: &mut ScreenBuffer,
         cwd: &PathBuf,
+        focus: &LeafIdx,
     );
     fn cursor_xy(
         &self,
@@ -510,6 +510,7 @@ impl Component for ViewIdx {
         _cmd_line: &CmdLine,
         screen: &mut ScreenBuffer,
         cwd: &PathBuf,
+        _focus: &LeafIdx,
     ) {
         let v = views.get(*self);
         {
@@ -603,7 +604,7 @@ impl Component for ViewIdx {
                 Mode::Visual => "VIS",
             };
             let s = format!("{mode_str} {} {path}", view.buf.idx);
-            screen.set_string_xy(rect.x, rect.y + rect.height - 1, &s, FG, BG);
+            screen.set_string_xy(rect.x, rect.y + rect.height.saturating_sub(1), &s, FG, BG);
         }
         fn selection_sketch(
             view: &View,
@@ -773,7 +774,8 @@ impl Component for ViewIdx {
                 Mode::Normal => match key.code {
                     KeyCode::Char('y') => Cmd::Yank,
                     KeyCode::Char('i') => Cmd::EnterInsert,
-                    KeyCode::Char(':') => Cmd::EnterCmd,
+                    KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::ALT) => Cmd::EnterCmd,
+                    KeyCode::Char('K') => Cmd::FocusUp,
                     KeyCode::Char('u') => Cmd::Undo,
                     KeyCode::Char('U') => Cmd::Redo,
                     KeyCode::Char('h') => Cmd::MoveLeft,
@@ -782,7 +784,6 @@ impl Component for ViewIdx {
                     KeyCode::Char('l') => Cmd::MoveRight,
                     KeyCode::Char('H') => Cmd::FocusLeft,
                     KeyCode::Char('J') => Cmd::FocusDown,
-                    KeyCode::Char('K') => Cmd::FocusUp,
                     KeyCode::Char('L') => Cmd::FocusRight,
                     KeyCode::Char('p') => Cmd::Paste,
                     KeyCode::Char('P') => Cmd::PasteClipboard,
@@ -798,7 +799,8 @@ impl Component for ViewIdx {
                 },
                 Mode::Visual => match key.code {
                     KeyCode::Esc => Cmd::EnterNormal,
-                    KeyCode::Char(':') => Cmd::EnterCmd,
+                    KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::ALT) => Cmd::EnterCmd,
+                    KeyCode::Char('K') => Cmd::FocusUp,
                     KeyCode::Char('i') => Cmd::EnterInsert,
                     KeyCode::Char('k') => Cmd::MoveSelectionUp,
                     KeyCode::Char('j') => Cmd::MoveSelectionDown,
@@ -1414,6 +1416,7 @@ impl Component for BufferList {
         _cmd_line: &CmdLine,
         screen: &mut ScreenBuffer,
         _cwd: &PathBuf,
+        _focus: &LeafIdx,
     ) {
         let r = sketch_border1(r, screen);
         let dirty = if buffers.data.get(0).unwrap().undo.is_empty() {
@@ -1952,6 +1955,7 @@ mod nodes {
                     old,
                     new,
                     cwd,
+                    focus,
                 );
             }
             new.print(old)?;
@@ -1969,22 +1973,23 @@ mod nodes {
                 old: &mut ScreenBuffer,
                 new: &mut ScreenBuffer,
                 cwd: &PathBuf,
+                focus: &LeafIdx,
             ) {
                 match nidx {
                     NodeIdx::Split(s) => {
                         let s = &nodes.splits[s.0];
                         for (i, n) in s.children.iter().enumerate() {
                             if i != s.focus {
-                                sketch(nodes, *n, views, buffers, cmd_line, old, new, cwd);
+                                sketch(nodes, *n, views, buffers, cmd_line, old, new, cwd, focus);
                             }
                         }
                         if let Some(nidx) = s.children.get(s.focus) {
-                            sketch(nodes, *nidx, views, buffers, cmd_line, old, new, cwd);
+                            sketch(nodes, *nidx, views, buffers, cmd_line, old, new, cwd, focus);
                         }
                     }
                     NodeIdx::Leaf(l) => {
                         let l = &nodes.leaves[l.0];
-                        l.comp.sketch(&l.rect, views, buffers, cmd_line, new, cwd);
+                        l.comp.sketch(&l.rect, views, buffers, cmd_line, new, cwd, focus);
                     }
                 }
             }
