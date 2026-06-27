@@ -788,6 +788,7 @@ impl Component for ViewIdx {
                     KeyCode::Char('p') => Cmd::Paste,
                     KeyCode::Char('P') => Cmd::PasteClipboard,
                     KeyCode::Char('v') => Cmd::EnterVisual,
+                    KeyCode::Char('d') => Cmd::BackSpace,
                     _ => Cmd::Noop,
                 },
                 Mode::Insert => match key.code {
@@ -1241,6 +1242,9 @@ impl Component for ViewIdx {
                         let v = views.get_mut(vidx);
                         let buffer = buffers.get_mut(bidx);
                         buffer.redo.clear();
+                        if Mode::Normal == v.mode{
+                            v.cursor = usize::min(v.cursor+1, buffer.buf.len_chars());
+                        }
                         if v.cursor != 0 {
                             let del = buffer.buf.slice(v.cursor - 1..v.cursor).to_string();
                             if let Some(edit) = buffer.undo.last_mut() {
@@ -1289,6 +1293,7 @@ impl Component for ViewIdx {
                                 v.prefered_x = prev_len;
                                 v.cursor = prev_start + prev_len;
                             }
+                            v.cursor = usize::min(v.cursor, buffer.buf.len_chars().saturating_sub(1));
                             View::scroll(v, &nodes.get_leaf(lidx).rect, buffer);
                         }
                     }
@@ -2308,7 +2313,7 @@ mod screen {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Normal,
     Insert,
