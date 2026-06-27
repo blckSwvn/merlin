@@ -298,6 +298,9 @@ mod auto_complete {
                         } else {
                             ac.selected = Some(ac.filtered.len().saturating_sub(1));
                         }
+                        if None == ac.filtered.get(ac.selected.unwrap()){
+                            ac.selected = None;
+                        }
                         exec_action(
                             ac,
                             Action::Complete,
@@ -315,6 +318,9 @@ mod auto_complete {
                                 Some(usize::min(s + 1, ac.filtered.len().saturating_sub(1)));
                         } else {
                             ac.selected = Some(0);
+                        }
+                        if None == ac.filtered.get(ac.selected.unwrap()){
+                            ac.selected = None;
                         }
                         exec_action(
                             ac,
@@ -334,6 +340,9 @@ mod auto_complete {
                                 Some(usize::min(s + r.height as usize-1, ac.filtered.len().saturating_sub(1)));
                         } else {
                             ac.selected = Some(usize::min(r.height as usize-1, ac.filtered.len().saturating_sub(1)));
+                            if None == ac.filtered.get(ac.selected.unwrap()){
+                                ac.selected = None;
+                            }
                         }
                         exec_action(
                             ac,
@@ -353,6 +362,9 @@ mod auto_complete {
                                 Some(usize::min(s.saturating_sub(r.height as usize-1), ac.filtered.len().saturating_sub(1)));
                         } else {
                             ac.selected = Some(0);
+                        }
+                        if None == ac.filtered.get(ac.selected.unwrap()){
+                            ac.selected = None;
                         }
                         exec_action(
                             ac,
@@ -390,31 +402,6 @@ mod auto_complete {
                             Ok(_) => {}
                             Err(_) =>exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes, cwd)?,
                         }
-                        // ac.selected = None;
-                        // let parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
-                        // ac.filtered = match parts.get(0) {
-                        //     Some(p) => COMMAND_REGISTERY
-                        //         .iter()
-                        //         .filter(|c| c.name.starts_with(p))
-                        //         .map(|e| e.name.to_string())
-                        //         .collect(),
-                        //     None => COMMAND_REGISTERY
-                        //         .iter()
-                        //         .map(|e| e.name.to_string())
-                        //         .collect(),
-                        // };
-                        // if ac.filtered.is_empty() {
-                        //     exec_action(
-                        //         ac,
-                        //         Action::Quit,
-                        //         focus,
-                        //         cmd_line,
-                        //         views,
-                        //         buffers,
-                        //         nodes,
-                        //         cwd,
-                        //     )?;
-                        // }
                     }
                     Action::Complete => {
                         let count = cmd_line.input[..cmd_line.cursor]
