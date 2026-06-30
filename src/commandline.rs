@@ -1,10 +1,9 @@
 pub struct Dummy();
-use super::Mode as OtherMode;
 use super::*;
 mod auto_complete {
     use crate::commandline::cmd_line::{ArgKind, COMMAND_REGISTERY, CmdSpec, Mode, alias};
     use cmd_line::CmdLine;
-    use crossterm::{event::KeyModifiers, terminal::EnterAlternateScreen};
+    use crossterm::{event::KeyModifiers};
 
     use super::*;
 
@@ -12,6 +11,7 @@ mod auto_complete {
     pub struct AutoComplete {
         pub selected: Option<usize>,
         pub filtered: Vec<String>,
+        pub filtered_display: Vec<(String, usize)>,
         pub progress: Option<&'static CmdSpec>,
     }
 
@@ -35,19 +35,23 @@ mod auto_complete {
             } else {
                 None
             };
-            let filtered: Vec<String> = match progress {
+            let filtered: (Vec<String>, Vec<(String, usize)>) = match progress {
                 None => {
                     if let Some(p) = parts.get(0) {
-                        COMMAND_REGISTERY
+                        let cmds: Vec<String> = COMMAND_REGISTERY
                             .iter()
                             .filter(|c| c.name.starts_with(p))
                             .map(|c| c.name.to_string())
-                            .collect()
+                            .collect();
+                        let display: Vec<(String, usize)> = cmds.clone().into_iter().enumerate().map(|(i, s)| (s, i)).collect();
+                        (cmds, display)
                     } else {
-                        COMMAND_REGISTERY
+                        let cmds: Vec<String> = COMMAND_REGISTERY
                             .iter()
                             .map(|c| c.name.to_string())
-                            .collect()
+                            .collect();
+                        let display = cmds.clone().into_iter().enumerate().map(|(i, s)| (s, i)).collect();
+                        (cmds, display)
                     }
                 }
                 Some(s) => match &s.arg {
@@ -56,71 +60,104 @@ mod auto_complete {
                     }
                     Some(a) => match a.kind {
                         ArgKind::DirectoryPath => {
-                            let entries = fs::read_dir(cwd).map_err(|_| ())?;
+                            let mut dir = cwd.clone();
+                            let target = match parts.get(1){
+                                Some(s)=>{
+                                    let mut parts: Vec<&str> = s.split('/').collect();
+                                    let target = parts.pop();
+                                    for p in parts{
+                                        dir.push(format!("{p}/"))
+                                    }
+                                    target
+                                }
+                                None => None,
+                            };
+                            let dir = &dir;
+                            let entries = fs::read_dir(dir).map_err(|_| ())?;
                             let mut files: Vec<String> = entries.filter_map(|e| {
                                 let e = e.ok()?;
                                 if !e.file_type().ok()?.is_dir(){
                                     return None;
                                 }
                                 let e = e.path();
-                                let relative = e.strip_prefix(cwd).ok()?;
-                                Some(relative.display().to_string().to_string())
+                                Some(format!("{}/", e.display().to_string()))
                             }).collect();
                             files = files.into_iter().rev().collect();
-                            match parts.get(1){
-                                Some(s) => {
-                                    files.into_iter().filter(|e| e.starts_with(s)).collect()
-                                }
-                                None => files,
+                            let display: Vec<(String, usize)> = files.clone().into_iter().enumerate().map(|(i, s)| (s, i)).collect();
+                            let mut display: Vec<(String, usize)> = display.into_iter().map(|(s, i)|{
+                                let last = s.rfind('/').unwrap();
+                                let second_last = s[..last].rfind('/').unwrap();
+                                (s[second_last+1..].to_string(), i)
+                            }).collect();
+                            if let Some(t) = target{
+                                display.retain(|(s, _)| s.starts_with(t));
                             }
+                            (files, display)
                         }
                         ArgKind::FilePath => {
-                            use std::fs;
-
                             let mut files: Vec<String> = vec![];
-                            entries(cwd, cwd, &mut files);
-                            fn entries(cwd: &PathBuf, dir: &PathBuf, files: &mut Vec::<String>){
-                                for entry in fs::read_dir(dir).unwrap() {
+                            entries(&cwd, &mut files);
+                            fn entries(cwd: &PathBuf, files: &mut Vec::<String>){
+                                for entry in fs::read_dir(cwd).unwrap() {
                                     let entry = match entry {
                                         Ok(e) => e,
                                         Err(_) => continue,
                                     };
-
                                     let path = entry.path();
-
                                     if let Ok(meta) = fs::metadata(&path) {
                                         if meta.is_dir() {
-                                            entries(cwd, &path, files);
+                                            entries(&path, files);
                                         } else if meta.is_file() {
-                                            files.push(path.to_str().unwrap().strip_prefix(cwd.to_str().unwrap()).unwrap().strip_prefix("/").unwrap().to_string());
+                                            files.push(path.to_str().unwrap().to_string());
                                         }
                                     }
                                 }
                             }
                             files = files.into_iter().rev().collect();
-                            match parts.get(1){
-                                Some(s)=>{
-                                    files.into_iter().filter(|c| c.starts_with(s)).collect()
+                            let mut display: Vec<(String, usize)> = files.clone().into_iter().enumerate().filter_map(|(i, s)|{
+                                match s.strip_prefix(&format!("{}/", cwd.to_str().unwrap())){
+                                    Some(s) => Some((s.to_string(), i)),
+                                    None => None,
                                 }
-                                None=>files,
+                            }).collect();
+                            if let Some(a) = parts.get(1){
+                                display.retain(|(s, _)| s.starts_with(a));
                             }
+                            (files, display)
                         }
 
                         ArgKind::BufferIndex => {
-                            (0..buffers.data.len()).map(|i| i.to_string()).collect()
+                            let i: Vec<String> = (0..buffers.len()).map(|i| i.to_string()).collect();
+                            let display = i.clone().into_iter().enumerate().map(|(i, s)|{
+                                let (name, dirty, dead) = {
+                                    let b = buffers.get(BufferIdx { idx:i});
+                                    let dirty = if b.undo.is_empty(){""}else{" DIRTY"}.to_string();
+                                    let dead = if buffers.free.contains(&BufferIdx{idx:i}){" DEAD"}else{""}.to_string();
+                                    let name = match &b.file{
+                                        Some(f) => f.display().to_string(),
+                                        None => if i == 0{"SCRATCH"}else{"NEW"}.to_string()
+                                    };
+                                    (name, dirty, dead)
+                                };
+                                (format!("{s} {name}{dirty}{dead}"), i)
+                            }).collect();
+                            (i.clone(), display)
                         }
                     },
                 },
             };
-            self.filtered = filtered;
+            self.filtered = filtered.0;
+            self.filtered_display = filtered.1;
             self.progress = progress;
             Ok(())
         }
         pub fn new(cmd_line: &CmdLine, buffers: &Buffers, cwd: &PathBuf) -> Option<AutoComplete> {
             let mut ac = AutoComplete {
-                selected: None,
+                // selected: None,
+                selected: Some(0),
                 progress: None,
                 filtered: vec![],
+                filtered_display: vec![],
             };
             match ac.refresh_filtered_and_progress(cmd_line, buffers, cwd) {
                 Ok(()) => Some(ac),
@@ -152,22 +189,22 @@ mod auto_complete {
             let mut offset = 0u16;
 
             let parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
-            'outer: while c < self.filtered.len() {
+            'outer: while c < self.filtered_display.len() {
                 let mut max = 0;
                 for y in 0..rect.height {
-                    if c >= self.filtered.len() {
+                    if c >= self.filtered_display.len() {
                         break;
                     }
-                    if self.filtered[c].chars().count() + offset as usize > rect.width as usize{
+                    if self.filtered_display[c].0.chars().count() + offset as usize > rect.width as usize{
                         break 'outer;
                     }
-                    max = max.max(self.filtered[c].chars().count());
+                    max = max.max(self.filtered_display[c].0.chars().count());
                     if let Some(s) = self.selected {
                         if c == s {
                             screen.set_string_xy(
                                 rect.x + offset,
                                 rect.y + y,
-                                &self.filtered[c],
+                                &self.filtered_display[c].0,
                                 FG,
                                 SELECTION,
                             );
@@ -175,7 +212,7 @@ mod auto_complete {
                             screen.set_string_xy(
                                 rect.x + offset,
                                 rect.y + y,
-                                &self.filtered[c],
+                                &self.filtered_display[c].0,
                                 FG,
                                 BG,
                             );
@@ -184,7 +221,7 @@ mod auto_complete {
                         screen.set_string_xy(
                             rect.x + offset,
                             rect.y + y,
-                            &self.filtered[c],
+                            &self.filtered_display[c].0,
                             FG,
                             BG,
                         );
@@ -231,6 +268,7 @@ mod auto_complete {
                 KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::ALT) => Action::Prev,
                 KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::ALT) => Action::NextCol,
                 KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::ALT) => Action::PrevCol,
+                KeyCode::Tab => Action::Complete,
                 KeyCode::Char(c) => Action::Insert(c),
                 KeyCode::Enter => Action::Exec,
                 KeyCode::Backspace => Action::BackSpace,
@@ -268,7 +306,8 @@ mod auto_complete {
                     }
                     Action::BackSpace => {
                         cmd_line.backspace();
-                        ac.selected = None;
+                        // ac.selected = None;
+                        ac.selected = Some(0);
                         let _ = ac.refresh_filtered_and_progress(cmd_line, buffers, cwd);
                         if ac.filtered.is_empty() {
                             exec_action(
@@ -296,64 +335,34 @@ mod auto_complete {
                         if let Some(s) = ac.selected {
                             ac.selected = Some(s.saturating_sub(1));
                         } else {
-                            ac.selected = Some(ac.filtered.len().saturating_sub(1));
+                            ac.selected = Some(ac.filtered_display.len().saturating_sub(1));
                         }
-                        if None == ac.filtered.get(ac.selected.unwrap()){
+                        if None == ac.filtered_display.get(ac.selected.unwrap()){
                             ac.selected = None;
                         }
-                        exec_action(
-                            ac,
-                            Action::Complete,
-                            focus,
-                            cmd_line,
-                            views,
-                            buffers,
-                            nodes,
-                            cwd,
-                        )?;
                     }
                     Action::Next => {
                         if let Some(s) = ac.selected {
                             ac.selected =
-                                Some(usize::min(s + 1, ac.filtered.len().saturating_sub(1)));
-                        } else {
+                                Some(usize::min(s + 1, ac.filtered_display.len().saturating_sub(1)));
+                        }else{
                             ac.selected = Some(0);
                         }
-                        if None == ac.filtered.get(ac.selected.unwrap()){
+                        if None == ac.filtered_display.get(ac.selected.unwrap()){
                             ac.selected = None;
                         }
-                        exec_action(
-                            ac,
-                            Action::Complete,
-                            focus,
-                            cmd_line,
-                            views,
-                            buffers,
-                            nodes,
-                            cwd,
-                        )?;
                     }
                     Action::NextCol=>{
                         let r = nodes.get_leaf(*focus).rect;
                         if let Some(s) = ac.selected {
                             ac.selected =
-                                Some(usize::min(s + r.height as usize-1, ac.filtered.len().saturating_sub(1)));
+                                Some(usize::min(s + r.height as usize-1, ac.filtered_display.len().saturating_sub(1)));
                         } else {
-                            ac.selected = Some(usize::min(r.height as usize-1, ac.filtered.len().saturating_sub(1)));
-                            if None == ac.filtered.get(ac.selected.unwrap()){
+                            ac.selected = Some(usize::min(r.height as usize-1, ac.filtered_display.len().saturating_sub(1)));
+                            if None == ac.filtered_display.get(ac.selected.unwrap()){
                                 ac.selected = None;
                             }
                         }
-                        exec_action(
-                            ac,
-                            Action::Complete,
-                            focus,
-                            cmd_line,
-                            views,
-                            buffers,
-                            nodes,
-                            cwd,
-                        )?;
                     }
                     Action::PrevCol=>{
                         let r = nodes.get_leaf(*focus).rect;
@@ -366,37 +375,9 @@ mod auto_complete {
                         if None == ac.filtered.get(ac.selected.unwrap()){
                             ac.selected = None;
                         }
-                        exec_action(
-                            ac,
-                            Action::Complete,
-                            focus,
-                            cmd_line,
-                            views,
-                            buffers,
-                            nodes,
-                            cwd,
-                        )?;
 
                     }
                     Action::Insert(c) => {
-                        if c == ' ' {
-                            cmd_line.insert(' ');
-                            match ac.refresh_filtered_and_progress(cmd_line, buffers, cwd) {
-                                Ok(_) => {}
-                                Err(_) => exec_action(
-                                    ac,
-                                    Action::Quit,
-                                    focus,
-                                    cmd_line,
-                                    views,
-                                    buffers,
-                                    nodes,
-                                    cwd,
-                                )
-                                .unwrap(),
-                            }
-                            return Ok(());
-                        }
                         cmd_line.insert(c);
                         match ac.refresh_filtered_and_progress(cmd_line, buffers, cwd){
                             Ok(_) => {}
@@ -413,10 +394,16 @@ mod auto_complete {
                             cmd_line.backspace();
                         }
                         if let Some(s) = ac.selected {
-                            for c in ac.filtered[s].chars() {
-                                cmd_line.insert(c);
+                            if let Some(s) = ac.filtered_display.get(s){
+                                if let Some(s) = ac.filtered.get(s.1){
+                                    for c in s.chars(){
+                                        cmd_line.insert(c);
+                                    }
+                                }
                             }
                         }
+                        ac.refresh_filtered_and_progress(cmd_line, buffers, cwd).unwrap();
+                        ac.selected = Some(0);
                     }
                 }
                 Ok(())
@@ -425,9 +412,6 @@ mod auto_complete {
         }
     }
 }
-//
-//
-//
 pub mod cmd_line {
     use crate::commandline::auto_complete::AutoComplete;
 
@@ -646,21 +630,6 @@ pub mod cmd_line {
                 }
             }
 
-            Cmd::BufferList => {
-                let comp: Box<dyn Component> = Box::new(BufferList {});
-                *focus = nodes.new_leaf(
-                    comp,
-                    nodes.get_root(ROOT_OVERLAY),
-                    Some(Constraints {
-                        // max_width: Constraint::Flex,
-                        max_width: Constraint::Absolute(20),
-                        max_height: Constraint::Absolute(buffers.len() as u16 + 2),
-                        min_height: Constraint::Flex,
-                        min_width: Constraint::Flex,
-                    }),
-                    (None, None),
-                );
-            }
             Cmd::Save => {
                 let buffer = buffers.get_mut(bidx);
                 if buffer.check_flag(Buffer::READ_ONLY) {
@@ -843,7 +812,6 @@ pub mod cmd_line {
             cwd: &mut PathBuf,
         ) {
             self.last_view = (lidx, vidx);
-            // views.get_mut(vidx).mode = OtherMode::Normal; idk why this was here
             self.input.clear();
             self.cursor = 0;
             self.mode = Mode::Insert;
@@ -929,7 +897,7 @@ pub mod cmd_line {
         pub name: &'static str,
         pub arg: Option<ArgSpec>,
         pub forcable: bool,
-        pub cmd: Cmd,
+        cmd: Cmd,
     }
 
     struct CmdVal {
@@ -943,7 +911,7 @@ pub mod cmd_line {
     //must commands do not collide to cause aliases beeing able to be interpreted in different ways
     ///! suffix is for force, not all commands implement force
     //commands that use arguments need to define if they require an argument or if they are optional argument
-    pub const COMMAND_REGISTERY: [CmdSpec; 12] = [
+    pub const COMMAND_REGISTERY: [CmdSpec; 11] = [
         CmdSpec {
             name: "cd",
             arg: Some(ArgSpec {
@@ -1002,12 +970,6 @@ pub mod cmd_line {
             cmd: Cmd::BufferSwitch,
         },
         CmdSpec {
-            name: "buffer-list",
-            arg: None,
-            forcable: false,
-            cmd: Cmd::BufferList,
-        },
-        CmdSpec {
             name: "split",
             arg: None,
             forcable: false,
@@ -1036,7 +998,6 @@ pub mod cmd_line {
     enum Cmd {
         Cd,
         Pwd,
-        BufferList,
         Quit,
         Save,
         Open,

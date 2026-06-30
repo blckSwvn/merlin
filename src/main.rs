@@ -1242,9 +1242,6 @@ impl Component for ViewIdx {
                         let v = views.get_mut(vidx);
                         let buffer = buffers.get_mut(bidx);
                         buffer.redo.clear();
-                        if Mode::Normal == v.mode{
-                            v.cursor = usize::min(v.cursor+1, buffer.buf.len_chars());
-                        }
                         if v.cursor != 0 {
                             let del = buffer.buf.slice(v.cursor - 1..v.cursor).to_string();
                             if let Some(edit) = buffer.undo.last_mut() {
@@ -1306,6 +1303,10 @@ impl Component for ViewIdx {
                         }
                         views.get_mut(vidx).selection = None;
                     } else {
+                        if Mode::Normal == v.mode{
+                            let b = buffers.get(v.buf);
+                            v.cursor = usize::min(v.cursor+1, b.buf.len_chars());
+                        }
                         backspace(views, vidx, bidx, buffers, nodes, lidx);
                     }
                 }
