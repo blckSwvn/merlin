@@ -1,6 +1,41 @@
 pub struct Dummy();
 use super::*;
+mod path_utils{
+    use std::env;
+    use std::path::{
+        PathBuf,
+        Component,
+    };
+
+    pub fn compact(path: PathBuf)->PathBuf{
+        let mut new = PathBuf::new();
+        for c in path.components(){
+            match c{
+                Component::Prefix(_) => new.push(c),
+                Component::RootDir => new.push(c),
+                Component::ParentDir => {let _ = new.pop();}
+                Component::Normal(_) => new.push(c),
+                Component::CurDir => {}
+            }
+        }
+        new
+    }
+    pub fn resolve_home()->Result<String, ()>{
+        if cfg!(target_os = "windows"){
+            match env::var("USERPROFILE"){
+                Ok(s)=>Ok(s),
+                Err(_)=>Err(()),
+            }
+        }else{
+            match env::var("HOME"){
+                Ok(s)=>Ok(s),
+                Err(_)=>Err(()),
+            }
+        }
+    }
+}
 mod auto_complete {
+    use crate::commandline::path_utils::compact;
     use crate::commandline::cmd_line::{ArgKind, COMMAND_REGISTERY, CmdSpec, Mode, alias};
     use cmd_line::CmdLine;
     use crossterm::{event::KeyModifiers};
@@ -72,7 +107,6 @@ mod auto_complete {
                                 }
                                 None => None,
                             };
-                            let dir = &dir;
                             let entries = fs::read_dir(dir).map_err(|_| ())?;
                             let mut files: Vec<String> = entries.filter_map(|e| {
                                 let e = e.ok()?;
@@ -114,6 +148,7 @@ mod auto_complete {
                                     return None;
                                 }
                                 let e = e.path();
+                                let e = compact(e);
                                 Some(e.display().to_string())
                             }).collect();
                             files.reverse();
@@ -419,6 +454,7 @@ mod auto_complete {
 }
 pub mod cmd_line {
     use crate::commandline::auto_complete::AutoComplete;
+    use path_utils::compact;
 
     use super::*;
 
@@ -461,28 +497,23 @@ pub mod cmd_line {
         };
         match cmd.cmd {
             Cmd::Cd => {
+                use path_utils::resolve_home;
                 let f = match cmd.argument {
                     Some(a)=>a,
-                    None=> if cfg!(target_os = "windows"){
-                        match env::var("USERPROFILE"){
-                            Ok(s)=>ArgVal::DirectoryPath(s),
-                            Err(_)=>return Err(EditorErr::Msg("could not reslve userprofile dir".into()))
-                        }
-                    }else{
-                        match env::var("HOME"){
-                            Ok(s)=>ArgVal::DirectoryPath(s),
-                            Err(_)=>return Err(EditorErr::Msg("could not reslove home dir".into()))
-                        }
-                    }
+                    None=> ArgVal::DirectoryPath(
+                        resolve_home()
+                        .map_err(|_| EditorErr::Msg("could not resolve home dir nor user prof".into()))
+                        ?),
                 };
                 *cwd = match f {
                     ArgVal::DirectoryPath(s)=>{
                         let mut cwd = cwd.clone();
                         cwd.push(s);
+                        use path_utils::compact;
                         match cwd.exists(){
                             true => match cwd.is_dir(){
                                 true => {
-                                    cwd
+                                    compact(cwd)
                                 }
                                 false => return Err(EditorErr::Msg("path is not directory".into())),
                             },
@@ -558,7 +589,7 @@ pub mod cmd_line {
                             ArgVal::FilePath(s) =>{
                                 let mut cwd = cwd.clone();
                                 cwd.push(s);
-                                cwd
+                                compact(cwd)
                             } 
                             _ => return Err(EditorErr::InvalidBuffer),
                         }
