@@ -3,7 +3,6 @@
 # Current
 improve autocomplete:
     compact on cwd ../ ./ without canonlize
-    maybe make cd without arg resolve to /home/user/ like in the shell
     reslove ~ as /home/user
 improve cmdline by having history
 have local cliboard global for the editor rather than view specfic

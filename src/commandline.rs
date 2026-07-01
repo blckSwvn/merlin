@@ -461,7 +461,20 @@ pub mod cmd_line {
         };
         match cmd.cmd {
             Cmd::Cd => {
-                let Some(f) = cmd.argument else { return Ok(()) };
+                let f = match cmd.argument {
+                    Some(a)=>a,
+                    None=> if cfg!(target_os = "windows"){
+                        match env::var("USERPROFILE"){
+                            Ok(s)=>ArgVal::DirectoryPath(s),
+                            Err(_)=>return Err(EditorErr::Msg("could not reslve userprofile dir".into()))
+                        }
+                    }else{
+                        match env::var("HOME"){
+                            Ok(s)=>ArgVal::DirectoryPath(s),
+                            Err(_)=>return Err(EditorErr::Msg("could not reslove home dir".into()))
+                        }
+                    }
+                };
                 *cwd = match f {
                     ArgVal::DirectoryPath(s)=>{
                         let mut cwd = cwd.clone();
@@ -925,7 +938,7 @@ pub mod cmd_line {
             name: "cd",
             arg: Some(ArgSpec {
                 kind: ArgKind::DirectoryPath,
-                required: true,
+                required: false,
             }),
             forcable: false,
             cmd: Cmd::Cd,
