@@ -82,8 +82,8 @@ mod auto_complete {
                                 let e = e.path();
                                 Some(format!("{}/", e.display().to_string()))
                             }).collect();
-                            files = files.into_iter().rev().collect();
-                            let display: Vec<(String, usize)> = files.clone().into_iter().enumerate().map(|(i, s)| (s, i)).collect();
+                            files.reverse();
+                            let display: Vec<(String, usize)> = files.iter().enumerate().map(|(i, s)| (s.clone(), i)).collect();
                             let mut display: Vec<(String, usize)> = display.into_iter().map(|(s, i)|{
                                 let last = s.rfind('/').unwrap();
                                 let second_last = s[..last].rfind('/').unwrap();
@@ -95,32 +95,35 @@ mod auto_complete {
                             (files, display)
                         }
                         ArgKind::FilePath => {
-                            let mut files: Vec<String> = vec![];
-                            entries(&cwd, &mut files);
-                            fn entries(cwd: &PathBuf, files: &mut Vec::<String>){
-                                for entry in fs::read_dir(cwd).unwrap() {
-                                    let entry = match entry {
-                                        Ok(e) => e,
-                                        Err(_) => continue,
-                                    };
-                                    let path = entry.path();
-                                    if let Ok(meta) = fs::metadata(&path) {
-                                        if meta.is_dir() {
-                                            entries(&path, files);
-                                        } else if meta.is_file() {
-                                            files.push(path.to_str().unwrap().to_string());
-                                        }
+                            let mut dir = cwd.clone();
+                            let target = match parts.get(1){
+                                Some(s)=>{
+                                    let mut parts: Vec<&str> = s.split('/').collect();
+                                    let target = parts.pop();
+                                    for p in parts{
+                                        dir.push(format!("{p}/"))
                                     }
+                                    target
                                 }
-                            }
-                            files = files.into_iter().rev().collect();
-                            let mut display: Vec<(String, usize)> = files.clone().into_iter().enumerate().filter_map(|(i, s)|{
-                                match s.strip_prefix(&format!("{}/", cwd.to_str().unwrap())){
+                                None => None,
+                            };
+                            let dir = &dir;
+                            let mut files: Vec<String> = fs::read_dir(dir).map_err(|_| ())?.filter_map(|e|{
+                                let e = e.ok()?;
+                                if !e.file_type().ok()?.is_file(){
+                                    return None;
+                                }
+                                let e = e.path();
+                                Some(e.display().to_string())
+                            }).collect();
+                            files.reverse();
+                            let mut display: Vec<(String, usize)> = files.iter().enumerate().filter_map(|(i, s)|{
+                                match s.strip_prefix(&format!("{}/", dir.to_str().unwrap())){
                                     Some(s) => Some((s.to_string(), i)),
-                                    None => None,
+                                    None => Some((s.to_string(), i)),
                                 }
                             }).collect();
-                            if let Some(a) = parts.get(1){
+                            if let Some(a) = target{
                                 display.retain(|(s, _)| s.starts_with(a));
                             }
                             (files, display)
@@ -128,7 +131,7 @@ mod auto_complete {
 
                         ArgKind::BufferIndex => {
                             let i: Vec<String> = (0..buffers.len()).map(|i| i.to_string()).collect();
-                            let display = i.clone().into_iter().enumerate().map(|(i, s)|{
+                            let display = i.iter().enumerate().map(|(i, s)|{
                                 let (name, dirty, dead) = {
                                     let b = buffers.get(BufferIdx { idx:i});
                                     let dirty = if b.undo.is_empty(){""}else{" DIRTY"}.to_string();
@@ -288,7 +291,6 @@ mod auto_complete {
                 match action {
                     Action::Exec => {
                         let curr = *focus;
-                        // *focus = curr;
                         exec_action(
                             ac,
                             Action::Quit,
@@ -385,25 +387,28 @@ mod auto_complete {
                         }
                     }
                     Action::Complete => {
-                        let count = cmd_line.input[..cmd_line.cursor]
-                            .chars()
-                            .rev()
-                            .take_while(|&c| c != ' ')
-                            .count();
-                        for _ in 0..count {
-                            cmd_line.backspace();
-                        }
-                        if let Some(s) = ac.selected {
+                        if let Some(s) = ac.selected{
                             if let Some(s) = ac.filtered_display.get(s){
                                 if let Some(s) = ac.filtered.get(s.1){
+                                    let count = cmd_line.input[..cmd_line.cursor]
+                                        .chars()
+                                        .rev()
+                                        .take_while(|&c| c != ' ')
+                                        .count();
+                                    for _ in 0..count {
+                                        cmd_line.backspace();
+                                    }
                                     for c in s.chars(){
                                         cmd_line.insert(c);
                                     }
+                                    ac.selected = Some(0);
                                 }
                             }
                         }
-                        ac.refresh_filtered_and_progress(cmd_line, buffers, cwd).unwrap();
-                        ac.selected = Some(0);
+                        match ac.refresh_filtered_and_progress(cmd_line, buffers, cwd){
+                            Err(_) =>exec_action(ac, Action::Quit, focus, cmd_line, views, buffers, nodes, cwd).unwrap(),
+                            Ok(_)=>{}
+                        };
                     }
                 }
                 Ok(())
@@ -678,9 +683,11 @@ pub mod cmd_line {
                         let comp: Box<dyn Component> = Box::new(vidx);
                         nodes.new_split(comp, parent, Direction::Vertical, None, (None, None))
                     };
+                    enter_view(focus, l, cmd_line);
                     let vidx = views.push(View::new(SCRATCH));
                     let comp: Box<dyn Component> = Box::new(vidx);
-                    nodes.new_leaf(comp, new_parent, None, (None, None));
+                    let l = nodes.new_leaf(comp, new_parent, None, (None, None));
+                    nodes.get_mut_split(new_parent).focus = 1;
                     nodes.get_mut_split(parent).children.swap_remove(idx);
                     enter_view(focus, l, cmd_line);
                     nodes.recalc(parent);
@@ -698,7 +705,8 @@ pub mod cmd_line {
                         nodes.new_split(comp, parent, Direction::Horizontal, None, (None, None));
                     let vidx = views.push(View::new(SCRATCH));
                     let comp: Box<dyn Component> = Box::new(vidx);
-                    nodes.new_leaf(comp, new_parent, None, (None, None));
+                    let l = nodes.new_leaf(comp, new_parent, None, (None, None));
+                    nodes.get_mut_split(new_parent).focus = 1;
                     nodes.get_mut_split(parent).children.swap_remove(idx);
                     enter_view(focus, l, cmd_line);
                     nodes.recalc(parent);
@@ -708,6 +716,7 @@ pub mod cmd_line {
                 let vidx = views.push(View::new(SCRATCH));
                 let comp: Box<dyn Component> = Box::new(vidx);
                 let lidx = nodes.new_leaf(comp, parent, None, (None, None));
+                nodes.get_mut_split(parent).focus = nodes.get_mut_split(parent).children.len().saturating_sub(1);
                 enter_view(focus, lidx, cmd_line);
             }
         }

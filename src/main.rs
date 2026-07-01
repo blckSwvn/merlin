@@ -839,7 +839,7 @@ impl Component for ViewIdx {
                             let Split {
                                 children, focus: f, ..
                             } = nodes.get_split(s);
-                            curr = *children.get(*f).unwrap();
+                            curr = children[*f];
                         }
                         NodeIdx::Leaf(l) => break l,
                     }
@@ -863,6 +863,7 @@ impl Component for ViewIdx {
                         let col = view.prefered_x.min(line_len.saturating_sub(1));
 
                         view.cursor = line_start + col;
+                        debug_assert!(None != view.selection, "should only be used while in visual mode");
                         if view.cursor >= view.selection.unwrap().0 {
                             view.selection.as_mut().unwrap().1 =
                                 usize::min(view.cursor + 1, buffer.buf.len_chars());
@@ -885,6 +886,7 @@ impl Component for ViewIdx {
                         let len = buffer.buf.line(line).len_chars();
                         let col = view.prefered_x.min(len.saturating_sub(1));
                         view.cursor = start + col;
+                        debug_assert!(None != view.selection, "should only be used while in visual mode");
                         if view.cursor >= view.selection.unwrap().1 {
                             view.selection.as_mut().unwrap().1 =
                                 usize::min(view.cursor + 1, buffer.buf.len_chars());
@@ -907,6 +909,7 @@ impl Component for ViewIdx {
                         let col = col.min(buffer.buf.line(line).len_chars());
                         view.prefered_x = col;
                         view.cursor = line_start + col;
+                        debug_assert!(None != view.selection, "should only be used while in visual mode");
                         if view.cursor >= view.selection.unwrap().1 {
                             view.selection.as_mut().unwrap().1 =
                                 usize::min(view.cursor + 1, buffer.buf.len_chars());
@@ -926,6 +929,7 @@ impl Component for ViewIdx {
                         let col = col - 1;
                         view.prefered_x = col;
                         view.cursor = line_start + col;
+                        debug_assert!(None != view.selection, "should only be used while in visual mode");
                         if view.cursor >= view.selection.unwrap().0 {
                             view.selection.as_mut().unwrap().1 =
                                 usize::min(view.cursor + 1, buffer.buf.len_chars());
@@ -1318,181 +1322,6 @@ impl Component for ViewIdx {
     }
 }
 
-struct BufferList {}
-
-fn sketch_border1(rect: &Rect, screen: &mut ScreenBuffer) -> Rect {
-    sketch_border(rect, screen, '┌', '┐', '└', '┘', '─', '│', FG, BG)
-}
-fn sketch_border(
-    rect: &Rect,
-    screen: &mut ScreenBuffer,
-    uppper_left: char,
-    upper_right: char,
-    bottom_left: char,
-    bottom_right: char,
-    horizontal: char,
-    vertical: char,
-    fg: Color,
-    bg: Color,
-) -> Rect {
-    let mut r = *rect;
-    screen.set_cell_xy(
-        r.x,
-        r.y,
-        Cell {
-            c: uppper_left,
-            fg,
-            bg,
-        },
-    );
-    screen.set_cell_xy(
-        r.x + r.width - 1,
-        r.y,
-        Cell {
-            c: upper_right,
-            fg,
-            bg,
-        },
-    );
-    screen.set_cell_xy(
-        r.x,
-        r.y + r.height - 1,
-        Cell {
-            c: bottom_left,
-            fg,
-            bg,
-        },
-    );
-    screen.set_cell_xy(
-        r.x + r.width - 1,
-        r.y + r.height - 1,
-        Cell {
-            c: bottom_right,
-            fg,
-            bg,
-        },
-    );
-    screen.set_string_xy(
-        r.x + 1,
-        r.y,
-        &horizontal.to_string().repeat((r.width - 2) as usize),
-        fg,
-        bg,
-    );
-    screen.set_string_xy(
-        r.x + 1,
-        r.y + r.height - 1,
-        &horizontal.to_string().repeat((r.width - 2) as usize),
-        fg,
-        bg,
-    );
-    for y in 1..r.height - 1 {
-        screen.set_cell_xy(
-            r.x,
-            y + r.y,
-            Cell {
-                c: vertical,
-                fg,
-                bg,
-            },
-        );
-        screen.set_cell_xy(
-            r.x + r.width - 1,
-            y + r.y,
-            Cell {
-                c: vertical,
-                fg,
-                bg,
-            },
-        );
-    }
-    r.x += 1;
-    r.y += 1;
-    r.width = r.width.saturating_sub(2);
-    r.height = r.height.saturating_sub(2);
-    r
-}
-
-impl Component for BufferList {
-    fn sketch(
-        &self,
-        r: &Rect,
-        _views: &Views,
-        buffers: &Buffers,
-        _cmd_line: &CmdLine,
-        screen: &mut ScreenBuffer,
-        _cwd: &PathBuf,
-        _focus: &LeafIdx,
-    ) {
-        let r = sketch_border1(r, screen);
-        let dirty = if buffers.data.get(0).unwrap().undo.is_empty() {
-            ""
-        } else {
-            "Dirty"
-        };
-
-        let s = format!("{} {} {}", 0, "SCRATCH", dirty);
-        let s = format!("{:<width$}", s, width = r.width as usize);
-
-        screen.set_string_xy(r.x, r.y, &s, FG, BG);
-
-        let empty = &" ".repeat((r.width) as usize);
-        for y in r.y..r.y + r.height - 1 {
-            if y as usize > buffers.data.len() - 1 {
-                screen.set_string_xy(r.x, y + 1, empty, FG, BG);
-                continue;
-            }
-
-            let dirty = if buffers.data.get(y as usize).unwrap().undo.is_empty() {
-                ""
-            } else {
-                "Dirty"
-            };
-
-            let file_path = match buffers.data.get(y as usize) {
-                None => "NEW_FILE".to_string(),
-                Some(b) => match &b.file {
-                    Some(path) => path.to_string_lossy().to_string(),
-                    None => "NEW_FILE".to_string(),
-                },
-            };
-
-            let s = format!("{} {} {}", y, file_path, dirty);
-            let s = format!("{:<width$}", s, width = (r.width) as usize);
-            screen.set_string_xy(r.x, y + 1, &s, FG, BG);
-        }
-    }
-    fn cursor_xy(
-        &self,
-        rect: &Rect,
-        _views: &Views,
-        _buffers: &Buffers,
-        _cmd_line: &CmdLine,
-        _nodes: &Nodes,
-    ) -> (u16, u16, SetCursorStyle) {
-        (rect.x, rect.y, SetCursorStyle::SteadyBlock)
-    }
-    fn behaviour(
-        &mut self,
-        key: KeyEvent,
-        focus: &mut LeafIdx,
-        _cmd_line: &mut CmdLine,
-        views: &mut Views,
-        _buffers: &mut Buffers,
-        nodes: &mut Nodes,
-        _cwd: &mut PathBuf,
-    ) -> Result<(), EditorErr> {
-        match key.code {
-            KeyCode::Esc => {
-                let (l, lidx) = { (nodes.get_leaf(*focus), focus.clone()) };
-                nodes.remove_child(l.parent, views, focus, NodeIdx::Leaf(lidx));
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
-
 mod nodes {
     use super::*;
     #[derive(Clone, Copy, PartialEq)]
@@ -1698,7 +1527,7 @@ mod nodes {
                 *f = 0;
                 self.reflow(focus, views, parent);
                 let parent = {
-                    let Leaf { parent, .. } = self.leaves.get(focus.0).unwrap();
+                    let Leaf { parent, .. } = self.get_leaf(*focus);
                     parent
                 };
                 self.recalc(*parent);
@@ -1713,7 +1542,7 @@ mod nodes {
                     NodeIdx::Split(s) => {
                         let Split {
                             children, focus: f, ..
-                        } = self.splits.get(s.0).unwrap();
+                        } = self.get_split(s);
                         curr = *children.get(*f).unwrap();
                     }
                     NodeIdx::Leaf(l) => break l,
@@ -1734,7 +1563,7 @@ mod nodes {
 
         pub fn recalc_including_root(&mut self, width: u16, height: u16) {
             for ridx in &mut self.roots.clone() {
-                let r = self.splits.get_mut(ridx.0).unwrap();
+                let r = self.get_mut_split(*ridx);
                 r.rect.height = height;
                 r.rect.width = width;
                 r.rect.height = r.rect.constraints.enumerate_max_height(height);
@@ -1745,7 +1574,7 @@ mod nodes {
         pub fn recalc(&mut self, sidx: SplitIdx) {
             let curr = sidx;
             let (children, direction, rect) = {
-                let s = self.splits.get(curr.0).unwrap();
+                let s = self.get_split(curr);
                 (s.children.clone(), s.direction.clone(), s.rect.clone())
             };
             if children.is_empty() {
@@ -1762,10 +1591,10 @@ mod nodes {
                 for n in children.iter() {
                     let mut min = 0;
                     let r = match n {
-                        NodeIdx::Leaf(l) => &mut self.leaves.get_mut(l.0).unwrap().rect,
+                        NodeIdx::Leaf(l) => &mut self.get_mut_leaf(*l).rect,
                         NodeIdx::Split(s) => {
                             self.recalc(*s);
-                            &mut self.splits.get_mut(s.0).unwrap().rect
+                            &mut self.get_mut_split(*s).rect
                         }
                     };
                     match direction {
@@ -1797,8 +1626,8 @@ mod nodes {
                         let (s, n) = &mut resize[idx];
                         let max = {
                             let r = match n {
-                                NodeIdx::Leaf(l) => &mut self.leaves.get_mut(l.0).unwrap().rect,
-                                NodeIdx::Split(s) => &mut self.splits.get_mut(s.0).unwrap().rect,
+                                NodeIdx::Leaf(l) => &mut self.get_mut_leaf(*l).rect,
+                                NodeIdx::Split(s) => &mut self.get_mut_split(*s).rect,
                             };
                             match direction {
                                 Direction::Vertical => {
@@ -1831,19 +1660,19 @@ mod nodes {
             for (len, n) in resize {
                 let (r, p_width, p_height) = &mut match n {
                     NodeIdx::Leaf(l) => {
-                        let curr = self.leaves.get(l.0).unwrap();
+                        let curr = self.get_leaf(l);
                         let p = curr.parent;
-                        let p_width = self.splits.get(p.0).unwrap().rect.width;
-                        let p_height = self.splits.get(p.0).unwrap().rect.height;
-                        let l = self.leaves.get_mut(l.0).unwrap();
+                        let p_width = self.get_split(p).rect.width;
+                        let p_height = self.get_split(p).rect.height;
+                        let l = self.get_mut_leaf(l);
                         (&mut l.rect, p_width, p_height)
                     }
                     NodeIdx::Split(s) => {
-                        let curr = self.splits.get(s.0).unwrap();
+                        let curr = self.get_split(s);
                         let p = curr.parent.unwrap();
-                        let p_width = self.splits.get(p.0).unwrap().rect.width;
-                        let p_height = self.splits.get(p.0).unwrap().rect.height;
-                        let s = self.splits.get_mut(s.0).unwrap();
+                        let p_width = self.get_split(p).rect.width;
+                        let p_height = self.get_split(p).rect.height;
+                        let s = self.get_mut_split(s);
                         (&mut s.rect, p_width, p_height)
                     }
                 };
@@ -1878,16 +1707,16 @@ mod nodes {
             }
         }
 
-        fn reflow(&mut self, focus: &mut LeafIdx, views: &mut Views, parent: SplitIdx) {
+        pub fn reflow(&mut self, focus: &mut LeafIdx, views: &mut Views, parent: SplitIdx) {
             let mut to_remove: Option<(SplitIdx, usize, NodeIdx)> = None; //parent, child, node
             let mut curr = parent;
             loop {
                 let Split {
                     parent, children, ..
-                } = self.splits.get(curr.0).unwrap();
+                } = self.get_split(curr);
                 if children.is_empty() {
                     if let Some(p) = parent {
-                        let Split { children, .. } = self.splits.get(p.0).unwrap();
+                        let Split { children, .. } = self.get_split(*p);
                         to_remove = Some((
                             *p,
                             children
@@ -1965,7 +1794,7 @@ mod nodes {
                 );
             }
             new.print(old)?;
-            let Leaf { comp, rect, .. } = self.leaves.get(focus.0).unwrap();
+            let Leaf { comp, rect, .. } = self.get_leaf(*focus);
             let (x, y, c) = comp
                 .cursor_xy(rect, views, buffers, cmd_line, nodes)
                 .clone();
