@@ -6,7 +6,17 @@ mod path_utils{
         PathBuf,
         Component,
     };
-
+    
+    pub fn resolve_home_and_compact(path: PathBuf)->Result<PathBuf, ()>{
+        let path = if let Ok(s) = path.strip_prefix("~"){
+            let mut p = PathBuf::from(resolve_home()?);
+            p.push(s);
+            p
+        }else{
+            path
+        };
+        Ok(compact(path))
+    }
     pub fn compact(path: PathBuf)->PathBuf{
         let mut new = PathBuf::new();
         for c in path.components(){
@@ -35,7 +45,8 @@ mod path_utils{
     }
 }
 mod auto_complete {
-    use crate::commandline::path_utils::compact;
+    use std::path::MAIN_SEPARATOR;
+    use crate::commandline::path_utils::{compact, resolve_home_and_compact};
     use crate::commandline::cmd_line::{ArgKind, COMMAND_REGISTERY, CmdSpec, Mode, alias};
     use cmd_line::CmdLine;
     use crossterm::{event::KeyModifiers};
@@ -78,14 +89,14 @@ mod auto_complete {
                             .filter(|c| c.name.starts_with(p))
                             .map(|c| c.name.to_string())
                             .collect();
-                        let display: Vec<(String, usize)> = cmds.clone().into_iter().enumerate().map(|(i, s)| (s, i)).collect();
+                        let display: Vec<(String, usize)> = cmds.iter().enumerate().map(|(i, s)| (s.clone(), i)).collect();
                         (cmds, display)
                     } else {
                         let cmds: Vec<String> = COMMAND_REGISTERY
                             .iter()
                             .map(|c| c.name.to_string())
                             .collect();
-                        let display = cmds.clone().into_iter().enumerate().map(|(i, s)| (s, i)).collect();
+                        let display = cmds.iter().enumerate().map(|(i, s)| (s.clone(), i)).collect();
                         (cmds, display)
                     }
                 }
@@ -98,10 +109,10 @@ mod auto_complete {
                             let mut dir = cwd.clone();
                             let target = match parts.get(1){
                                 Some(s)=>{
-                                    let mut parts: Vec<&str> = s.split('/').collect();
+                                    let mut parts: Vec<&str> = s.split(MAIN_SEPARATOR).collect();
                                     let target = parts.pop();
                                     for p in parts{
-                                        dir.push(format!("{p}/"))
+                                        dir.push(format!("{p}{MAIN_SEPARATOR}"));
                                     }
                                     target
                                 }
@@ -114,13 +125,13 @@ mod auto_complete {
                                     return None;
                                 }
                                 let e = e.path();
-                                Some(format!("{}/", e.display().to_string()))
+                                Some(format!("{}{MAIN_SEPARATOR}", e.display().to_string()))
                             }).collect();
                             files.reverse();
                             let display: Vec<(String, usize)> = files.iter().enumerate().map(|(i, s)| (s.clone(), i)).collect();
                             let mut display: Vec<(String, usize)> = display.into_iter().map(|(s, i)|{
-                                let last = s.rfind('/').unwrap();
-                                let second_last = s[..last].rfind('/').unwrap();
+                                let last = s.rfind(MAIN_SEPARATOR).unwrap();
+                                let second_last = s[..last].rfind(MAIN_SEPARATOR).unwrap();
                                 (s[second_last+1..].to_string(), i)
                             }).collect();
                             if let Some(t) = target{
@@ -132,10 +143,10 @@ mod auto_complete {
                             let mut dir = cwd.clone();
                             let target = match parts.get(1){
                                 Some(s)=>{
-                                    let mut parts: Vec<&str> = s.split('/').collect();
+                                    let mut parts: Vec<&str> = s.split(MAIN_SEPARATOR).collect();
                                     let target = parts.pop();
                                     for p in parts{
-                                        dir.push(format!("{p}/"))
+                                        dir.push(format!("{p}{MAIN_SEPARATOR}"))
                                     }
                                     target
                                 }
@@ -153,7 +164,7 @@ mod auto_complete {
                             }).collect();
                             files.reverse();
                             let mut display: Vec<(String, usize)> = files.iter().enumerate().filter_map(|(i, s)|{
-                                match s.strip_prefix(&format!("{}/", dir.to_str().unwrap())){
+                                match s.strip_prefix(&format!("{}{}", dir.to_str().unwrap(), MAIN_SEPARATOR)){
                                     Some(s) => Some((s.to_string(), i)),
                                     None => Some((s.to_string(), i)),
                                 }
@@ -179,7 +190,7 @@ mod auto_complete {
                                 };
                                 (format!("{s} {name}{dirty}{dead}"), i)
                             }).collect();
-                            (i.clone(), display)
+                            (i, display)
                         }
                     },
                 },
@@ -453,7 +464,7 @@ mod auto_complete {
     }
 }
 pub mod cmd_line {
-    use crate::commandline::auto_complete::AutoComplete;
+    use crate::commandline::{auto_complete::AutoComplete, path_utils::resolve_home_and_compact};
     use path_utils::compact;
 
     use super::*;
@@ -508,6 +519,8 @@ pub mod cmd_line {
                 *cwd = match f {
                     ArgVal::DirectoryPath(s)=>{
                         let mut cwd = cwd.clone();
+                        let s = resolve_home_and_compact(s.into())
+                            .map_err(|_| EditorErr::Msg("could not resolve home dir".into()))?;
                         cwd.push(s);
                         use path_utils::compact;
                         match cwd.exists(){
@@ -517,7 +530,7 @@ pub mod cmd_line {
                                 }
                                 false => return Err(EditorErr::Msg("path is not directory".into())),
                             },
-                            false => return Err(EditorErr::Msg("path does not exist".into())),
+                            false => return Err(EditorErr::Msg(format!("path:\"{}\" does not exist", cwd.to_str().unwrap()))),
                         }
                     }
                     _ => return Err(EditorErr::Msg("needs to be directory path".into())),
