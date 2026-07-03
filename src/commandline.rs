@@ -1,6 +1,7 @@
 pub struct Dummy();
 use super::*;
 mod path_utils{
+    use std::path::MAIN_SEPARATOR;
     use std::env;
     use std::path::{
         PathBuf,
@@ -107,14 +108,16 @@ mod auto_complete {
                     Some(a) => match a.kind {
                         ArgKind::DirectoryPath => {
                             let mut dir = cwd.clone();
-                            let target = match parts.get(1){
+                            let target: Option<&str> = match parts.get(1){
                                 Some(s)=>{
-                                    let mut parts: Vec<&str> = s.split(MAIN_SEPARATOR).collect();
-                                    let target = parts.pop();
-                                    for p in parts{
-                                        dir.push(format!("{p}{MAIN_SEPARATOR}"));
+                                    match s.rsplit_once(MAIN_SEPARATOR){
+                                        Some((left, right)) => {
+                                            let s = resolve_home_and_compact(left.into()).expect("failed to resolve home dir");
+                                            dir.push(s);
+                                            Some(right)
+                                        }
+                                        None => Some(s),
                                     }
-                                    target
                                 }
                                 None => None,
                             };
@@ -124,31 +127,31 @@ mod auto_complete {
                                 if !e.file_type().ok()?.is_dir(){
                                     return None;
                                 }
-                                let e = e.path();
-                                Some(format!("{}{MAIN_SEPARATOR}", e.display().to_string()))
+                                Some(format!("{}{MAIN_SEPARATOR}", e.path().display().to_string()))
                             }).collect();
                             files.reverse();
-                            let display: Vec<(String, usize)> = files.iter().enumerate().map(|(i, s)| (s.clone(), i)).collect();
-                            let mut display: Vec<(String, usize)> = display.into_iter().map(|(s, i)|{
-                                let last = s.rfind(MAIN_SEPARATOR).unwrap();
-                                let second_last = s[..last].rfind(MAIN_SEPARATOR).unwrap();
-                                (s[second_last+1..].to_string(), i)
+                            let mut display: Vec<(String, usize)> = files.iter().enumerate().map(|(i, s)|{
+                                let t = s.trim_end_matches(MAIN_SEPARATOR);
+                                let n = t.rsplit(MAIN_SEPARATOR).next().unwrap_or(t);
+                                (format!("{n}{MAIN_SEPARATOR}"), i)
                             }).collect();
                             if let Some(t) = target{
-                                display.retain(|(s, _)| s.starts_with(t));
+                                display.retain(|(s, _)| s.starts_with(&t));
                             }
                             (files, display)
                         }
                         ArgKind::FilePath => {
                             let mut dir = cwd.clone();
-                            let target = match parts.get(1){
+                            let target: Option<&str> = match parts.get(1){
                                 Some(s)=>{
-                                    let mut parts: Vec<&str> = s.split(MAIN_SEPARATOR).collect();
-                                    let target = parts.pop();
-                                    for p in parts{
-                                        dir.push(format!("{p}{MAIN_SEPARATOR}"))
+                                    match s.rsplit_once(MAIN_SEPARATOR){
+                                        Some((left, right)) =>{
+                                            let s = resolve_home_and_compact(left.into()).expect("failed to resolve home dir");
+                                            dir.push(s);
+                                            Some(right)
+                                        }
+                                        None => None,
                                     }
-                                    target
                                 }
                                 None => None,
                             };
@@ -164,13 +167,13 @@ mod auto_complete {
                             }).collect();
                             files.reverse();
                             let mut display: Vec<(String, usize)> = files.iter().enumerate().filter_map(|(i, s)|{
-                                match s.strip_prefix(&format!("{}{}", dir.to_str().unwrap(), MAIN_SEPARATOR)){
+                                match s.strip_prefix(&format!("{}{MAIN_SEPARATOR}", dir.to_str().unwrap())){
                                     Some(s) => Some((s.to_string(), i)),
                                     None => Some((s.to_string(), i)),
                                 }
                             }).collect();
                             if let Some(a) = target{
-                                display.retain(|(s, _)| s.starts_with(a));
+                                display.retain(|(s, _)| s.starts_with(&a));
                             }
                             (files, display)
                         }
@@ -513,16 +516,13 @@ pub mod cmd_line {
                     Some(a)=>a,
                     None=> ArgVal::DirectoryPath(
                         resolve_home()
-                        .map_err(|_| EditorErr::Msg("could not resolve home dir nor user prof".into()))
-                        ?),
+                        .map_err(|_| EditorErr::Msg("could not resolve home dir nor user prof".into()))?
+                        ),
                 };
                 *cwd = match f {
                     ArgVal::DirectoryPath(s)=>{
                         let mut cwd = cwd.clone();
-                        let s = resolve_home_and_compact(s.into())
-                            .map_err(|_| EditorErr::Msg("could not resolve home dir".into()))?;
-                        cwd.push(s);
-                        use path_utils::compact;
+                        cwd.push(resolve_home_and_compact(s.into()).expect("couldnt resolve home dir"));
                         match cwd.exists(){
                             true => match cwd.is_dir(){
                                 true => {
@@ -607,8 +607,8 @@ pub mod cmd_line {
                             _ => return Err(EditorErr::InvalidBuffer),
                         }
                     };
-                    let f = f.to_str().unwrap();
-                    if let Some(b) = buffers.get_by_path(f) {
+                    let f = f.display().to_string();
+                    if let Some(b) = buffers.get_by_path(&f) {
                         let buffer = buffers.get(*b);
                         let line = buffer.buf.char_to_line(buffer.last_cursor);
                         let line_start = buffer.buf.line_to_char(line);
