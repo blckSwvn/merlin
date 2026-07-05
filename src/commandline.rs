@@ -21,7 +21,7 @@ mod path_utils{
             })
         }
     
-    pub fn resolve_home_and_compact(path: PathBuf)->PathBuf{
+    pub fn resolve_home_and_compact(path: PathBuf, cwd: &PathBuf)->PathBuf{
         let path = if let Ok(s) = path.strip_prefix("~"){
             let mut p = PathBuf::from(home());
             p.push(s);
@@ -29,15 +29,15 @@ mod path_utils{
         }else{
             path
         };
-        compact(path)
+        compact(path, cwd)
     }
-    pub fn compact(path: PathBuf)->PathBuf{
-        let mut new = PathBuf::new();
+    pub fn compact(path: PathBuf, cwd: &PathBuf)->PathBuf{
+        let mut new = PathBuf::from(cwd);
         for c in path.components(){
             match c{
+                Component::ParentDir => {let _ = new.pop();}
                 Component::Prefix(_) => new.push(c),
                 Component::RootDir => new.push(c),
-                Component::ParentDir => {let _ = new.pop();}
                 Component::Normal(_) => new.push(c),
                 Component::CurDir => {}
             }
@@ -109,16 +109,16 @@ mod auto_complete {
                         ArgKind::DirectoryPath => {
                             let mut dir = cwd.clone();
                             let target: Option<&str> = match parts.get(1){
-                                Some(s)=>{
-                                    match s.rsplit_once(MAIN_SEPARATOR){
+                                    Some(s) => match s.rsplit_once(MAIN_SEPARATOR){
                                         Some((left, right)) => {
-                                            let s = resolve_home_and_compact(left.into());
+                                            //on s == "/" after rsplit its empty this is a workaround
+                                            let left = if left.is_empty(){MAIN_SEPARATOR.to_string()}else{left.to_string()};
+                                            let s = resolve_home_and_compact(left.into(), cwd);
                                             dir.push(s);
                                             Some(right)
                                         }
                                         None => Some(s),
                                     }
-                                }
                                 None => None,
                             };
                             let entries = fs::read_dir(dir).map_err(|_| ())?;
@@ -146,7 +146,8 @@ mod auto_complete {
                                 Some(s)=>{
                                     match s.rsplit_once(MAIN_SEPARATOR){
                                         Some((left, right)) =>{
-                                            let s = resolve_home_and_compact(left.into());
+                                            let left = if left.is_empty(){MAIN_SEPARATOR.to_string()}else{left.to_string()};
+                                            let s = resolve_home_and_compact(left.into(), cwd);
                                             dir.push(s);
                                             Some(right)
                                         }
@@ -162,15 +163,14 @@ mod auto_complete {
                                     return None;
                                 }
                                 let e = e.path();
-                                let e = compact(e);
+                                let e = compact(e, cwd);
                                 Some(e.display().to_string())
                             }).collect();
                             files.reverse();
-                            let mut display: Vec<(String, usize)> = files.iter().enumerate().filter_map(|(i, s)|{
-                                match s.strip_prefix(&format!("{}{MAIN_SEPARATOR}", dir.to_str().unwrap())){
-                                    Some(s) => Some((s.to_string(), i)),
-                                    None => Some((s.to_string(), i)),
-                                }
+                            let mut display: Vec<(String, usize)> = files.iter().enumerate().map(|(i, s)|{
+                                let t = s.trim_end_matches(MAIN_SEPARATOR);
+                                let n = t.rsplit(MAIN_SEPARATOR).next().unwrap_or(t);
+                                (format!("{n}{MAIN_SEPARATOR}"), i)
                             }).collect();
                             if let Some(a) = target{
                                 display.retain(|(s, _)| s.starts_with(&a));
@@ -302,6 +302,7 @@ mod auto_complete {
             buffers: &mut Buffers,
             nodes: &mut Nodes,
             cwd: &mut PathBuf,
+            clipboard: &mut Clipboard,
         ) -> Result<(), EditorErr> {
             enum Action {
                 Quit,
@@ -517,12 +518,11 @@ pub mod cmd_line {
                 };
                 *cwd = match f {
                     ArgVal::DirectoryPath(s)=>{
-                        let mut cwd = cwd.clone();
-                        cwd.push(resolve_home_and_compact(s.into()));
-                        match cwd.exists(){
-                            true => match cwd.is_dir(){
+                        let dir = PathBuf::from(s);
+                        match dir.exists(){
+                            true => match dir.is_dir(){
                                 true => {
-                                    compact(cwd)
+                                    compact(dir, cwd)
                                 }
                                 false => return Err(EditorErr::Msg("path is not directory".into())),
                             },
@@ -596,9 +596,9 @@ pub mod cmd_line {
                     let f = {
                         match f {
                             ArgVal::FilePath(s) =>{
-                                let mut cwd = cwd.clone();
-                                cwd.push(s);
-                                compact(cwd)
+                                let mut dir = cwd.clone();
+                                dir.push(s);
+                                compact(dir, cwd)
                             } 
                             _ => return Err(EditorErr::InvalidBuffer),
                         }
@@ -1078,8 +1078,10 @@ pub mod cmd_line {
         Exec,
         Insert(char),
         BackSpace,
-        YankClipboard,
-        PasteClipboard,
+        Yank,
+        YankSystem,
+        Paste,
+        PasteSystem,
         MoveSelectionLeft,
         MoveSelectionRight,
         MoveLeft,
@@ -1168,6 +1170,7 @@ pub mod cmd_line {
             buffers: &mut Buffers,
             nodes: &mut Nodes,
             cwd: &mut PathBuf,
+            clipboard: &mut Clipboard,
         ) -> Result<(), EditorErr> {
             let action = match cmd_line.mode {
                 Mode::Insert => match key.code {
@@ -1182,7 +1185,8 @@ pub mod cmd_line {
                 Mode::Visual => match key.code {
                     KeyCode::Esc => Action::EnterNormal,
                     KeyCode::Char('h') => Action::MoveSelectionLeft,
-                    KeyCode::Char('y') => Action::YankClipboard,
+                    KeyCode::Char('y') => Action::Yank,
+                    KeyCode::Char('Y') => Action::YankSystem,
                     KeyCode::Char('l') => Action::MoveSelectionRight,
                     KeyCode::Char('d') => Action::BackSpace,
                     _ => Action::Noop,
@@ -1190,7 +1194,8 @@ pub mod cmd_line {
                 Mode::Normal => match key.code {
                     KeyCode::Enter => Action::Exec,
                     KeyCode::Esc => Action::EnterView,
-                    KeyCode::Char('p') => Action::PasteClipboard,
+                    KeyCode::Char('P') => Action::PasteSystem,
+                    KeyCode::Char('p') => Action::Paste,
                     KeyCode::Char('i') => Action::EnterInsert,
                     KeyCode::Char('v') => Action::EnterVisual,
                     KeyCode::Char('h') => Action::MoveLeft,
@@ -1198,7 +1203,7 @@ pub mod cmd_line {
                     _ => Action::Noop,
                 },
             };
-            exec_action(action, cmd_line, nodes, focus, views, buffers, cwd)?;
+            exec_action(action, cmd_line, nodes, focus, views, buffers, cwd, clipboard)?;
 
             fn exec_action(
                 action: Action,
@@ -1208,6 +1213,7 @@ pub mod cmd_line {
                 views: &mut Views,
                 buffers: &mut Buffers,
                 cwd: &mut PathBuf,
+                clipboard: &mut Clipboard,
             ) -> Result<(), EditorErr> {
                 let (bidx, vidx, lidx, parent) = {
                     let l = nodes.get_leaf(cmd_line.last_view.0);
@@ -1256,14 +1262,29 @@ pub mod cmd_line {
                             cmd_line.backspace();
                         }
                     }
-                    Action::YankClipboard => {
+                    Action::Yank => {
+                        if let Some(sel) = cmd_line.selection{
+                            clipboard.clipboard = Some(cmd_line.input[sel.0..sel.1].into());
+                            cmd_line.selection = None;
+                            cmd_line.mode = Mode::Normal;
+                        }
+                    }
+                    Action::YankSystem => {
                         if let Some(sel) = cmd_line.selection {
                             yank_to_system_clipboard(&cmd_line.input[sel.0..sel.1])?;
                             cmd_line.selection = None;
                             cmd_line.mode = Mode::Normal;
                         }
                     }
-                    Action::PasteClipboard => {
+                    Action::Paste => {
+                        if let Some(mut s) = clipboard.clipboard.clone(){
+                            s.retain(|c| c != '\n');
+                            for c in s.chars(){
+                                cmd_line.insert(c);
+                            }
+                        }
+                    }
+                    Action::PasteSystem => {
                         let mut s = match paste_system_clipboard() {
                             Ok(t) => t,
                             Err(_) => return Ok(()),
@@ -1282,6 +1303,7 @@ pub mod cmd_line {
                             views,
                             buffers,
                             cwd,
+                            clipboard,
                         )
                         .unwrap();
                         let Some(sel) = &mut cmd_line.selection else {
@@ -1302,6 +1324,7 @@ pub mod cmd_line {
                             views,
                             buffers,
                             cwd,
+                            clipboard,
                         )
                         .unwrap();
                         let Some(sel) = &mut cmd_line.selection else {

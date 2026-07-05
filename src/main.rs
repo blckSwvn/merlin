@@ -12,7 +12,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io,
     io::{BufReader, Write, stdout},
-    mem, panic,
+    panic,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     ptr,
@@ -414,9 +414,13 @@ impl Buffer {
     }
 }
 
+struct Clipboard{
+    clipboard: Option<String>,
+}
+
 struct View {
     selection: Option<(usize, usize)>,
-    clipboard: Option<String>,
+    // clipboard: Option<String>,
     buf: BufferIdx,
     cursor: usize,
     prefered_x: usize,
@@ -429,7 +433,6 @@ impl View {
         Self {
             buf,
             selection: None,
-            clipboard: None,
             cursor: 0,
             prefered_x: 0,
             off: 0,
@@ -498,6 +501,7 @@ trait Component {
         buffers: &mut Buffers,
         nodes: &mut Nodes,
         cwd: &mut PathBuf,
+        clipboard: &mut Clipboard,
     ) -> Result<(), EditorErr>;
 }
 
@@ -738,9 +742,10 @@ impl Component for ViewIdx {
         buffers: &mut Buffers,
         nodes: &mut Nodes,
         cwd: &mut PathBuf,
+        clipboard: &mut Clipboard,
     ) -> Result<(), EditorErr> {
         let cmd = key_to_cmd(key, views.get(*self));
-        exec_cmd(cmd, *self, nodes, focus, cmd_line, views, buffers, cwd)?;
+        exec_cmd(cmd, *self, nodes, focus, cmd_line, views, buffers, cwd, clipboard)?;
         enum Cmd {
             EnterVisual,
             EnterNormal,
@@ -825,6 +830,7 @@ impl Component for ViewIdx {
             views: &mut Views,
             buffers: &mut Buffers,
             cwd: &mut PathBuf,
+            clipboard: &mut Clipboard,
         ) -> Result<(), EditorErr> {
             fn enter_normal(view: &mut View, cmd_line: &mut CmdLine) {
                 view.mode = Mode::Normal;
@@ -948,7 +954,7 @@ impl Component for ViewIdx {
                     if selection.0 > selection.1 {
                         std::mem::swap(&mut selection.1, &mut selection.0);
                     }
-                    v.clipboard = Some(b.buf.slice(selection.0..selection.1).to_string());
+                    clipboard.clipboard = Some(b.buf.slice(selection.0..selection.1).to_string());
                     v.selection = None;
                     enter_normal(v, cmd_line);
                 }
@@ -967,22 +973,15 @@ impl Component for ViewIdx {
                     enter_normal(v, cmd_line);
                 }
                 Cmd::Paste => {
-                    let v = views.get_mut(vidx);
-                    let line = mem::take(&mut v.clipboard);
-                    let Some(line) = line else { return Ok(()) };
-                    let v = views.get_mut(vidx);
-                    let b = buffers.get_mut(v.buf);
-                    let c = usize::min(v.cursor + 1, b.buf.len_chars());
-                    b.insert_string(v.off, c, &line);
-                    b.undo.push(Edit::Insert {
-                        idx: c,
-                        text: line.clone(),
-                    });
-                    v.cursor += line.chars().count();
-                    v.clipboard = Some(line);
-                    v.selection = None;
+                    if let Some(line) = &clipboard.clipboard{
+                        let v = views.get_mut(vidx);
+                        let b = buffers.get_mut(v.buf);
+                        let idx = usize::min(v.cursor + 1, b.buf.len_chars());
+                        b.undo.push(Edit::Insert { idx, text: line.clone()});
+                        v.cursor += line.chars().count();
+                        v.selection = None;
+                    };
                 }
-
                 Cmd::PasteClipboard => {
                     let s = match paste_system_clipboard() {
                         Ok(text) => text,
@@ -2158,13 +2157,14 @@ fn key_to_exec(
     views: &mut Views,
     buffers: &mut Buffers,
     cmd: &mut PathBuf,
+    clipboard: &mut Clipboard,
 ) -> Result<(), EditorErr> {
     unsafe {
         //UNSAFE but its fine probably :D
         let l = nodes.get_leaf(*focus);
         let mut comp = ptr::read(&l.comp);
         let lidx = focus.clone();
-        let r = comp.behaviour(key, focus, cmd_line, views, buffers, nodes, cmd);
+        let r = comp.behaviour(key, focus, cmd_line, views, buffers, nodes, cmd, clipboard);
         ptr::write(&mut nodes.get_mut_leaf(lidx).comp, comp);
         r?
     }
@@ -2183,6 +2183,7 @@ fn main() -> io::Result<()> {
     let mut views = Views::new();
     let mut buffers = Buffers::new();
     let mut nodes = Nodes::new();
+    let mut clipboard = Clipboard{clipboard:None};
     let (width, height) = terminal::size().unwrap();
     let root = nodes.new_root(
         Rect {
@@ -2306,6 +2307,7 @@ fn main() -> io::Result<()> {
                     &mut views,
                     &mut buffers,
                     &mut cwd,
+                    &mut clipboard,
                 ) {
                     Err(e) => {
                         match e {
