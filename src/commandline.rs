@@ -1,22 +1,35 @@
 pub struct Dummy();
 use super::*;
 mod path_utils{
-    use std::path::MAIN_SEPARATOR;
     use std::env;
-    use std::path::{
-        PathBuf,
-        Component,
+    use std::{
+        path::{
+            PathBuf,
+            Component,
+        },
+        sync::OnceLock,
     };
+
+    static HOME: OnceLock<String> = OnceLock::new();
+        pub fn home()->&'static String{
+            HOME.get_or_init(||{
+                if cfg!(target_os = "windows"){
+                    env::var("USERPROFILE").expect("failed to resolve userprofile")
+                }else{
+                    env::var("HOME").expect("failed to resolve home dir")
+                }
+            })
+        }
     
-    pub fn resolve_home_and_compact(path: PathBuf)->Result<PathBuf, ()>{
+    pub fn resolve_home_and_compact(path: PathBuf)->PathBuf{
         let path = if let Ok(s) = path.strip_prefix("~"){
-            let mut p = PathBuf::from(resolve_home()?);
+            let mut p = PathBuf::from(home());
             p.push(s);
             p
         }else{
             path
         };
-        Ok(compact(path))
+        compact(path)
     }
     pub fn compact(path: PathBuf)->PathBuf{
         let mut new = PathBuf::new();
@@ -30,19 +43,6 @@ mod path_utils{
             }
         }
         new
-    }
-    pub fn resolve_home()->Result<String, ()>{
-        if cfg!(target_os = "windows"){
-            match env::var("USERPROFILE"){
-                Ok(s)=>Ok(s),
-                Err(_)=>Err(()),
-            }
-        }else{
-            match env::var("HOME"){
-                Ok(s)=>Ok(s),
-                Err(_)=>Err(()),
-            }
-        }
     }
 }
 mod auto_complete {
@@ -112,7 +112,7 @@ mod auto_complete {
                                 Some(s)=>{
                                     match s.rsplit_once(MAIN_SEPARATOR){
                                         Some((left, right)) => {
-                                            let s = resolve_home_and_compact(left.into()).expect("failed to resolve home dir");
+                                            let s = resolve_home_and_compact(left.into());
                                             dir.push(s);
                                             Some(right)
                                         }
@@ -146,11 +146,11 @@ mod auto_complete {
                                 Some(s)=>{
                                     match s.rsplit_once(MAIN_SEPARATOR){
                                         Some((left, right)) =>{
-                                            let s = resolve_home_and_compact(left.into()).expect("failed to resolve home dir");
+                                            let s = resolve_home_and_compact(left.into());
                                             dir.push(s);
                                             Some(right)
                                         }
-                                        None => None,
+                                        None => Some(s),
                                     }
                                 }
                                 None => None,
@@ -467,7 +467,7 @@ mod auto_complete {
     }
 }
 pub mod cmd_line {
-    use crate::commandline::{auto_complete::AutoComplete, path_utils::resolve_home_and_compact};
+    use crate::commandline::{auto_complete::AutoComplete, path_utils::{home, resolve_home_and_compact}};
     use path_utils::compact;
 
     use super::*;
@@ -511,18 +511,14 @@ pub mod cmd_line {
         };
         match cmd.cmd {
             Cmd::Cd => {
-                use path_utils::resolve_home;
                 let f = match cmd.argument {
                     Some(a)=>a,
-                    None=> ArgVal::DirectoryPath(
-                        resolve_home()
-                        .map_err(|_| EditorErr::Msg("could not resolve home dir nor user prof".into()))?
-                        ),
+                    None=> ArgVal::DirectoryPath(home().to_string()),
                 };
                 *cwd = match f {
                     ArgVal::DirectoryPath(s)=>{
                         let mut cwd = cwd.clone();
-                        cwd.push(resolve_home_and_compact(s.into()).expect("couldnt resolve home dir"));
+                        cwd.push(resolve_home_and_compact(s.into()));
                         match cwd.exists(){
                             true => match cwd.is_dir(){
                                 true => {
@@ -934,7 +930,7 @@ pub mod cmd_line {
 
         pub fn cursor(&self, rect: &Rect) -> (u16, u16, SetCursorStyle) {
             (
-                rect.x + self.cursor as u16,
+                rect.x + self.input.get(..self.cursor).map(|p| p.chars().count()).unwrap() as u16,
                 rect.y,
                 match self.mode {
                     Mode::Normal => SetCursorStyle::SteadyBlock,
@@ -1130,17 +1126,9 @@ pub mod cmd_line {
             _views: &Views,
             _buffers: &Buffers,
             cmd_line: &CmdLine,
-            _nodes: &Nodes,
+            nodes: &Nodes,
         ) -> (u16, u16, SetCursorStyle) {
-            (
-                rect.x + cmd_line.cursor as u16,
-                rect.y,
-                match cmd_line.mode {
-                    Mode::Normal => SetCursorStyle::SteadyBlock,
-                    Mode::Visual => SetCursorStyle::SteadyUnderScore,
-                    Mode::Insert => SetCursorStyle::SteadyBar,
-                },
-            )
+            cmd_line.cursor(rect)
         }
         fn sketch(
             &self,
@@ -1231,35 +1219,17 @@ pub mod cmd_line {
                     )
                 };
                 match action {
-                    Action::Exec => match parse_cmd(&cmd_line.input) {
-                        Ok(cmd) => exec_cmd(cmd, cmd_line, nodes, focus, views, buffers, cwd)?,
-                        Err(s) => return Err(EditorErr::Msg(s)),
+                    Action::Exec =>{
+                        match parse_cmd(&cmd_line.input) {
+                            Ok(cmd) => exec_cmd(cmd, cmd_line, nodes, focus, views, buffers, cwd)?,
+                            Err(s) => return Err(EditorErr::Msg(s)),
+                        }
                     },
                     Action::EnterView => {
                         cmd_line.selection = None;
                         enter_view(focus, lidx, cmd_line);
                     }
-                    Action::Insert(c) => match c {
-                        ' ' => {
-                            cmd_line.insert(c);
-                            let comp: Box<dyn Component> =
-                                Box::new(match AutoComplete::new(&cmd_line, buffers, cwd) {
-                                    Some(s) => s,
-                                    None => return Ok(()),
-                                });
-                            *focus = nodes.new_leaf(
-                                comp,
-                                nodes.get_root(ROOT_OVERLAY),
-                                Some(Constraints {
-                                    min_width: Constraint::Flex,
-                                    max_width: Constraint::Flex,
-                                    min_height: Constraint::Absolute(7),
-                                    max_height: Constraint::Absolute(7),
-                                }),
-                                (None, Some(Anchor::Negative(8))),
-                            );
-                        }
-                        _ => {
+                    Action::Insert(c) => {
                             cmd_line.insert(c);
                             let comp: Box<dyn Component> = Box::new(match AutoComplete::new(&cmd_line, buffers, cwd){
                                 Some(s)=> s,
@@ -1273,7 +1243,6 @@ pub mod cmd_line {
                             }), 
                                 (None, Some(Anchor::Negative(8))),
                             );
-                        }
                     },
                     Action::BackSpace => {
                         if let Some(sel) = cmd_line.selection {
