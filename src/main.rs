@@ -38,7 +38,7 @@ use ui::{
     Constraints,
 };
 
-use crate::commandline::cmd_line;
+use crate::{commandline::cmd_line, ui::Anchors};
 
 impl From<std::io::Error> for EditorErr {
     fn from(e: std::io::Error) -> Self {
@@ -379,14 +379,14 @@ impl View {
                 if let Some(line) = buffer.buf.get_line(line_idx) {
                     let len = line.len_chars();
                     if len > 0 {
-                        if rect.width.saturating_sub(5) == 0 {
-                            panic!("width:{}, height:{}", rect.width, rect.height)
+                        if rect.w.saturating_sub(5) == 0 {
+                            panic!("width:{}, height:{}", rect.w, rect.h)
                         }
-                        wrap_off += len / rect.width.saturating_sub(5) as usize;
+                        wrap_off += len / rect.w.saturating_sub(5) as usize;
                     }
                 }
             }
-            let height = rect.height.saturating_sub(2) as usize;
+            let height = rect.h.saturating_sub(2) as usize;
             height.saturating_sub(wrap_off)
         };
         if line < self.off {
@@ -442,8 +442,8 @@ impl Component for ViewIdx {
     ) {
         let v = views.get(*self);
         {
-            let blank = " ".repeat(rect.width as usize);
-            for row in 0..rect.height {
+            let blank = " ".repeat(rect.w as usize);
+            for row in 0..rect.h {
                 //clear text area, line num area, status line
                 screen.set_string_xy(rect.x, rect.y + row, &blank, FG, BG);
             }
@@ -452,8 +452,8 @@ impl Component for ViewIdx {
         text_sketch(v, rect, buffers, screen);
         selection_sketch(v, rect, buffers, screen);
         fn text_sketch(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer) {
-            let width = rect.width.saturating_sub(5) as usize;
-            let height = rect.height.saturating_sub(1) as usize;
+            let width = rect.w.saturating_sub(5) as usize;
+            let height = rect.h.saturating_sub(1) as usize;
             let mut row = 0;
             let mut line_idx = view.off;
             while row <= height {
@@ -482,12 +482,12 @@ impl Component for ViewIdx {
             }
         }
         fn deco_sketch(view: &View, rect: &Rect, buffers: &Buffers, screen: &mut ScreenBuffer, cwd: &PathBuf) {
-            let wrap_width = rect.width.saturating_sub(4) as usize;
+            let wrap_width = rect.w.saturating_sub(4) as usize;
 
             let mut screen_row = 0usize;
             let mut line_idx = view.off;
 
-            while screen_row < rect.height as usize {
+            while screen_row < rect.h as usize {
                 let Some(line) = buffers.get(view.buf).buf.get_line(line_idx) else {
                     break;
                 };
@@ -496,7 +496,7 @@ impl Component for ViewIdx {
                 let visual_rows = usize::max(1, line_len.div_ceil(wrap_width));
 
                 for visual_row in 0..visual_rows {
-                    if screen_row >= rect.height as usize {
+                    if screen_row >= rect.h as usize {
                         break;
                     }
 
@@ -532,7 +532,7 @@ impl Component for ViewIdx {
                 Mode::Visual => "VIS",
             };
             let s = format!("{mode_str} {} {path}", view.buf.idx);
-            screen.set_string_xy(rect.x, rect.y + rect.height.saturating_sub(1), &s, FG, BG);
+            screen.set_string_xy(rect.x, rect.y + rect.h.saturating_sub(1), &s, FG, BG);
         }
         fn selection_sketch(
             view: &View,
@@ -545,8 +545,8 @@ impl Component for ViewIdx {
             };
             let sel_start = a;
             let sel_end = b;
-            let width = rect.width.saturating_sub(5) as usize;
-            let height = rect.height.saturating_sub(1) as usize;
+            let width = rect.w.saturating_sub(5) as usize;
+            let height = rect.h.saturating_sub(1) as usize;
             let buffer = buffers.get(view.buf);
             let mut row = 0usize;
             let mut line_idx = view.off;
@@ -621,7 +621,7 @@ impl Component for ViewIdx {
     ) -> (u16, u16, SetCursorStyle) {
         let v = views.get(*self);
         let b = buffers.get(v.buf);
-        let width = rect.width.saturating_sub(4) as usize;
+        let width = rect.w.saturating_sub(4) as usize;
         if width == 0 {
             return (rect.x + 5, rect.y, SetCursorStyle::SteadyBar);
         }
@@ -1290,53 +1290,21 @@ fn main() -> io::Result<()> {
     let mut clipboard = Clipboard{clipboard:None};
     let (width, height) = terminal::size().unwrap();
     let root = nodes.new_root(
-        Rect {
-            x: 0,
-            y: 0,
-            height: height,
-            width: width,
-            constraints: Constraints {
-                min_height: Constraint::Flex,
-                max_height: Constraint::Negative(1),
-                min_width: Constraint::Flex,
-                max_width: Constraint::Flex,
-            },
-            anchors: (None, None),
+        Constraints{
+            min_height: Constraint::Flex,
+            max_height: Constraint::Negative(1),
+            min_width: Constraint::Flex,
+            max_width: Constraint::Flex
         },
-        Direction::Vertical,
+        Anchors::new(),
+        Direction::Vertical
     );
     nodes.new_root(
-        Rect {
-            x: 0,
-            y: 0,
-            height: height,
-            width: width,
-            constraints: Constraints {
-                min_height: Constraint::Flex,
-                max_height: Constraint::Flex,
-                min_width: Constraint::Flex,
-                max_width: Constraint::Flex,
-            },
-            anchors: (None, None),
-        },
+        Constraints::new(),
+        Anchors::new(),
         Direction::Horizontal,
     );
-    nodes.new_root(
-        Rect {
-            x: 0,
-            y: 0,
-            height: height,
-            width: width,
-            constraints: Constraints {
-                min_height: Constraint::Flex,
-                max_height: Constraint::Flex,
-                min_width: Constraint::Flex,
-                max_width: Constraint::Flex,
-            },
-            anchors: (None, None),
-        },
-        Direction::Vertical,
-    );
+    nodes.new_root(Constraints::new(), Anchors::new(), Direction::Vertical);
     nodes.recalc_including_root(width, height);
     let mut focus = {
         buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
@@ -1350,21 +1318,19 @@ fn main() -> io::Result<()> {
         };
         let vidx = views.push(View::new(bidx));
         let comp: Box<dyn Component> = Box::new(vidx);
-        nodes.new_leaf(comp, root, None, (None, None))
+        nodes.new_leaf(comp, root, Constraints::new(), Anchors::new())
     };
 
     let mut cmd_line = CmdLine::new();
     let comp: Box<dyn Component> = Box::new(CmdLineDummy());
-    nodes.new_leaf(
-        comp,
-        nodes.get_root(ROOT_CMD_LINE),
-        Some(Constraints {
-            max_width: Constraint::Flex,
-            min_width: Constraint::Flex,
-            max_height: Constraint::Absolute(1),
-            min_height: Constraint::Flex,
-        }),
-        (None, Some(Anchor::Relative(1))),
+    nodes.new_leaf(comp, nodes.get_root(ROOT_CMD_LINE),
+    Constraints{
+        min_height: Constraint::Flex,
+        max_height: Constraint::Absolute(1),
+        min_width: Constraint::Flex,
+        max_width: Constraint::Flex 
+    },
+    Anchors{x:None, y:Some(Anchor::Relative(1))},
     );
     enable_raw_mode()?;
     execute!(stdout(), terminal::EnterAlternateScreen)?;

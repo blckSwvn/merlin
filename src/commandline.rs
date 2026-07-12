@@ -229,13 +229,13 @@ mod auto_complete {
             _focus: &LeafIdx,
         ) {
             let mut rect = rect.clone();
-            let blank = " ".repeat(rect.width as usize);
-            for y in 0..rect.height {
+            let blank = " ".repeat(rect.w as usize);
+            for y in 0..rect.h{
                 screen.set_string_xy(rect.x, rect.y + y, &blank, FG, BG);
             }
-            screen.set_string_xy(rect.x, rect.y, &"─".repeat(rect.width as usize), FG, BG);
+            screen.set_string_xy(rect.x, rect.y, &"─".repeat(rect.w as usize), FG, BG);
             rect.y += 1;
-            rect.height -= 1;
+            rect.h -= 1;
 
             let mut c = self.selected.unwrap_or(0);
             let mut offset = 0u16;
@@ -243,11 +243,11 @@ mod auto_complete {
             let parts: Vec<&str> = cmd_line.input.split_whitespace().collect();
             'outer: while c < self.filtered_display.len() {
                 let mut max = 0;
-                for y in 0..rect.height {
+                for y in 0..rect.h {
                     if c >= self.filtered_display.len() {
                         break;
                     }
-                    if self.filtered_display[c].0.chars().count() + offset as usize > rect.width as usize{
+                    if self.filtered_display[c].0.chars().count() + offset as usize > rect.w as usize{
                         break 'outer;
                     }
                     max = max.max(self.filtered_display[c].0.chars().count());
@@ -408,9 +408,9 @@ mod auto_complete {
                         let r = nodes.get_leaf(*focus).rect;
                         if let Some(s) = ac.selected {
                             ac.selected =
-                                Some(usize::min(s + r.height as usize-1, ac.filtered_display.len().saturating_sub(1)));
+                                Some(usize::min(s + r.h as usize-1, ac.filtered_display.len().saturating_sub(1)));
                         } else {
-                            ac.selected = Some(usize::min(r.height as usize-1, ac.filtered_display.len().saturating_sub(1)));
+                            ac.selected = Some(usize::min(r.h as usize-1, ac.filtered_display.len().saturating_sub(1)));
                             if None == ac.filtered_display.get(ac.selected.unwrap()){
                                 ac.selected = None;
                             }
@@ -420,7 +420,7 @@ mod auto_complete {
                         let r = nodes.get_leaf(*focus).rect;
                         if let Some(s) = ac.selected {
                             ac.selected =
-                                Some(usize::min(s.saturating_sub(r.height as usize-1), ac.filtered.len().saturating_sub(1)));
+                                Some(usize::min(s.saturating_sub(r.h as usize-1), ac.filtered.len().saturating_sub(1)));
                         } else {
                             ac.selected = Some(0);
                         }
@@ -734,12 +734,12 @@ pub mod cmd_line {
                 {
                     let (l, new_parent) = {
                         let comp: Box<dyn Component> = Box::new(vidx);
-                        nodes.new_split(comp, parent, Direction::Vertical, None, (None, None))
+                        nodes.new_split(comp, parent, Direction::Vertical, Constraints::new(), Anchors::new())
                     };
                     enter_view(focus, l, cmd_line);
                     let vidx = views.push(View::new(SCRATCH));
                     let comp: Box<dyn Component> = Box::new(vidx);
-                    let l = nodes.new_leaf(comp, new_parent, None, (None, None));
+                    let l = nodes.new_leaf(comp, new_parent, Constraints::new(), Anchors::new());
                     nodes.get_mut_split(new_parent).focus = 1;
                     nodes.get_mut_split(parent).children.swap_remove(idx);
                     enter_view(focus, l, cmd_line);
@@ -755,10 +755,10 @@ pub mod cmd_line {
                 {
                     let comp: Box<dyn Component> = Box::new(vidx);
                     let (l, new_parent) =
-                        nodes.new_split(comp, parent, Direction::Horizontal, None, (None, None));
+                        nodes.new_split(comp, parent, Direction::Horizontal, Constraints::new(), Anchors::new());
                     let vidx = views.push(View::new(SCRATCH));
                     let comp: Box<dyn Component> = Box::new(vidx);
-                    let l = nodes.new_leaf(comp, new_parent, None, (None, None));
+                    let l = nodes.new_leaf(comp, new_parent, Constraints::new(), Anchors::new());
                     nodes.get_mut_split(new_parent).focus = 1;
                     nodes.get_mut_split(parent).children.swap_remove(idx);
                     enter_view(focus, l, cmd_line);
@@ -768,7 +768,7 @@ pub mod cmd_line {
             Cmd::Split => {
                 let vidx = views.push(View::new(SCRATCH));
                 let comp: Box<dyn Component> = Box::new(vidx);
-                let lidx = nodes.new_leaf(comp, parent, None, (None, None));
+                let lidx = nodes.new_leaf(comp, parent, Constraints::new(), Anchors::new());
                 nodes.get_mut_split(parent).focus = nodes.get_mut_split(parent).children.len().saturating_sub(1);
                 enter_view(focus, lidx, cmd_line);
             }
@@ -885,13 +885,13 @@ pub mod cmd_line {
             *focus = nodes.new_leaf(
                 comp,
                 nodes.get_root(ROOT_OVERLAY),
-                Some(Constraints {
+                Constraints {
                     min_width: Constraint::Flex,
                     max_width: Constraint::Flex,
                     min_height: Constraint::Absolute(7),
                     max_height: Constraint::Absolute(7),
-                }),
-                (None, Some(Anchor::Negative(8))),
+                },
+                Anchors { x: None, y: Some(Anchor::Negative(8))}
             );
         }
 
@@ -1142,7 +1142,7 @@ pub mod cmd_line {
             _cwd: &PathBuf,
             _focus: &LeafIdx,
         ) {
-            screen.set_string_xy(rect.x, rect.y, &" ".repeat(rect.width as usize), FG, BG);
+            screen.set_string_xy(rect.x, rect.y, &" ".repeat(rect.w as usize), FG, BG);
             let s = {
                 if cmd_line.input.is_empty() {
                     return;
@@ -1241,13 +1241,13 @@ pub mod cmd_line {
                                 Some(s)=> s,
                                 None => return Ok(()),
                             });
-                            *focus = nodes.new_leaf(comp, nodes.get_root(ROOT_OVERLAY), Some(Constraints{
+                            *focus = nodes.new_leaf(comp, nodes.get_root(ROOT_OVERLAY), Constraints{
                                 min_width: Constraint::Flex,
                                 max_width: Constraint::Flex,
                                 min_height: Constraint::Absolute(7),
                                 max_height: Constraint::Absolute(7),
-                            }), 
-                                (None, Some(Anchor::Negative(8))),
+                            }, 
+                                Anchors { x: None, y: Some(Anchor::Negative(8)) }
                             );
                     },
                     Action::BackSpace => {
