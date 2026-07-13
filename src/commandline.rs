@@ -886,12 +886,12 @@ pub mod cmd_line {
                 comp,
                 nodes.get_root(ROOT_OVERLAY),
                 Constraints {
-                    min_width: Constraint::Flex,
-                    max_width: Constraint::Flex,
-                    min_height: Constraint::Absolute(7),
-                    max_height: Constraint::Absolute(7),
+                    min_width: None,
+                    max_width: None,
+                    min_height: Some(vec![Dimension::AddAbsolute(7)]),
+                    max_height: Some(vec![Dimension::AddAbsolute(7)]),
                 },
-                Anchors { x: None, y: Some(Anchor::Negative(8))}
+                Anchors { x: None, y: Some(vec![Position::AddRelative(1),Position::SubAbsolute(1)])}
             );
         }
 
@@ -1242,12 +1242,12 @@ pub mod cmd_line {
                                 None => return Ok(()),
                             });
                             *focus = nodes.new_leaf(comp, nodes.get_root(ROOT_OVERLAY), Constraints{
-                                min_width: Constraint::Flex,
-                                max_width: Constraint::Flex,
-                                min_height: Constraint::Absolute(7),
-                                max_height: Constraint::Absolute(7),
+                                min_width: None, 
+                                max_width: None,
+                                min_height: Some(vec![Dimension::AddAbsolute(7)]),
+                                max_height: Some(vec![Dimension::AddAbsolute(7)]),
                             }, 
-                                Anchors { x: None, y: Some(Anchor::Negative(8)) }
+                                Anchors { x: None, y: Some(vec![Position::AddRelative(1), Position::SubAbsolute(1)])}
                             );
                     },
                     Action::BackSpace => {

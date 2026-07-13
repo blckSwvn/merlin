@@ -31,10 +31,10 @@ use ui::{
     Split,
     SplitIdx,
     Rect,
-    Anchor,
+    Position,
     NodeIdx,
     Direction,
-    Constraint,
+    Dimension,
     Constraints,
 };
 
@@ -1291,21 +1291,23 @@ fn main() -> io::Result<()> {
     let (width, height) = terminal::size().unwrap();
     let root = nodes.new_root(
         Constraints{
-            min_height: Constraint::Flex,
-            max_height: Constraint::Negative(1),
-            min_width: Constraint::Flex,
-            max_width: Constraint::Flex
+            min_height: None,
+            max_height: Some(vec![Dimension::AddRelative(1), Dimension::SubAbsolute(1)]),
+            min_width: None,
+            max_width: None,
         },
         Anchors::new(),
+        width, height,
         Direction::Vertical
     );
     nodes.new_root(
         Constraints::new(),
         Anchors::new(),
+        width, height,
         Direction::Horizontal,
     );
-    nodes.new_root(Constraints::new(), Anchors::new(), Direction::Vertical);
-    nodes.recalc_including_root(width, height);
+    nodes.new_root(Constraints::new(), Anchors::new(), width, height, Direction::Vertical);
+    // nodes.recalc_including_root(width, height);
     let mut focus = {
         buffers.push(Buffer::new(None, Buffer::SCRATCH).unwrap());
         let args: Vec<String> = env::args().skip(1).collect();
@@ -1325,12 +1327,12 @@ fn main() -> io::Result<()> {
     let comp: Box<dyn Component> = Box::new(CmdLineDummy());
     nodes.new_leaf(comp, nodes.get_root(ROOT_CMD_LINE),
     Constraints{
-        min_height: Constraint::Flex,
-        max_height: Constraint::Absolute(1),
-        min_width: Constraint::Flex,
-        max_width: Constraint::Flex 
+        min_height: None,
+        max_height: Some(vec![Dimension::AddAbsolute(1)]),
+        min_width: None,
+        max_width: None,
     },
-    Anchors{x:None, y:Some(Anchor::Relative(1))},
+    Anchors{x:None, y:Some(vec![Position::AddRelative(1)])},
     );
     enable_raw_mode()?;
     execute!(stdout(), terminal::EnterAlternateScreen)?;
