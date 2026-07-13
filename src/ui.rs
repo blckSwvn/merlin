@@ -7,7 +7,7 @@ use ropey::iter::Chars;
 use std::io;
 use std::io::stdout;
 use std::path::PathBuf;
-use super::{Component, Views, View, SCRATCH, ROOT_TEXT_VIEW, ROOT_CMD_LINE, ROOT_OVERLAY, Buffers};
+use super::{log, Component, Views, View, SCRATCH, ROOT_TEXT_VIEW, ROOT_CMD_LINE, ROOT_OVERLAY, Buffers};
 use crate::commandline::cmd_line::CmdLine;
 
 pub const FG: Color = Color::White;
@@ -133,11 +133,12 @@ impl Anchors{
         for pos in x{
             match *pos{
                 Position::AddAbsolute(a)=>res +=  a,
-                Position::AddRelative(r)=>res += parent.w/r,
+                Position::AddRelative(r)=>res += (parent.w+parent.x)/r,
                 Position::SubAbsolute(a)=>res = res.saturating_sub(a),
-                Position::SubRelative(r)=> res = res.saturating_sub(parent.w/r),
+                Position::SubRelative(r)=> res = res.saturating_sub((parent.w+parent.x)/r),
             }
         }
+        let res = res.max(parent.x);
         Some(res)
     }
     fn calc_y(&self, parent:Rect)->Option<u16>{
@@ -148,11 +149,12 @@ impl Anchors{
         for pos in y{
             match *pos{
                 Position::AddAbsolute(a)=>res +=  a,
-                Position::AddRelative(r)=>res += parent.h/r,
+                Position::AddRelative(r)=>res += (parent.h+parent.y)/r,
                 Position::SubAbsolute(a)=>res = res.saturating_sub(a),
-                Position::SubRelative(r)=> res = res.saturating_sub(parent.h/r),
+                Position::SubRelative(r)=> res = res.saturating_sub((parent.y+parent.h)/r),
             }
         }
+        let res = res.max(parent.x);
         Some(res)
     }
 }
@@ -358,7 +360,7 @@ impl Nodes {
         }
         if children.is_empty() {
             *f = 0;
-            self.reflow(focus, views, parent);
+            self.prune(focus, views, parent);
             let parent = {
                 let Leaf { parent, .. } = self.get_leaf(*focus);
                 parent
@@ -438,7 +440,7 @@ impl Nodes {
                     }
                 }
                 Direction::Horizontal=>{
-                    if let Some(min) = c.calc_min_width(parent_rect){
+                    if let Some(min) = c.calc_min_height(parent_rect){
                         rect.h = min;
                         space_left = space_left.saturating_sub(min);
                     }
@@ -456,8 +458,16 @@ impl Nodes {
                 let c = get_constraints(*nidx, self);
                 match direction{
                     Direction::Vertical=>{
-                        rect.h = parent_rect.h;
+                        if let Some(max) = c.calc_max_height(parent_rect){
+                            rect.h = max;
+                        }else{
+                            rect.h = parent_rect.h;
+                        }
                         if let Some(max) = c.calc_max_width(parent_rect){
+                            if rect.w >= max{
+                                active.remove(active_idx);
+                                break;
+                            }
                             let add = space_per.min(max.saturating_sub(rect.w));
                             rect.w += add;
                             space_left = space_left.saturating_sub(add);
@@ -471,8 +481,16 @@ impl Nodes {
                         }
                     }
                     Direction::Horizontal=>{
-                        rect.w = parent_rect.w;
+                        if let Some(max) = c.calc_max_width(parent_rect){
+                            rect.w = max;
+                        }else{
+                            rect.w = parent_rect.w;
+                        }
                         if let Some(max) = c.calc_max_height(parent_rect){
+                            if rect.h >= max{
+                                active.remove(active_idx);
+                                break
+                            }
                             let add = space_per.min(max.saturating_sub(rect.h));
                             rect.h += add;
                             space_left = space_left.saturating_sub(add);
@@ -493,29 +511,42 @@ impl Nodes {
         for (nidx, rect) in &mut resize{
             match direction{
                 Direction::Horizontal=>{
-                    if let Some(anchor) = get_anchors(*nidx, self).calc_x(parent_rect){
-                        rect.x = anchor+parent_rect.x;
+                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_x(parent_rect){
+                        if anchor+rect.w > (parent_rect.x+parent_rect.w){
+                            anchor = parent_rect.x+parent_rect.w-rect.w
+                        }
+                        rect.x = anchor;
                     }else{
-                        rect.x = x+parent_rect.x;
+                        rect.x = x;
                     }
-                    if let Some(anchor) = get_anchors(*nidx, self).calc_y(parent_rect){
-                        rect.y = anchor+parent_rect.y;
+                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_y(parent_rect){
+                        if anchor+rect.h > parent_rect.y+parent_rect.h{
+                            anchor = parent_rect.y+parent_rect.y-rect.h;
+                        }
+                        rect.y = anchor;
                     }else{
-                        rect.y = y+parent_rect.y;
+                        rect.y = y;
                         y += rect.h;
                     }
                 }
                 Direction::Vertical=>{
-                    if let Some(anchor) = get_anchors(*nidx, self).calc_y(parent_rect){
-                        rect.x = anchor+parent_rect.x;
+                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_x(parent_rect){
+                        if anchor+rect.w > (parent_rect.x+parent_rect.w){
+                            anchor = parent_rect.x+parent_rect.w-rect.w
+                        }
+                        rect.x = anchor;
                     }else{
-                        rect.x = x+parent_rect.x;
+                        rect.x = x;
                         x += rect.w;
                     }
-                    if let Some(anchor) = get_anchors(*nidx, self).calc_x(parent_rect){
-                        rect.y = anchor+parent_rect.y;
+                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_y(parent_rect){
+                        if (anchor+rect.h) > (parent_rect.y+parent_rect.h){
+                            log(&format!("rect.h+anchor:{}+{} parent.x, .h {}, {}",anchor,rect.h, parent_rect.x, parent_rect.h));
+                            anchor = (parent_rect.y+parent_rect.y).saturating_sub(rect.h);
+                        }
+                        rect.y = anchor;
                     }else{
-                        rect.y = y+parent_rect.y;
+                        rect.y = y;
                     }
                 }
             }
@@ -673,7 +704,7 @@ impl Nodes {
     //     }
     // }
 
-    pub fn reflow(&mut self, focus: &mut LeafIdx, views: &mut Views, parent: SplitIdx) {
+    pub fn prune(&mut self, focus: &mut LeafIdx, views: &mut Views, parent: SplitIdx) {
         let mut to_remove: Option<(SplitIdx, usize, NodeIdx)> = None; //parent, child, node
         let mut curr = parent;
         loop {

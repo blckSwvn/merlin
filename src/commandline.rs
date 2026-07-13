@@ -891,7 +891,8 @@ pub mod cmd_line {
                     min_height: Some(vec![Dimension::AddAbsolute(7)]),
                     max_height: Some(vec![Dimension::AddAbsolute(7)]),
                 },
-                Anchors { x: None, y: Some(vec![Position::AddRelative(1),Position::SubAbsolute(1)])}
+                // Anchors { x: None, y: Some(vec![Position::AddAbsolute(100)])},
+                Anchors{x:None, y:Some(vec![Position::AddRelative(1), Position::SubAbsolute(8)])},
             );
         }
 

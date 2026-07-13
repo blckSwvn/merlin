@@ -1332,7 +1332,7 @@ fn main() -> io::Result<()> {
         min_width: None,
         max_width: None,
     },
-    Anchors{x:None, y:Some(vec![Position::AddRelative(1)])},
+    Anchors{x:None, y:Some(vec![Position::AddRelative(1), Position::SubAbsolute(1)])},
     );
     enable_raw_mode()?;
     execute!(stdout(), terminal::EnterAlternateScreen)?;
