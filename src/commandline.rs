@@ -291,7 +291,7 @@ mod auto_complete {
             cmd_line: &CmdLine,
             nodes: &Nodes,
         ) -> (u16, u16, SetCursorStyle) {
-            cmd_line.cursor(&nodes.get_leaf(CMDLINE).rect)
+            cmd_line.cursor(&nodes.get_leaf(CMDLINE).get_rect())
         }
         fn behaviour(
             &mut self,
@@ -405,7 +405,7 @@ mod auto_complete {
                         }
                     }
                     Action::NextCol=>{
-                        let r = nodes.get_leaf(*focus).rect;
+                        let r = nodes.get_leaf(*focus).get_rect();
                         if let Some(s) = ac.selected {
                             ac.selected =
                                 Some(usize::min(s + r.h as usize-1, ac.filtered_display.len().saturating_sub(1)));
@@ -417,7 +417,7 @@ mod auto_complete {
                         }
                     }
                     Action::PrevCol=>{
-                        let r = nodes.get_leaf(*focus).rect;
+                        let r = nodes.get_leaf(*focus).get_rect();
                         if let Some(s) = ac.selected {
                             ac.selected =
                                 Some(usize::min(s.saturating_sub(r.h as usize-1), ac.filtered.len().saturating_sub(1)));
@@ -507,7 +507,7 @@ pub mod cmd_line {
                 views.get(cmd_line.last_view.1).buf,
                 cmd_line.last_view.1,
                 cmd_line.last_view.0,
-                l.parent,
+                *l.get_parent(),
             )
         };
         match cmd.cmd {
@@ -627,12 +627,7 @@ pub mod cmd_line {
                 let mut curr = NodeIdx::Split(nodes.get_root(ROOT_TEXT_VIEW));
                 let lidx = loop {
                     match curr {
-                        NodeIdx::Split(s) => {
-                            let Split {
-                                children, focus: f, ..
-                            } = nodes.get_split(s);
-                            curr = *children.get(*f).unwrap();
-                        }
+                        NodeIdx::Split(s)=>curr = nodes.get_split(s).get_focused(),
                         NodeIdx::Leaf(l) => break l,
                     }
                 };
@@ -681,7 +676,7 @@ pub mod cmd_line {
                     let col = buffer.last_cursor - line_start;
                     view.cursor = buffer.last_cursor;
                     view.prefered_x = col;
-                    view.scroll(&nodes.get_leaf(lidx).rect, buffer);
+                    view.scroll(&nodes.get_leaf(lidx).get_rect(), buffer);
                     enter_view(focus, lidx, cmd_line);
                 } else {
                     return Err(EditorErr::InvalidBuffer);
@@ -726,51 +721,26 @@ pub mod cmd_line {
                 enter_view(focus, lidx, cmd_line);
             }
             Cmd::SplitV => {
-                if let Some(idx) = nodes
-                    .get_split(parent)
-                    .children
-                    .iter()
-                    .position(|x| *x == NodeIdx::Leaf(lidx))
-                {
-                    let (l, new_parent) = {
-                        let comp: Box<dyn Component> = Box::new(vidx);
-                        nodes.new_split(comp, parent, Direction::Vertical, Constraints::new(), Anchors::new())
-                    };
-                    enter_view(focus, l, cmd_line);
-                    let vidx = views.push(View::new(SCRATCH));
-                    let comp: Box<dyn Component> = Box::new(vidx);
-                    let l = nodes.new_leaf(comp, new_parent, Constraints::new(), Anchors::new());
-                    nodes.get_mut_split(new_parent).focus = 1;
-                    nodes.get_mut_split(parent).children.swap_remove(idx);
-                    enter_view(focus, l, cmd_line);
-                    nodes.recalc(parent);
-                }
+                let replacment_comp: Box<dyn Component> = Box::new(vidx);
+                let vidx = views.push(View::new(SCRATCH));
+                let new_comp: Box<dyn Component> = Box::new(vidx);
+                let (_, lidx, _) = nodes.split_leaf(lidx, replacment_comp, new_comp, Direction::Vertical);
+                enter_view(focus, lidx, cmd_line);
             }
-            Cmd::SplitH => {
-                if let Some(idx) = nodes
-                    .get_split(parent)
-                    .children
-                    .iter()
-                    .position(|x| *x == NodeIdx::Leaf(lidx))
-                {
-                    let comp: Box<dyn Component> = Box::new(vidx);
-                    let (l, new_parent) =
-                        nodes.new_split(comp, parent, Direction::Horizontal, Constraints::new(), Anchors::new());
-                    let vidx = views.push(View::new(SCRATCH));
-                    let comp: Box<dyn Component> = Box::new(vidx);
-                    let l = nodes.new_leaf(comp, new_parent, Constraints::new(), Anchors::new());
-                    nodes.get_mut_split(new_parent).focus = 1;
-                    nodes.get_mut_split(parent).children.swap_remove(idx);
-                    enter_view(focus, l, cmd_line);
-                    nodes.recalc(parent);
-                }
+            Cmd::SplitH=>{
+                let replacment_comp: Box<dyn Component> = Box::new(vidx);
+                let vidx = views.push(View::new(SCRATCH));
+                let new_comp: Box<dyn Component> = Box::new(vidx);
+                let (_, lidx, _) = nodes.split_leaf(lidx, replacment_comp, new_comp, Direction::Horizontal);
+                enter_view(focus, lidx, cmd_line);
             }
             Cmd::Split => {
                 let vidx = views.push(View::new(SCRATCH));
                 let comp: Box<dyn Component> = Box::new(vidx);
-                let lidx = nodes.new_leaf(comp, parent, Constraints::new(), Anchors::new());
-                nodes.get_mut_split(parent).focus = nodes.get_mut_split(parent).children.len().saturating_sub(1);
+                nodes.new_leaf(comp, parent, Constraints::new(), Anchors::new());
                 enter_view(focus, lidx, cmd_line);
+                // nodes.get_mut_split(parent).focus = nodes.get_mut_split(parent).children.len().saturating_sub(1);
+                // enter_view(focus, lidx, cmd_line);
             }
         }
         Ok(())
@@ -1222,7 +1192,7 @@ pub mod cmd_line {
                         views.get(cmd_line.last_view.1).buf,
                         cmd_line.last_view.1,
                         cmd_line.last_view.0,
-                        l.parent,
+                        *l.get_parent(),
                     )
                 };
                 match action {

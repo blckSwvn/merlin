@@ -2,7 +2,6 @@ use crossterm::{style::{Color, Print, ResetColor, SetBackgroundColor, SetForegro
     queue,
     cursor::MoveTo,
 };
-use ropey::iter::Chars;
 
 use std::io;
 use std::io::stdout;
@@ -171,11 +170,20 @@ pub struct Rect {
 pub struct LeafIdx(pub usize);
 
 pub struct Leaf {
-    pub parent: SplitIdx,
-    pub rect: Rect,
+    parent: SplitIdx,
+    rect: Rect,
     constraints:Constraints,
     anchors:Anchors,
     pub comp: Box<dyn Component>,
+}
+impl Leaf{
+    //only imutable getters no setters other stuff shouldnt be able to mutate directly
+    pub fn get_parent(&self)->&SplitIdx{
+        &self.parent
+    }
+    pub fn get_rect(&self)->&Rect{
+        &self.rect
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -188,13 +196,18 @@ pub enum NodeIdx {
 pub struct SplitIdx(pub usize);
 
 pub struct Split {
-    pub parent: Option<SplitIdx>,
-    pub children: Vec<NodeIdx>,
-    pub direction: Direction,
-    pub focus: usize,
-    pub rect: Rect,
+    parent: Option<SplitIdx>,
+    children: Vec<NodeIdx>,
+    direction: Direction,
+    focus: usize,
+    rect: Rect,
     constraints:Constraints,
     anchors:Anchors,
+}
+impl Split{
+    pub fn get_focused(&self)->NodeIdx{
+        self.children[self.focus]
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -329,7 +342,9 @@ impl Nodes {
             constraints,
             anchors,
         });
+        // let idx = self.splits[parent.0].children.len();
         self.splits[parent.0].children.push(NodeIdx::Leaf(lidx));
+        // self.splits[parent.0].focus = self.splits[parent.0].children.len().saturating_sub(1);
         self.recalc(parent);
         lidx
     }
@@ -565,144 +580,6 @@ impl Nodes {
             }
         }
     }
-    // pub fn recalc(&mut self, sidx: SplitIdx) {
-    //     let curr = sidx;
-    //     let (children, direction, rect) = {
-    //         let s = self.get_split(curr);
-    //         (s.children, s.direction, s.rect)
-    //     };
-    //     if children.is_empty() {
-    //         return;
-    //     }
-    //     let resize: Vec<(u16, NodeIdx)> = {
-    //         let (mut size_left, mut remainder) = {
-    //             match direction {
-    //                 Direction::Vertical => (rect.w, rect.w% children.len() as u16),
-    //                 Direction::Horizontal => (rect.h, rect.h% children.len() as u16),
-    //             }
-    //         };
-    //         let mut resize: Vec<(u16, NodeIdx)> = vec![]; //main axis either width or height
-    //         for n in children.iter() {
-    //             let mut min = 0;
-    //             let (r, c) = match n {
-    //                 NodeIdx::Leaf(l) => {
-    //                     let l = self.get_leaf(*l);
-    //                     (l.rect, l.constraints)
-    //                 }
-    //                 NodeIdx::Split(s) => {
-    //                     self.recalc(*s);
-    //                     (self.get_mut_split(*s).rect, self.get_mut_split(*s).constraints)
-    //                 }
-    //             };
-    //             match direction {
-    //                 Direction::Horizontal => {
-    //                     let m = c.calc_min_height(rect);
-    //                     if let Some(m) = m {
-    //                         min = m;
-    //                         size_left -= m;
-    //                     }
-    //                 }
-    //                 Direction::Vertical => {
-    //                     let m = c.calc_min_width(rect);
-    //                     if let Some(m) = m {
-    //                         min = m;
-    //                         size_left -= m;
-    //                     }
-    //                 }
-    //             }
-    //             resize.push((min, *n));
-    //         }
-    //
-    //         let mut non_maxed: Vec<usize> = (0..resize.len()).collect();
-    //         while !non_maxed.is_empty() && size_left != 0 {
-    //             let width_per_child = size_left / non_maxed.len() as u16;
-    //             size_left = 0;
-    //             let mut i = 0;
-    //             while i < non_maxed.len() {
-    //                 let idx = non_maxed[i];
-    //                 let (s, n) = &mut resize[idx];
-    //                 let max = {
-    //                     let (r, c) = match n {
-    //                         NodeIdx::Leaf(l) => (self.get_leaf(*l).rect, self.get_leaf(*l).constraints),
-    //                         NodeIdx::Split(s) => (self.get_split(*s).rect, self.get_split(*s).constraints),
-    //                     };
-    //                     match direction {
-    //                         Direction::Vertical => {
-    //                             c.calc_max_width(rect)
-    //                         }
-    //                         Direction::Horizontal => {
-    //                             c.calc_max_height(rect)
-    //                         }
-    //                     }
-    //                 };
-    //                 *s += width_per_child;
-    //                 if remainder > 0 {
-    //                     *s += 1;
-    //                     remainder -= 1;
-    //                 }
-    //                 if *s >= max {
-    //                     size_left += s.saturating_sub(max);
-    //                     *s = max;
-    //                     non_maxed.swap_remove(i);
-    //                     continue;
-    //                 }
-    //                 i += 1;
-    //             }
-    //         }
-    //         resize
-    //     };
-    //     let (mut x, mut y) = (rect.x, rect.y);
-    //     let direction = direction.clone();
-    //     let rect = rect.clone();
-    //     for (len, n) in resize {
-    //         let (r, c, a, p_width, p_height) = &mut match n {
-    //             NodeIdx::Leaf(l) => {
-    //                 let curr = self.get_leaf(l);
-    //                 let p = curr.parent;
-    //                 let p_width = self.get_split(p).rect.w;
-    //                 let p_height = self.get_split(p).rect.h;
-    //                 let l = self.get_mut_leaf(l);
-    //                 (&mut l.rect, l.constraints, l.anchors, p_width, p_height)
-    //             }
-    //             NodeIdx::Split(s) => {
-    //                 let curr = self.get_split(s);
-    //                 let p = curr.parent.unwrap();
-    //                 let p_width = self.get_split(p).rect.w;
-    //                 let p_height = self.get_split(p).rect.h;
-    //                 let s = self.get_mut_split(s);
-    //                 (&mut s.rect, s.constraints, s.anchors, p_width, p_height)
-    //             }
-    //         };
-    //
-    //         r.x = x;
-    //         r.y = y;
-    //         match direction {
-    //             Direction::Vertical => {
-    //                 r.w = len;
-    //                 x += r.w;
-    //                 r.h = c.calc_max_height(rect).unwrap_or(rect.h);
-    //             }
-    //             Direction::Horizontal => {
-    //                 r.h = len;
-    //                 y += r.h;
-    //                 r.w = c.calc_max_width(rect).unwrap_or(rect.w);
-    //             }
-    //         }
-    //         if let Some(x) = a.x {
-    //             r.x = a.calc_x(rect).unwrap();
-    //         }
-    //
-    //         if let Some(y) = a.y {
-    //             r.y = a.calc_y(rect).unwrap();
-    //         }
-    //         match n {
-    //             NodeIdx::Split(s) => {
-    //                 self.recalc(s);
-    //             }
-    //             _ => {}
-    //         }
-    //     }
-    // }
 
     pub fn prune(&mut self, focus: &mut LeafIdx, views: &mut Views, parent: SplitIdx) {
         let mut to_remove: Option<(SplitIdx, usize, NodeIdx)> = None; //parent, child, node
@@ -739,7 +616,7 @@ impl Nodes {
             }
         }
 
-        //root cannot be empty
+        //text root cannot be empty
         let Split {
             children, focus: f, ..
         } = &mut self.splits[self.roots[ROOT_TEXT_VIEW].0];
@@ -764,6 +641,19 @@ impl Nodes {
             }
         };
         *focus = curr
+    }
+    
+    pub fn split_leaf(&mut self, to_split:LeafIdx, replacment_comp: Box<dyn Component>, new_comp: Box<dyn Component>, direction: Direction)->(SplitIdx, LeafIdx, LeafIdx){
+        let parent = self.get_leaf(to_split).parent;
+        let idx = self.get_split(parent).children.iter().position(|x| *x == NodeIdx::Leaf(to_split)).unwrap();
+            let (replacment_leaf, new_parent) = {
+                self.new_split(replacment_comp, parent, direction, Constraints::new(), Anchors::new())
+            };
+            let l = self.new_leaf(new_comp, new_parent, Constraints::new(), Anchors::new());
+            // self.get_mut_split(new_parent).focus = 0;
+            self.get_mut_split(parent).children.swap_remove(idx);
+            self.recalc(parent);
+            (new_parent, replacment_leaf, l)
     }
 
     pub fn paint(
@@ -1106,7 +996,7 @@ pub mod screen {
                         let idx = (y * self.width + x) as usize;
                         let old = prev.cells[idx];
                         let new = self.cells[idx];
-                        //stop if unchganged
+                        //stop if unchanged
                         if new == old {
                             break;
                         }
@@ -1129,12 +1019,9 @@ pub mod screen {
                     queue!(out, Print(line))?;
                 }
             }
-
             queue!(out, ResetColor)?;
-
             std::mem::swap(self, prev);
             self.clear_buffer();
-
             Ok(())
         }
     }

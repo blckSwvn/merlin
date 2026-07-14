@@ -765,12 +765,7 @@ impl Component for ViewIdx {
                 let mut curr = NodeIdx::Split(SplitIdx(0));
                 let lidx = loop {
                     match curr {
-                        NodeIdx::Split(s) => {
-                            let Split {
-                                children, focus: f, ..
-                            } = nodes.get_split(s);
-                            curr = children[*f];
-                        }
+                        NodeIdx::Split(s)=>curr = nodes.get_split(s).get_focused(),
                         NodeIdx::Leaf(l) => break l,
                     }
                 };
@@ -803,7 +798,7 @@ impl Component for ViewIdx {
                         }
                     }
                     let buffer = buffers.get_mut(bidx);
-                    View::scroll(view, &nodes.get_leaf(lidx).rect, buffer);
+                    View::scroll(view, &nodes.get_leaf(lidx).get_rect(), buffer);
                 }
                 Cmd::MoveSelectionDown => {
                     let view = views.get_mut(vidx);
@@ -824,7 +819,7 @@ impl Component for ViewIdx {
                             view.selection.as_mut().unwrap().0 =
                                 usize::min(view.cursor, buffer.buf.len_chars());
                         }
-                        View::scroll(view, &nodes.get_leaf(lidx).rect, buffers.get_mut(bidx));
+                        View::scroll(view, &nodes.get_leaf(lidx).get_rect(), buffers.get_mut(bidx));
                     }
                 }
                 Cmd::MoveSelectionRight => {
@@ -959,7 +954,7 @@ impl Component for ViewIdx {
                         view.selection = None;
                     }
                     let buffer = buffers.get_mut(bidx);
-                    View::scroll(view, &nodes.get_leaf(lidx).rect, buffer);
+                    View::scroll(view, &nodes.get_leaf(lidx).get_rect(), buffer);
                 }
                 Cmd::MoveDown => {
                     let view = views.get_mut(vidx);
@@ -973,7 +968,7 @@ impl Component for ViewIdx {
                         let col = view.prefered_x.min(len.saturating_sub(1));
                         view.cursor = start + col;
                         view.selection = None;
-                        View::scroll(view, &nodes.get_leaf(lidx).rect, buffers.get_mut(bidx));
+                        View::scroll(view, &nodes.get_leaf(lidx).get_rect(), buffers.get_mut(bidx));
                     }
                 }
                 Cmd::MoveRight => {
@@ -1058,7 +1053,7 @@ impl Component for ViewIdx {
                         v.prefered_x = col;
                         let view = views.get_mut(vidx);
                         let buffer = buffers.get_mut(bidx);
-                        View::scroll(view, &nodes.get_leaf(lidx).rect, buffer);
+                        View::scroll(view, &nodes.get_leaf(lidx).get_rect(), buffer);
                         return Ok(());
                     }
                     return Err(EditorErr::Msg("redo stack is empty".to_string()));
@@ -1155,7 +1150,7 @@ impl Component for ViewIdx {
                     let line = line.min(len_lines);
                     let line_start = buffer.buf.line_to_char(line);
                     v.cursor = line_start;
-                    View::scroll(v, &nodes.get_leaf(lidx).rect, buffer);
+                    View::scroll(v, &nodes.get_leaf(lidx).get_rect(), buffer);
                 }
                 Cmd::BackSpace => {
                     fn backspace(
@@ -1218,7 +1213,7 @@ impl Component for ViewIdx {
                                 v.cursor = prev_start + prev_len;
                             }
                             v.cursor = usize::min(v.cursor, buffer.buf.len_chars().saturating_sub(1));
-                            View::scroll(v, &nodes.get_leaf(lidx).rect, buffer);
+                            View::scroll(v, &nodes.get_leaf(lidx).get_rect(), buffer);
                         }
                     }
                     let v = views.get_mut(vidx);
@@ -1402,12 +1397,7 @@ fn main() -> io::Result<()> {
                             let mut curr = NodeIdx::Split(SplitIdx(0));
                             loop {
                                 match curr {
-                                    NodeIdx::Split(s) => {
-                                        let Split {
-                                            children, focus: f, ..
-                                        } = nodes.get_split(s);
-                                        curr = *children.get(*f).unwrap();
-                                    }
+                                    NodeIdx::Split(s) => curr = nodes.get_split(s).get_focused(),
                                     NodeIdx::Leaf(l) => break l,
                                 }
                             }
