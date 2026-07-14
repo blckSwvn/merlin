@@ -739,8 +739,6 @@ pub mod cmd_line {
                 let comp: Box<dyn Component> = Box::new(vidx);
                 nodes.new_leaf(comp, parent, Constraints::new(), Anchors::new());
                 enter_view(focus, lidx, cmd_line);
-                // nodes.get_mut_split(parent).focus = nodes.get_mut_split(parent).children.len().saturating_sub(1);
-                // enter_view(focus, lidx, cmd_line);
             }
         }
         Ok(())

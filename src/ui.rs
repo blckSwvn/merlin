@@ -521,8 +521,8 @@ impl Nodes {
                 }
             }
         }
-        let mut x = 0;
-        let mut y = 0;
+        let mut x = parent_rect.x;
+        let mut y = parent_rect.y;
         for (nidx, rect) in &mut resize{
             match direction{
                 Direction::Horizontal=>{
@@ -536,7 +536,7 @@ impl Nodes {
                     }
                     if let Some(mut anchor) = get_anchors(*nidx, self).calc_y(parent_rect){
                         if anchor+rect.h > parent_rect.y+parent_rect.h{
-                            anchor = parent_rect.y+parent_rect.y-rect.h;
+                            anchor = parent_rect.y+parent_rect.h-rect.h;
                         }
                         rect.y = anchor;
                     }else{
@@ -556,8 +556,7 @@ impl Nodes {
                     }
                     if let Some(mut anchor) = get_anchors(*nidx, self).calc_y(parent_rect){
                         if (anchor+rect.h) > (parent_rect.y+parent_rect.h){
-                            log(&format!("rect.h+anchor:{}+{} parent.x, .h {}, {}",anchor,rect.h, parent_rect.x, parent_rect.h));
-                            anchor = (parent_rect.y+parent_rect.y).saturating_sub(rect.h);
+                            anchor = (parent_rect.y+parent_rect.h)-rect.h
                         }
                         rect.y = anchor;
                     }else{
@@ -650,7 +649,6 @@ impl Nodes {
                 self.new_split(replacment_comp, parent, direction, Constraints::new(), Anchors::new())
             };
             let l = self.new_leaf(new_comp, new_parent, Constraints::new(), Anchors::new());
-            // self.get_mut_split(new_parent).focus = 0;
             self.get_mut_split(parent).children.swap_remove(idx);
             self.recalc(parent);
             (new_parent, replacment_leaf, l)
