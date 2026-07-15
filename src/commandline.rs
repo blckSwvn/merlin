@@ -228,7 +228,7 @@ mod auto_complete {
             _cwd: &PathBuf,
             _focus: &LeafIdx,
         ) {
-            let mut rect = rect.clone();
+            let mut rect = *rect;
             let blank = " ".repeat(rect.w as usize);
             for y in 0..rect.h{
                 screen.set_string_xy(rect.x, rect.y + y, &blank, FG, BG);

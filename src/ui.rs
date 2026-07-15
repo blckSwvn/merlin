@@ -411,18 +411,6 @@ impl Nodes {
         }
     }
 
-    pub fn recalc_including_root(&mut self, width: u16, height: u16) {
-        for ridx in &mut self.roots.clone() {
-            let r = self.get_mut_split(*ridx);
-            r.rect.w = width;
-            r.rect.h = height;
-            let parent = Rect{x:0, y:0, w:width, h:height};
-            r.rect.h = r.constraints.calc_max_height(parent).unwrap_or(height);
-            r.rect.w = r.constraints.calc_max_width(parent).unwrap_or(width);
-            // if r.children.is_empty(){return}
-            self.recalc(*ridx);
-        }
-    }
     pub fn recalc(&mut self, sidx: SplitIdx){
         fn get_constraints(nidx: NodeIdx, nodes: &Nodes)->&Constraints{
             match nidx{
@@ -437,8 +425,9 @@ impl Nodes {
             }
         }
         let (children, direction, parent_rect) = {
-            let s = self.get_split(sidx);
-            (s.children.clone(), s.direction, s.rect)
+            let s = self.get_mut_split(sidx);
+            //needs to return children after use
+            (std::mem::take(&mut s.children), s.direction, s.rect)
         };
         let mut space_left = match direction{
             Direction::Vertical => parent_rect.w,
@@ -572,12 +561,13 @@ impl Nodes {
             };
             *r = *rect;
         }
-        for c in children{
+        for c in &children{
             match c{
-                NodeIdx::Split(s)=>self.recalc(s),
+                NodeIdx::Split(s)=>self.recalc(*s),
                 _ => {},
             }
         }
+        self.get_mut_split(sidx).children = children;
     }
 
     pub fn prune(&mut self, focus: &mut LeafIdx, views: &mut Views, parent: SplitIdx) {
@@ -681,8 +671,7 @@ impl Nodes {
         new.print(old)?;
         let Leaf { comp, rect, .. } = self.get_leaf(*focus);
         let (x, y, c) = comp
-            .cursor_xy(rect, views, buffers, cmd_line, nodes)
-            .clone();
+            .cursor_xy(rect, views, buffers, cmd_line, nodes);
         queue!(stdout(), MoveTo(x, y), c)?;
         fn sketch(
             nodes: &Nodes,
@@ -730,7 +719,7 @@ impl Nodes {
                     NodeIdx::Leaf(l) => {
                         let Leaf { rect, .. } = &self.leaves[l.0];
                         if rect.x >= x {
-                            let c = c.clone();
+                            let c = *c;
                             let Split { focus, .. } = &mut self.splits[curr.0];
                             *focus = i;
                             break 'search c;
@@ -739,7 +728,7 @@ impl Nodes {
                     NodeIdx::Split(s) => {
                         let Split { rect, .. } = &self.splits[s.0];
                         if rect.x >= x {
-                            let c = c.clone();
+                            let c = *c;
                             let Split { focus, .. } = &mut self.splits[curr.0];
                             *focus = i;
                             break 'search c;
@@ -785,7 +774,7 @@ impl Nodes {
                     NodeIdx::Leaf(l) => {
                         let Leaf { rect, .. } = &self.leaves[l.0];
                         if rect.x + rect.w <= x {
-                            let c = c.clone();
+                            let c = *c;
                             let Split { focus, .. } = &mut self.splits[curr.0];
                             *focus = i;
                             break 'search c;
@@ -794,7 +783,7 @@ impl Nodes {
                     NodeIdx::Split(s) => {
                         let Split { rect, .. } = &self.splits[s.0];
                         if rect.x + rect.w <= x {
-                            let c = c.clone();
+                            let c = *c;
                             let Split { focus, .. } = &mut self.splits[curr.0];
                             *focus = i;
                             break 'search c;
@@ -840,7 +829,7 @@ impl Nodes {
                     NodeIdx::Leaf(l) => {
                         let Leaf { rect, .. } = &self.leaves[l.0];
                         if rect.y + rect.h <= y {
-                            let c = c.clone();
+                            let c = *c;
                             let Split { focus, .. } = &mut self.splits[curr.0];
                             *focus = i;
                             break 'search c;
@@ -849,7 +838,7 @@ impl Nodes {
                     NodeIdx::Split(s) => {
                         let Split { rect, .. } = &self.splits[s.0];
                         if rect.y + rect.h <= y {
-                            let c = c.clone();
+                            let c = *c;
                             let Split { focus, .. } = &mut self.splits[curr.0];
                             *focus = i;
                             break 'search c;
@@ -895,7 +884,7 @@ impl Nodes {
                     NodeIdx::Leaf(l) => {
                         let Leaf { rect, .. } = &self.leaves[l.0];
                         if rect.y >= y {
-                            let c = c.clone();
+                            let c = *c;
                             let Split { focus, .. } = &mut self.splits[curr.0];
                             *focus = i;
                             break 'search c;
@@ -904,7 +893,7 @@ impl Nodes {
                     NodeIdx::Split(s) => {
                         let Split { rect, .. } = &self.splits[s.0];
                         if rect.y >= y {
-                            let c = c.clone();
+                            let c = *c;
                             let Split { focus, .. } = &mut self.splits[curr.0];
                             *focus = i;
                             break 'search c;
@@ -951,6 +940,16 @@ pub mod screen {
         pub height: u16,
     }
     impl ScreenBuffer {
+        pub fn new(width: u16, height: u16)->Self{
+            Self { cells: vec![
+                Cell{
+                    c:' ',
+                    fg:FG,
+                    bg:BG,
+                };
+                (width * height) as usize
+            ], width, height, }
+        }
         pub fn set_cell_xy(&mut self, x: u16, y: u16, cell: Cell) {
             let idx = y * self.width + x;
             self.cells[idx as usize] = cell;
@@ -1021,6 +1020,41 @@ pub mod screen {
             std::mem::swap(self, prev);
             self.clear_buffer();
             Ok(())
+        }
+        pub fn resize(&mut self, old: &mut ScreenBuffer, new_width: u16, new_height: u16, nodes: &mut Nodes){
+            *self = ScreenBuffer{
+                width:new_width,
+                height:new_height,
+                cells: vec![
+                    Cell{
+                        c:' ',
+                          fg:FG,
+                          bg:BG,
+                    };
+                (new_width * new_height) as usize
+                ],
+            };
+            *old = ScreenBuffer{
+                width:new_width,
+                height:new_height,
+                cells: vec![
+                    Cell{
+                        c:'_',
+                          fg:FG,
+                          bg:BG,
+                    };
+                (new_width * new_height) as usize
+                ],
+            };
+            let temp = Rect{x:0,y:0,w:new_width,h:new_height};
+            let roots = std::mem::take(&mut nodes.roots);
+            for ridx in &roots{
+                let r = nodes.get_mut_split(*ridx);
+                r.rect.w = r.constraints.calc_max_width(temp).unwrap_or(new_width);
+                r.rect.h = r.constraints.calc_max_width(temp).unwrap_or(new_height);
+                nodes.recalc(*ridx);
+            }
+            nodes.roots = roots;
         }
     }
 }

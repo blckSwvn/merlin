@@ -1,5 +1,5 @@
 use crossterm::{
-    cursor::{self, SetCursorStyle},
+    cursor::{self, Hide, SetCursorStyle},
     event::{Event, KeyCode, KeyEvent, KeyModifiers, read},
     execute, queue,
     terminal::{self, disable_raw_mode, enable_raw_mode},
@@ -28,7 +28,6 @@ use ui::{
     screen::{ScreenBuffer, Cell},
     Nodes,
     LeafIdx,
-    Split,
     SplitIdx,
     Rect,
     Position,
@@ -1333,33 +1332,13 @@ fn main() -> io::Result<()> {
     execute!(stdout(), terminal::EnterAlternateScreen)?;
 
     //inital draw
-    let mut old = ScreenBuffer {
-        width,
-        height,
-        cells: vec![
-            Cell {
-                c: '_',
-                fg: FG,
-                bg: BG,
-            };
-            (width * height) as usize
-        ], //some placeholder to ensure every cell is overwritten
-    };
-    let mut new = ScreenBuffer {
-        width,
-        height,
-        cells: vec![
-            Cell {
-                c: ' ',
-                fg: FG,
-                bg: BG,
-            };
-            (width * height) as usize
-        ],
-    };
-
+    let mut old = ScreenBuffer::new(width, height);
+    let mut new = ScreenBuffer::new(width, height);
     nodes.paint(
-        &focus, &cmd_line, &views, &buffers, &mut old, &mut new, &nodes, &cwd
+        &focus, &cmd_line,
+        &views, &buffers,
+        &mut old, &mut new,
+        &nodes, &cwd
     )?;
     stdout().flush().unwrap();
 
@@ -1414,33 +1393,8 @@ fn main() -> io::Result<()> {
                 queue!(stdout(), cursor::Show)?;
                 stdout().flush()?;
             }
-            Event::Resize(width, height) => {
-                old = ScreenBuffer {
-                    width,
-                    height,
-                    cells: vec![
-                        Cell {
-                            c: '_',
-                            fg: FG,
-                            bg: BG,
-                        };
-                        (width * height) as usize
-                    ],
-                    //some placeholder to ensure all cells are overwritten
-                };
-                new = ScreenBuffer {
-                    width,
-                    height,
-                    cells: vec![
-                        Cell {
-                            c: ' ',
-                            fg: FG,
-                            bg: BG,
-                        };
-                        (width * height) as usize
-                    ],
-                };
-                nodes.recalc_including_root(width, height);
+            Event::Resize(new_width, new_height) => {
+                new.resize(&mut old, new_width, new_height, &mut nodes);
                 queue!(stdout(), cursor::Hide)?;
                 nodes.paint(
                     &focus, &cmd_line, &views, &buffers, &mut old, &mut new, &nodes, &cwd
