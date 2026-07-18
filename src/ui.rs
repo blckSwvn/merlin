@@ -1,14 +1,16 @@
-use crossterm::{style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
-    queue,
+use crossterm::{
     cursor::MoveTo,
+    queue,
+    style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
 };
 
+use super::{
+    Buffers, Component, ROOT_CMD_LINE, ROOT_OVERLAY, ROOT_TEXT_VIEW, SCRATCH, View, Views, log,
+};
+use crate::commandline::cmd_line::CmdLine;
 use std::io;
 use std::io::stdout;
 use std::path::PathBuf;
-use super::{log, Component, Views, View, SCRATCH, ROOT_TEXT_VIEW, ROOT_CMD_LINE, ROOT_OVERLAY, Buffers};
-use crate::commandline::cmd_line::CmdLine;
-
 pub const FG: Color = Color::White;
 pub const BG: Color = Color::Rgb { r: 0, g: 0, b: 0 };
 pub const SELECTION: Color = Color::Rgb {
@@ -25,81 +27,81 @@ pub enum Dimension {
     SubRelative(u16),
 }
 
-pub struct Constraints{
-   pub min_height: Option<Vec<Dimension>>,
-   pub max_height: Option<Vec<Dimension>>,
-   pub min_width: Option<Vec<Dimension>>,
-   pub max_width: Option<Vec<Dimension>>,
+pub struct Constraints {
+    pub min_height: Option<Vec<Dimension>>,
+    pub max_height: Option<Vec<Dimension>>,
+    pub min_width: Option<Vec<Dimension>>,
+    pub max_width: Option<Vec<Dimension>>,
 }
 
 impl Constraints {
-    pub fn new()->Self{
-        Self{
+    pub fn new() -> Self {
+        Self {
             min_height: None,
             max_height: None,
             min_width: None,
             max_width: None,
         }
     }
-    fn calc_min_width(&self, parent:Rect)->Option<u16>{
-        let Some(min) = self.min_width.as_ref() else{
-            return None
+    fn calc_min_width(&self, parent: Rect) -> Option<u16> {
+        let Some(min) = self.min_width.as_ref() else {
+            return None;
         };
         let mut res = 0;
-        for dim in min{
-            match *dim{
-                Dimension::AddAbsolute(a)=>res+=a,
-                Dimension::AddRelative(r)=>res += parent.w/r,
-                Dimension::SubAbsolute(a)=> res = res.saturating_sub(a),
-                Dimension::SubRelative(r)=> res = res.saturating_sub(parent.w/r),
+        for dim in min {
+            match *dim {
+                Dimension::AddAbsolute(a) => res += a,
+                Dimension::AddRelative(r) => res += parent.w / r,
+                Dimension::SubAbsolute(a) => res = res.saturating_sub(a),
+                Dimension::SubRelative(r) => res = res.saturating_sub(parent.w / r),
             }
         }
         res = res.min(parent.w);
         Some(res)
     }
-    fn calc_min_height(&self, parent:Rect)->Option<u16>{
-        let Some(min) = self.min_height.as_ref() else{
-            return None
+    fn calc_min_height(&self, parent: Rect) -> Option<u16> {
+        let Some(min) = self.min_height.as_ref() else {
+            return None;
         };
-        let mut res = 0; 
-        for dim in min{
-            match *dim{
-                Dimension::AddAbsolute(a)=>res+=a,
-                Dimension::AddRelative(r)=>res += parent.h/r,
-                Dimension::SubAbsolute(a)=> res = res.saturating_sub(a),
-                Dimension::SubRelative(r)=> res = res.saturating_sub(parent.h/r),
+        let mut res = 0;
+        for dim in min {
+            match *dim {
+                Dimension::AddAbsolute(a) => res += a,
+                Dimension::AddRelative(r) => res += parent.h / r,
+                Dimension::SubAbsolute(a) => res = res.saturating_sub(a),
+                Dimension::SubRelative(r) => res = res.saturating_sub(parent.h / r),
             }
         }
         res = res.min(parent.h);
         Some(res)
     }
-    fn calc_max_width(&self, parent:Rect)->Option<u16>{
-        let Some(min) = self.max_width.as_ref() else{
-            return None
+    fn calc_max_width(&self, parent: Rect) -> Option<u16> {
+        let Some(min) = self.max_width.as_ref() else {
+            return None;
         };
         let mut res = 0;
-        for dim in min{
-            match *dim{
-                Dimension::AddAbsolute(a)=>res+=a,
-                Dimension::AddRelative(r)=>res += parent.w/r,
-                Dimension::SubAbsolute(a)=> res = res.saturating_sub(a),
-                Dimension::SubRelative(r)=> res = res.saturating_sub(parent.w/r),
+        for dim in min {
+            match *dim {
+                Dimension::AddAbsolute(a) => res += a,
+                Dimension::AddRelative(r) => res += parent.w / r,
+                Dimension::SubAbsolute(a) => res = res.saturating_sub(a),
+                Dimension::SubRelative(r) => res = res.saturating_sub(parent.w / r),
             }
         }
         res = res.min(parent.w);
         Some(res)
     }
-    fn calc_max_height(&self, parent:Rect)->Option<u16>{
-        let Some(min) = self.max_height.as_ref() else{
-            return None
+    fn calc_max_height(&self, parent: Rect) -> Option<u16> {
+        let Some(min) = self.max_height.as_ref() else {
+            return None;
         };
         let mut res = 0;
-        for dim in min{
-            match *dim{
-                Dimension::AddAbsolute(a)=>res+=a,
-                Dimension::AddRelative(r)=>res += parent.h/r,
-                Dimension::SubAbsolute(a)=> res = res.saturating_sub(a),
-                Dimension::SubRelative(r)=> res = res.saturating_sub(parent.h/r),
+        for dim in min {
+            match *dim {
+                Dimension::AddAbsolute(a) => res += a,
+                Dimension::AddRelative(r) => res += parent.h / r,
+                Dimension::SubAbsolute(a) => res = res.saturating_sub(a),
+                Dimension::SubRelative(r) => res = res.saturating_sub(parent.h / r),
             }
         }
         res = res.min(parent.h);
@@ -108,49 +110,50 @@ impl Constraints {
 }
 
 #[derive(Clone, Copy)]
-pub enum Position{
+pub enum Position {
     AddAbsolute(u16),
     AddRelative(u16),
     SubAbsolute(u16),
     SubRelative(u16),
 }
 
-pub struct Anchors{//relative to parent! x=1 is x = parent.x+1
+pub struct Anchors {
+    //relative to parent! x=1 is x = parent.x+1
     pub x: Option<Vec<Position>>,
     pub y: Option<Vec<Position>>,
 }
 
-impl Anchors{
-    pub fn new()->Self{
-        Self{x: None, y: None}
+impl Anchors {
+    pub fn new() -> Self {
+        Self { x: None, y: None }
     }
-    fn calc_x(&self, parent:Rect)->Option<u16>{
-        let Some(x) = self.x.as_ref() else{
+    fn calc_x(&self, parent: Rect) -> Option<u16> {
+        let Some(x) = self.x.as_ref() else {
             return None;
         };
         let mut res = 0;
-        for pos in x{
-            match *pos{
-                Position::AddAbsolute(a)=>res +=  a,
-                Position::AddRelative(r)=>res += (parent.w+parent.x)/r,
-                Position::SubAbsolute(a)=>res = res.saturating_sub(a),
-                Position::SubRelative(r)=> res = res.saturating_sub((parent.w+parent.x)/r),
+        for pos in x {
+            match *pos {
+                Position::AddAbsolute(a) => res += a,
+                Position::AddRelative(r) => res += (parent.w + parent.x) / r,
+                Position::SubAbsolute(a) => res = res.saturating_sub(a),
+                Position::SubRelative(r) => res = res.saturating_sub((parent.w + parent.x) / r),
             }
         }
         let res = res.max(parent.x);
         Some(res)
     }
-    fn calc_y(&self, parent:Rect)->Option<u16>{
-        let Some(y) = self.y.as_ref() else{
+    fn calc_y(&self, parent: Rect) -> Option<u16> {
+        let Some(y) = self.y.as_ref() else {
             return None;
         };
         let mut res = 0;
-        for pos in y{
-            match *pos{
-                Position::AddAbsolute(a)=>res +=  a,
-                Position::AddRelative(r)=>res += (parent.h+parent.y)/r,
-                Position::SubAbsolute(a)=>res = res.saturating_sub(a),
-                Position::SubRelative(r)=> res = res.saturating_sub((parent.y+parent.h)/r),
+        for pos in y {
+            match *pos {
+                Position::AddAbsolute(a) => res += a,
+                Position::AddRelative(r) => res += (parent.h + parent.y) / r,
+                Position::SubAbsolute(a) => res = res.saturating_sub(a),
+                Position::SubRelative(r) => res = res.saturating_sub((parent.y + parent.h) / r),
             }
         }
         let res = res.max(parent.x);
@@ -172,16 +175,16 @@ pub struct LeafIdx(pub usize);
 pub struct Leaf {
     parent: SplitIdx,
     rect: Rect,
-    constraints:Constraints,
-    anchors:Anchors,
+    constraints: Constraints,
+    anchors: Anchors,
     pub comp: Box<dyn Component>,
 }
-impl Leaf{
+impl Leaf {
     //only imutable getters no setters other stuff shouldnt be able to mutate directly
-    pub fn get_parent(&self)->&SplitIdx{
+    pub fn get_parent(&self) -> &SplitIdx {
         &self.parent
     }
-    pub fn get_rect(&self)->&Rect{
+    pub fn get_rect(&self) -> &Rect {
         &self.rect
     }
 }
@@ -201,11 +204,11 @@ pub struct Split {
     direction: Direction,
     focus: usize,
     rect: Rect,
-    constraints:Constraints,
-    anchors:Anchors,
+    constraints: Constraints,
+    anchors: Anchors,
 }
-impl Split{
-    pub fn get_focused(&self)->NodeIdx{
+impl Split {
+    pub fn get_focused(&self) -> NodeIdx {
         self.children[self.focus]
     }
 }
@@ -273,13 +276,18 @@ impl Nodes {
 
     pub fn new_root(
         &mut self,
-        constraints:Constraints,
-        anchors:Anchors,
+        constraints: Constraints,
+        anchors: Anchors,
         width: u16,
         height: u16,
-        direction: Direction
+        direction: Direction,
     ) -> SplitIdx {
-        let parent = Rect{x:0, y:0,w:width,h:height};
+        let parent = Rect {
+            x: 0,
+            y: 0,
+            w: width,
+            h: height,
+        };
         let w = constraints.calc_max_width(parent).unwrap_or(width);
         let h = constraints.calc_max_height(parent).unwrap_or(height);
         let new_root = self.push_branch(Split {
@@ -287,7 +295,7 @@ impl Nodes {
             children: vec![],
             focus: 0,
             direction,
-            rect:Rect{x:0,y:0,w,h},
+            rect: Rect { x: 0, y: 0, w, h },
             constraints,
             anchors,
         });
@@ -313,8 +321,8 @@ impl Nodes {
                 h: 0,
                 w: 0,
             },
-                constraints,
-                anchors,
+            constraints,
+            anchors,
         });
         self.splits[parent.0]
             .children
@@ -330,7 +338,7 @@ impl Nodes {
         constraints: Constraints,
         anchors: Anchors,
     ) -> LeafIdx {
-        let lidx = self.push_leaf(Leaf{
+        let lidx = self.push_leaf(Leaf {
             parent,
             comp,
             rect: Rect {
@@ -411,17 +419,17 @@ impl Nodes {
         }
     }
 
-    pub fn recalc(&mut self, sidx: SplitIdx){
-        fn get_constraints(nidx: NodeIdx, nodes: &Nodes)->&Constraints{
-            match nidx{
-                NodeIdx::Leaf(l)=> &nodes.get_leaf(l).constraints,
-                NodeIdx::Split(s)=>&nodes.get_split(s).constraints,
+    pub fn recalc(&mut self, sidx: SplitIdx) {
+        fn get_constraints(nidx: NodeIdx, nodes: &Nodes) -> &Constraints {
+            match nidx {
+                NodeIdx::Leaf(l) => &nodes.get_leaf(l).constraints,
+                NodeIdx::Split(s) => &nodes.get_split(s).constraints,
             }
         }
-        fn get_anchors(nidx: NodeIdx, nodes: &Nodes)->&Anchors{
-            match nidx{
-                NodeIdx::Split(s)=>&nodes.get_split(s).anchors,
-                NodeIdx::Leaf(l)=>&nodes.get_leaf(l).anchors,
+        fn get_anchors(nidx: NodeIdx, nodes: &Nodes) -> &Anchors {
+            match nidx {
+                NodeIdx::Split(s) => &nodes.get_split(s).anchors,
+                NodeIdx::Leaf(l) => &nodes.get_leaf(l).anchors,
             }
         }
         let (children, direction, parent_rect) = {
@@ -429,22 +437,35 @@ impl Nodes {
             //needs to return children after use
             (std::mem::take(&mut s.children), s.direction, s.rect)
         };
-        let mut space_left = match direction{
+        let mut space_left = match direction {
             Direction::Vertical => parent_rect.w,
-            Direction::Horizontal=>parent_rect.h,
+            Direction::Horizontal => parent_rect.h,
         };
-        let mut resize: Vec<(NodeIdx, Rect)> = children.iter().map(|c| (*c, Rect{x:0, y:0, w:0, h:0})).collect();
-        for (nidx, rect) in &mut resize{
+        let mut resize: Vec<(NodeIdx, Rect)> = children
+            .iter()
+            .map(|c| {
+                (
+                    *c,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        w: 0,
+                        h: 0,
+                    },
+                )
+            })
+            .collect();
+        for (nidx, rect) in &mut resize {
             let c = get_constraints(*nidx, self);
-            match direction{
-                Direction::Vertical=>{
-                    if let Some(min) = c.calc_min_width(parent_rect){
+            match direction {
+                Direction::Vertical => {
+                    if let Some(min) = c.calc_min_width(parent_rect) {
                         rect.w = min;
                         space_left = space_left.saturating_sub(min);
                     }
                 }
-                Direction::Horizontal=>{
-                    if let Some(min) = c.calc_min_height(parent_rect){
+                Direction::Horizontal => {
+                    if let Some(min) = c.calc_min_height(parent_rect) {
                         rect.h = min;
                         space_left = space_left.saturating_sub(min);
                     }
@@ -452,57 +473,57 @@ impl Nodes {
             }
         }
         let mut active: Vec<usize> = (0..resize.len()).collect();
-        while space_left > 0 && !active.is_empty(){
-            let space_per = (space_left/active.len() as u16)as u16;
-            if space_per == 0{
+        while space_left > 0 && !active.is_empty() {
+            let space_per = (space_left / active.len() as u16) as u16;
+            if space_per == 0 {
                 break;
             }
-            for (active_idx, resize_idx) in active.iter().enumerate(){
+            for (active_idx, resize_idx) in active.iter().enumerate() {
                 let (nidx, rect) = &mut resize[*resize_idx];
                 let c = get_constraints(*nidx, self);
-                match direction{
-                    Direction::Vertical=>{
-                        if let Some(max) = c.calc_max_height(parent_rect){
+                match direction {
+                    Direction::Vertical => {
+                        if let Some(max) = c.calc_max_height(parent_rect) {
                             rect.h = max;
-                        }else{
+                        } else {
                             rect.h = parent_rect.h;
                         }
-                        if let Some(max) = c.calc_max_width(parent_rect){
-                            if rect.w >= max{
+                        if let Some(max) = c.calc_max_width(parent_rect) {
+                            if rect.w >= max {
                                 active.remove(active_idx);
                                 break;
                             }
                             let add = space_per.min(max.saturating_sub(rect.w));
                             rect.w += add;
                             space_left = space_left.saturating_sub(add);
-                            if rect.w >= max{
+                            if rect.w >= max {
                                 active.remove(active_idx);
                                 break;
                             }
-                        }else{
+                        } else {
                             rect.w += space_per;
                             space_left = space_left.saturating_sub(space_per);
                         }
                     }
-                    Direction::Horizontal=>{
-                        if let Some(max) = c.calc_max_width(parent_rect){
+                    Direction::Horizontal => {
+                        if let Some(max) = c.calc_max_width(parent_rect) {
                             rect.w = max;
-                        }else{
+                        } else {
                             rect.w = parent_rect.w;
                         }
-                        if let Some(max) = c.calc_max_height(parent_rect){
-                            if rect.h >= max{
+                        if let Some(max) = c.calc_max_height(parent_rect) {
+                            if rect.h >= max {
                                 active.remove(active_idx);
-                                break
+                                break;
                             }
                             let add = space_per.min(max.saturating_sub(rect.h));
                             rect.h += add;
                             space_left = space_left.saturating_sub(add);
-                            if rect.h >= max{
+                            if rect.h >= max {
                                 active.remove(active_idx);
-                                break
+                                break;
                             }
-                        }else{
+                        } else {
                             rect.h += space_per;
                             space_left = space_left.saturating_sub(space_per);
                         }
@@ -512,59 +533,59 @@ impl Nodes {
         }
         let mut x = parent_rect.x;
         let mut y = parent_rect.y;
-        for (nidx, rect) in &mut resize{
-            match direction{
-                Direction::Horizontal=>{
-                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_x(parent_rect){
-                        if anchor+rect.w > (parent_rect.x+parent_rect.w){
-                            anchor = parent_rect.x+parent_rect.w-rect.w
+        for (nidx, rect) in &mut resize {
+            match direction {
+                Direction::Horizontal => {
+                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_x(parent_rect) {
+                        if anchor + rect.w > (parent_rect.x + parent_rect.w) {
+                            anchor = parent_rect.x + parent_rect.w - rect.w
                         }
                         rect.x = anchor;
-                    }else{
+                    } else {
                         rect.x = x;
                     }
-                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_y(parent_rect){
-                        if anchor+rect.h > parent_rect.y+parent_rect.h{
-                            anchor = parent_rect.y+parent_rect.h-rect.h;
+                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_y(parent_rect) {
+                        if anchor + rect.h > parent_rect.y + parent_rect.h {
+                            anchor = parent_rect.y + parent_rect.h - rect.h;
                         }
                         rect.y = anchor;
-                    }else{
+                    } else {
                         rect.y = y;
                         y += rect.h;
                     }
                 }
-                Direction::Vertical=>{
-                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_x(parent_rect){
-                        if anchor+rect.w > (parent_rect.x+parent_rect.w){
-                            anchor = parent_rect.x+parent_rect.w-rect.w
+                Direction::Vertical => {
+                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_x(parent_rect) {
+                        if anchor + rect.w > (parent_rect.x + parent_rect.w) {
+                            anchor = parent_rect.x + parent_rect.w - rect.w
                         }
                         rect.x = anchor;
-                    }else{
+                    } else {
                         rect.x = x;
                         x += rect.w;
                     }
-                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_y(parent_rect){
-                        if (anchor+rect.h) > (parent_rect.y+parent_rect.h){
-                            anchor = (parent_rect.y+parent_rect.h)-rect.h
+                    if let Some(mut anchor) = get_anchors(*nidx, self).calc_y(parent_rect) {
+                        if (anchor + rect.h) > (parent_rect.y + parent_rect.h) {
+                            anchor = (parent_rect.y + parent_rect.h) - rect.h
                         }
                         rect.y = anchor;
-                    }else{
+                    } else {
                         rect.y = y;
                     }
                 }
             }
         }
-        for (nidx, rect) in &mut resize{
-            let r = match nidx{
-                NodeIdx::Split(s)=>&mut self.get_mut_split(*s).rect,
-                NodeIdx::Leaf(l)=> &mut self.get_mut_leaf(*l).rect,
+        for (nidx, rect) in &mut resize {
+            let r = match nidx {
+                NodeIdx::Split(s) => &mut self.get_mut_split(*s).rect,
+                NodeIdx::Leaf(l) => &mut self.get_mut_leaf(*l).rect,
             };
             *r = *rect;
         }
-        for c in &children{
-            match c{
-                NodeIdx::Split(s)=>self.recalc(*s),
-                _ => {},
+        for c in &children {
+            match c {
+                NodeIdx::Split(s) => self.recalc(*s),
+                _ => {}
             }
         }
         self.get_mut_split(sidx).children = children;
@@ -581,12 +602,12 @@ impl Nodes {
                 if let Some(p) = parent {
                     let Split { children, .. } = self.get_split(*p);
                     to_remove = Some((
-                            *p,
-                            children
+                        *p,
+                        children
                             .iter()
                             .position(|x| *x == NodeIdx::Split(curr))
                             .unwrap(),
-                            NodeIdx::Split(curr),
+                        NodeIdx::Split(curr),
                     ));
                     curr = *p
                 }
@@ -613,7 +634,12 @@ impl Nodes {
             let vidx = views.push(View::new(SCRATCH));
             let comp: Box<dyn Component> = Box::new(vidx);
             *f = 0;
-            self.new_leaf(comp, self.roots[ROOT_TEXT_VIEW], Constraints::new(), Anchors::new());
+            self.new_leaf(
+                comp,
+                self.roots[ROOT_TEXT_VIEW],
+                Constraints::new(),
+                Anchors::new(),
+            );
         }
 
         let mut curr = NodeIdx::Split(self.roots[ROOT_TEXT_VIEW]);
@@ -631,17 +657,34 @@ impl Nodes {
         };
         *focus = curr
     }
-    
-    pub fn split_leaf(&mut self, to_split:LeafIdx, replacment_comp: Box<dyn Component>, new_comp: Box<dyn Component>, direction: Direction)->(SplitIdx, LeafIdx, LeafIdx){
+
+    pub fn split_leaf(
+        &mut self,
+        to_split: LeafIdx,
+        replacment_comp: Box<dyn Component>,
+        new_comp: Box<dyn Component>,
+        direction: Direction,
+    ) -> (SplitIdx, LeafIdx, LeafIdx) {
         let parent = self.get_leaf(to_split).parent;
-        let idx = self.get_split(parent).children.iter().position(|x| *x == NodeIdx::Leaf(to_split)).unwrap();
-            let (replacment_leaf, new_parent) = {
-                self.new_split(replacment_comp, parent, direction, Constraints::new(), Anchors::new())
-            };
-            let l = self.new_leaf(new_comp, new_parent, Constraints::new(), Anchors::new());
-            self.get_mut_split(parent).children.swap_remove(idx);
-            self.recalc(parent);
-            (new_parent, replacment_leaf, l)
+        let idx = self
+            .get_split(parent)
+            .children
+            .iter()
+            .position(|x| *x == NodeIdx::Leaf(to_split))
+            .unwrap();
+        let (replacment_leaf, new_parent) = {
+            self.new_split(
+                replacment_comp,
+                parent,
+                direction,
+                Constraints::new(),
+                Anchors::new(),
+            )
+        };
+        let l = self.new_leaf(new_comp, new_parent, Constraints::new(), Anchors::new());
+        self.get_mut_split(parent).children.swap_remove(idx);
+        self.recalc(parent);
+        (new_parent, replacment_leaf, l)
     }
 
     pub fn paint(
@@ -670,8 +713,7 @@ impl Nodes {
         }
         new.print(old)?;
         let Leaf { comp, rect, .. } = self.get_leaf(*focus);
-        let (x, y, c) = comp
-            .cursor_xy(rect, views, buffers, cmd_line, nodes);
+        let (x, y, c) = comp.cursor_xy(rect, views, buffers, cmd_line, nodes);
         queue!(stdout(), MoveTo(x, y), c)?;
         fn sketch(
             nodes: &Nodes,
@@ -698,7 +740,8 @@ impl Nodes {
                 }
                 NodeIdx::Leaf(l) => {
                     let l = &nodes.leaves[l.0];
-                    l.comp.sketch(&l.rect, views, buffers, cmd_line, new, cwd, focus);
+                    l.comp
+                        .sketch(&l.rect, views, buffers, cmd_line, new, cwd, focus);
                 }
             }
         }
@@ -940,15 +983,19 @@ pub mod screen {
         pub height: u16,
     }
     impl ScreenBuffer {
-        pub fn new(width: u16, height: u16)->Self{
-            Self { cells: vec![
-                Cell{
-                    c:' ',
-                    fg:FG,
-                    bg:BG,
-                };
-                (width * height) as usize
-            ], width, height, }
+        pub fn new(width: u16, height: u16) -> Self {
+            Self {
+                cells: vec![
+                    Cell {
+                        c: ' ',
+                        fg: FG,
+                        bg: BG,
+                    };
+                    (width * height) as usize
+                ],
+                width,
+                height,
+            }
         }
         pub fn set_cell_xy(&mut self, x: u16, y: u16, cell: Cell) {
             let idx = y * self.width + x;
@@ -1021,34 +1068,45 @@ pub mod screen {
             self.clear_buffer();
             Ok(())
         }
-        pub fn resize(&mut self, old: &mut ScreenBuffer, new_width: u16, new_height: u16, nodes: &mut Nodes){
-            *self = ScreenBuffer{
-                width:new_width,
-                height:new_height,
+        pub fn resize(
+            &mut self,
+            old: &mut ScreenBuffer,
+            new_width: u16,
+            new_height: u16,
+            nodes: &mut Nodes,
+        ) {
+            *self = ScreenBuffer {
+                width: new_width,
+                height: new_height,
                 cells: vec![
-                    Cell{
-                        c:' ',
-                          fg:FG,
-                          bg:BG,
+                    Cell {
+                        c: ' ',
+                        fg: FG,
+                        bg: BG,
                     };
-                (new_width * new_height) as usize
+                    (new_width * new_height) as usize
                 ],
             };
-            *old = ScreenBuffer{
-                width:new_width,
-                height:new_height,
+            *old = ScreenBuffer {
+                width: new_width,
+                height: new_height,
                 cells: vec![
-                    Cell{
-                        c:'_',
-                          fg:FG,
-                          bg:BG,
+                    Cell {
+                        c: '_',
+                        fg: FG,
+                        bg: BG,
                     };
-                (new_width * new_height) as usize
+                    (new_width * new_height) as usize
                 ],
             };
-            let temp = Rect{x:0,y:0,w:new_width,h:new_height};
+            let temp = Rect {
+                x: 0,
+                y: 0,
+                w: new_width,
+                h: new_height,
+            };
             let roots = std::mem::take(&mut nodes.roots);
-            for ridx in &roots{
+            for ridx in &roots {
                 let r = nodes.get_mut_split(*ridx);
                 r.rect.w = r.constraints.calc_max_width(temp).unwrap_or(new_width);
                 r.rect.h = r.constraints.calc_max_width(temp).unwrap_or(new_height);
